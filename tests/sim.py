@@ -37,6 +37,7 @@ from yardsale.appraiser import Judge
 from yardsale.asione import ReadMessage
 from yardsale.avatars import ItemPictures
 from yardsale.chat import FetchPhoto
+from yardsale.ebay_seller import EbaySeller
 from yardsale.hosting import HostingClient
 from yardsale.identifier import Identify
 from yardsale.payments import PaymentProvider
@@ -99,6 +100,7 @@ async def running_market(
     host_limit: int = 0,
     round_timeout: float = 5.0,
     pictures: ItemPictures | None = None,
+    ebay: EbaySeller | None = None,
 ) -> AsyncIterator[Market]:
     """The Market and friends in offline mode, with the store's active listings restored."""
     _, market, services = bureau_server.build(
@@ -114,6 +116,7 @@ async def running_market(
         host_limit=host_limit,
         round_timeout=round_timeout,
         pictures=pictures,
+        ebay=ebay,
     )
     rt = bureau_server.runtime()
     start([market, *services, *rt.agents.values()])
