@@ -93,7 +93,7 @@ from uagents_core.contrib.protocols.chat.cards import (
     ListItem as CardListItem,
 )
 
-from yardsale import commands, craigslist_mail
+from yardsale import commands, craigslist_buyer, craigslist_mail
 from yardsale.asione import ReadMessage
 from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
@@ -1410,8 +1410,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     def my_orders(conv: Conversation) -> str:
         deals = store.deals(buyer=f"chat:{conv.key}")
+        by_email = craigslist_buyer.buyer_lines(store, conv.owner)
         if not deals:
-            return "You haven't bought anything yet."
+            return "\n".join(by_email) if by_email else "You haven't bought anything yet."
         lines = ["Your orders:"]
         for deal in deals:
             listing = store.get(deal.item_id)
@@ -1422,7 +1423,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 NOT_COLLECTED: "agreed, no payment taken",
             }.get(deal.payment_status, "lapsed")
             lines.append(f"- {title}: {usd(deal.price_cents)}, {status} ({deal.deal_id})")
-        return "\n".join(lines)
+        return "\n".join(lines + by_email)
 
     # --- Routing ---------------------------------------------------------------------------
 
@@ -1491,6 +1492,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         )
 
     async def handle_text(ctx: Context, conv: Conversation, text: str) -> str | Reply:
+        # A pasted Craigslist reply address: email that seller and haggle for this buyer.
+        negotiating = craigslist_buyer.command(text)
+        if negotiating is not None:
+            return craigslist_buyer.chat_reply(store, conv.owner, negotiating)
+        if craigslist_buyer.asks_for_negotiations(text):
+            return craigslist_buyer.negotiations_reply(store, conv.owner)
         posting = craigslist_mail.post_command(text)
         if posting is not None:
             answer = craigslist_mail.post_reply(store, conv.owner, posting)
