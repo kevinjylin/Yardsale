@@ -77,6 +77,9 @@ from yardsale.ebay import search_ebay
 from yardsale.ebay_seller import CHECK_EVERY as EBAY_CHECK_EVERY
 from yardsale.ebay_seller import EbaySeller
 from yardsale.ebay_seller import from_env as ebay_from_env
+from yardsale.elsewhere import DealFinder
+from yardsale.facebook import enabled as facebook_enabled
+from yardsale.facebook import search_facebook
 from yardsale.hosting import HostingClient, HostingError, claim_handle, host_item, hosted_limit
 from yardsale.identifier import Identify, build_identifier, identify_with_claude
 from yardsale.models import (
@@ -108,6 +111,7 @@ from yardsale.models import (
     ServiceError,
 )
 from yardsale.negotiation import answer_accept, answer_offer, buyer_key, gap_cents
+from yardsale.offerup import search_offerup
 from yardsale.offline import (
     LocalDirectoryResolver,
     NoBatchRegistration,
@@ -175,6 +179,8 @@ class Runtime:
     # Other sites a standing search looks on, by name. Empty means watches find nothing, which
     # is what tests and --fakes want: every poll is a paid scrape.
     sources: dict[str, Source] = field(default_factory=dict)
+    # Searches those sites once, for a buyer Yardsale has nothing for (chat and API).
+    finder: DealFinder = field(default_factory=lambda: DealFinder({}))
     boot_id: str = field(default_factory=lambda: uuid4().hex)
     started: bool = False  # the Bureau is running, so new agents start themselves
     agents: dict[str, Agent] = field(default_factory=dict)  # item_id -> its agent
@@ -833,6 +839,7 @@ class MarketBackend:
         self.offline = rt.offline
         self.boot_id = rt.boot_id
         self.ebay = rt.ebay
+        self.finder = rt.finder
 
     async def propose(self, ctx: Context, owner: str, photo: ListPhoto) -> Listing:
         async def log_progress(stage: str, text: str) -> None:
@@ -1017,6 +1024,7 @@ def build(
         pictures=pictures,
         ebay=ebay,
         sources=sources or {},
+        finder=DealFinder(sources or {}),
     )
     # On Agentverse in live mode, so ASI:One can reach it. Handles messages concurrently, so a
     # photo listing waiting on a service doesn't block other messages.
@@ -1112,6 +1120,19 @@ async def start_business_api(market: Agent) -> web.AppRunner | None:
     return runner
 
 
+def other_sites() -> dict[str, Source]:
+    """The sites a buyer's search and standing searches look on. Each search is a paid Apify
+    run per site; Facebook Marketplace, the dearest, only with YARDSALE_FACEBOOK=1."""
+    sources: dict[str, Source] = {
+        "ebay": search_ebay,
+        "craigslist": search_craigslist,
+        "offerup": search_offerup,
+    }
+    if facebook_enabled():
+        sources["facebook"] = search_facebook
+    return sources
+
+
 async def main(mode: str) -> None:
     offline = mode != "live"
     if offline:
@@ -1147,7 +1168,7 @@ async def main(mode: str) -> None:
         mail=mail,
         # Standing searches scrape other sites, which costs money per poll, so they're off in
         # demo mode. --offline still has them: it only skips Fetch's servers.
-        sources=None if mode == "demo" else {"craigslist": search_craigslist, "ebay": search_ebay},
+        sources=None if mode == "demo" else other_sites(),
     )
     if not offline:
         await connect_to_agentverse([market, *services])
