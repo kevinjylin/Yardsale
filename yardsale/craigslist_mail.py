@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import getaddresses, make_msgid
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from uagents import Context
 
@@ -62,6 +62,9 @@ from yardsale.common import PipelineError
 from yardsale.models import AcceptCounter, Counter, Deal, Offer, OfferRejected
 from yardsale.pricing import PriceError, parse_usd, usd, valid_cents
 from yardsale.store import ACTIVE, NOT_COLLECTED, PAID, PENDING, PROPOSED, SOLD, Listing, Store
+
+if TYPE_CHECKING:
+    from yardsale.craigslist_buyer import Step as BuyerStep
 
 POLL_EVERY = 10.0  # seconds between inbox checks
 MAX_TITLE = 70  # Craigslist's limit for a posting title
@@ -454,6 +457,14 @@ def relay_address(message: EmailMessage) -> str | None:
     return None
 
 
+def from_our_seller_agent(raw: bytes) -> bool:
+    """True for a relayed email our seller agent wrote (its signature is in the new text)."""
+    message = message_from_bytes(raw, policy=policy.default)
+    if not isinstance(message, EmailMessage) or relay_address(message) is None:
+        return False
+    return SIGNATURE.strip() in new_text(body_text(message))
+
+
 def _automatic(message: EmailMessage) -> bool:
     return str(message.get("Auto-Submitted", "no")).strip().lower() != "no"
 
@@ -754,7 +765,11 @@ class CraigslistMail:
         mailbox: Mailbox | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        from yardsale.craigslist_buyer import CraigslistBuyer  # it imports this module
+
         self.agent = CraigslistAgent(store, checkout, settings, negotiate)
+        # Yardsale's buyer agent, emailing other people's Craigslist posts from the same inbox.
+        self.buyer = CraigslistBuyer(store, settings)
         self.mailbox: Mailbox = mailbox or ImapSmtpMailbox(settings)
         self.clock = clock
         self._lock = asyncio.Lock()
@@ -784,6 +799,9 @@ class CraigslistMail:
                 await asyncio.to_thread(self.mailbox.close)
                 return 0
             sent = 0
+            for step in self.buyer.openings():
+                if await self._buyer_step(None, step):
+                    sent += 1
             for uid, raw in new:
                 if uid in self._skipped:
                     continue
@@ -792,6 +810,20 @@ class CraigslistMail:
             return sent
 
     async def _one(self, ctx: Context, uid: str, raw: bytes) -> bool:
+        # One dispatcher, so each email gets exactly one answer: a seller answering Yardsale's
+        # buyer agent goes to it; everything else is a buyer writing to one of our posts.
+        try:
+            step = self.buyer.handle(raw)
+        except Exception as ex:
+            log.warning(f"Couldn't read a Craigslist email ({type(ex).__name__})")
+            return False
+        if step is not None:
+            return await self._buyer_step(uid, step)
+        if from_our_seller_agent(raw):
+            # Our seller agent's own reply, relayed back, that no negotiation claims: answering
+            # it would have the seller agent haggle with itself.
+            await self._mark_seen(uid)
+            return False
         try:
             handled = await self.agent.handle(ctx, raw)
         except Exception as ex:
@@ -826,6 +858,22 @@ class CraigslistMail:
         self.agent.answered(answer)  # so it's never answered twice, even if it stays unread
         await self._mark_seen(uid)
         return True
+
+    async def _buyer_step(self, uid: str | None, step: BuyerStep) -> bool:
+        """Send the buyer agent's email, if any, then save its state and mark the seller's
+        email read. A failed send leaves both for the next check."""
+        if step.email is not None:
+            try:
+                await asyncio.to_thread(self.mailbox.send, step.email)
+            except Exception as ex:
+                log.warning(f"Couldn't send a Craigslist negotiation email ({type(ex).__name__})")
+                await asyncio.to_thread(self.mailbox.close)
+                return False
+        if step.kind != "answered":
+            self.buyer.done(step)
+        if uid is not None:
+            await self._mark_seen(uid)
+        return step.email is not None
 
     async def _mark_seen(self, uid: str) -> None:
         try:
