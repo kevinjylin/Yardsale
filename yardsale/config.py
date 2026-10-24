@@ -85,6 +85,7 @@ def readiness(mode: str) -> list[Check]:
     ]
     checks.append(_payments_check())
     checks.append(_business_api_check())
+    checks.append(_mail_check())
     checks.append(
         Check(
             "YARDSALE_ORDERS_WEBHOOK",
@@ -159,6 +160,28 @@ def _business_api_check() -> Check:
         "YARDSALE_API_KEY",
         True,
         f"@yardsale's HTTP API listens on 127.0.0.1:{port}; tunnel it to make it public",
+        False,
+    )
+
+
+def _mail_check() -> Check:
+    from yardsale.craigslist_mail import MailConfigError, settings_from_env
+
+    try:
+        mail = settings_from_env()
+    except MailConfigError as ex:
+        return Check("YARDSALE_MAIL_ADDRESS", False, str(ex), True)
+    if mail is None:
+        return Check(
+            "YARDSALE_MAIL_ADDRESS",
+            False,
+            "not set: nobody answers Craigslist buyers' emails",
+            False,
+        )
+    return Check(
+        "YARDSALE_MAIL_ADDRESS",
+        True,
+        f"item agents answer Craigslist buyers' emails through {mail.imap_host}",
         False,
     )
 
