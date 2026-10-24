@@ -4,9 +4,10 @@ A seller attaches a photo in ASI:One and can type anything else ("at least $40, 
 ASI:One's model reads the text (asione.py). The photo goes to the Identifier, Researcher, and
 Appraiser, and the reply says what the item is, its price, and its new item agent's address.
 
-ASI:One sends an upload as a web link, either in a ResourceContent or as a link in the text when
-its planner relays the message. The planner also repeats earlier links in later messages, so each
-conversation remembers which photos it has already handled.
+ASI:One sends an upload as a ResourceContent whose file sits in Agentverse storage, readable only
+by the agent it was sent to, or as a web link in the resource or in the text when its planner
+relays the message. The planner also repeats earlier links in later messages, so each conversation
+remembers which photos it has already handled and what happened to them.
 
 The planner stops waiting for a reply after about 60 seconds, and pricing can take longer (the
 eBay search alone can take a minute). So the Market always answers within REPLY_WITHIN seconds:
@@ -30,6 +31,7 @@ from uagents_core.contrib.protocols.chat import (
     ChatMessage,
     MetadataContent,
     ResourceContent,
+    StartSessionContent,
     TextContent,
     chat_protocol_spec,
 )
@@ -37,7 +39,7 @@ from uagents_core.contrib.protocols.chat import (
 from yardsale.asione import ReadMessage, SellerMessage
 from yardsale.common import PipelineError
 from yardsale.models import Appraisal, ItemDetails, ListPhoto
-from yardsale.photos import PhotoError, prepare_photo
+from yardsale.photos import PhotoError, download_from_storage, download_photo, prepare_photo
 
 REPLY_WITHIN = 40.0  # seconds; ASI:One's planner gives up on a reply after about 60
 
@@ -51,9 +53,17 @@ class Sold:
     floor_cents: int
 
 
+@dataclass(frozen=True)
+class Photo:
+    url: str  # a web link, or the resource URI (agent-storage://...) of a chat upload
+    mime_type: str
+    resource_id: str | None = None  # the Agentverse storage asset of a chat upload
+
+
 # Prices the photo and starts its item agent. Raises PipelineError with a message for the seller.
 Sell = Callable[[Context, ListPhoto], Awaitable[Sold]]
-FetchPhoto = Callable[[str], Awaitable[bytes]]
+# Returns the photo's bytes. Raises PhotoError with a message for the seller.
+FetchPhoto = Callable[[Context, Photo], Awaitable[bytes]]
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".gif"}
 _MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((https?://[^\s)]+)\)")
@@ -81,13 +91,14 @@ STILL_WORKING = (
     "Got your photo. I'm identifying it and checking recent eBay sales now, which can take a "
     "minute or two. I'll send the price and your item agent's address here when it's live."
 )
+ALREADY_WORKING = (
+    "I'm still pricing that photo. I'll send the price and your item agent's address here as "
+    "soon as it's live."
+)
+SKIPPED_PHOTO = (
+    "I take one photo per message, so I skipped that one. Attach it again on its own to list it."
+)
 SOMETHING_BROKE = "Sorry, something went wrong on my side. Please send that again."
-
-
-@dataclass(frozen=True)
-class Photo:
-    url: str
-    mime_type: str
 
 
 def _trim(link: str) -> str:
@@ -119,10 +130,17 @@ def photos_in(msg: ChatMessage) -> list[Photo]:
         if not isinstance(item, ResourceContent):
             continue
         for resource in item.resource if isinstance(item.resource, list) else [item.resource]:
-            url = _resource_url(resource.uri, resource.metadata)
             mime_type = resource.metadata.get("mime_type", "")
-            if url and (mime_type.startswith("image/") or not mime_type):
-                found.append(Photo(url=url, mime_type=mime_type or "image/*"))
+            if mime_type and not mime_type.startswith("image/"):
+                continue
+            # An upload's URI is usually agent-storage://..., which only the storage API can open.
+            url = _resource_url(resource.uri, resource.metadata) or resource.uri.strip()
+            if url and all(url != photo.url for photo in found):
+                found.append(
+                    Photo(
+                        url=url, mime_type=mime_type or "image/*", resource_id=str(item.resource_id)
+                    )
+                )
     text = msg.text()
     links = _MARKDOWN_LINK.findall(text) + [_trim(link) for link in _BARE_LINK.findall(text)]
     for link in links:
@@ -139,12 +157,33 @@ def clean_text(msg: ChatMessage) -> str:
     return " ".join(text.split())
 
 
+UPLOADS_WELCOME = MetadataContent(type="metadata", metadata={"attachments": "true"})
+
+
 def text_message(text: str, offer_uploads: bool = False) -> ChatMessage:
     content: list[TextContent | MetadataContent] = [TextContent(type="text", text=text)]
     if offer_uploads:
-        # Tells ASI:One this agent accepts file uploads.
-        content.append(MetadataContent(type="metadata", metadata={"attachments": "true"}))
+        content.append(UPLOADS_WELCOME)  # tells ASI:One this agent accepts file uploads
     return ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=content)
+
+
+def uploads_welcome() -> ChatMessage:
+    """Fetch's ASI:One examples answer a session start with this, before any text."""
+    return ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=[UPLOADS_WELCOME])
+
+
+async def fetch_photo(ctx: Context, photo: Photo) -> bytes:
+    """Download a chat photo: from its web link if it has one, else from Agentverse storage."""
+    if urlparse(photo.url).scheme in ("http", "https"):
+        try:
+            return await download_photo(photo.url)
+        except PhotoError:
+            if photo.resource_id is None:
+                raise
+            ctx.logger.info("The photo's link didn't work; trying Agentverse storage")
+    if photo.resource_id is None:
+        raise PhotoError("I can only open photo links that start with http:// or https://.")
+    return await asyncio.to_thread(download_from_storage, ctx.agent.identity, photo.resource_id)
 
 
 def usd(cents: int) -> str:
@@ -183,14 +222,14 @@ def listed_text(sold: Sold, wanted: SellerMessage) -> str:
 
 def build_chat_protocol(sell: Sell, read: ReadMessage, fetch: FetchPhoto) -> Protocol:
     proto = Protocol(spec=chat_protocol_spec)
-    handled: dict[str, set[str]] = {}  # conversation -> photo links already listed
+    # conversation -> photo link -> its listing job, so a repeated link reports instead of relists
+    handled: dict[str, dict[str, asyncio.Future[str]]] = {}
     follow_ups: set[asyncio.Task[None]] = set()  # keeps background replies from being collected
 
-    async def list_photo(
-        ctx: Context, conversation: str, photo: Photo, wanted: SellerMessage
-    ) -> str:
+    async def list_photo(ctx: Context, conversation: str, photo: Photo, text: str) -> str:
         try:
-            data = await fetch(photo.url)
+            wanted = await read(text, True)
+            data = await fetch(ctx, photo)
             image_b64, media_type = await asyncio.to_thread(prepare_photo, data)
             sold = await sell(
                 ctx,
@@ -212,20 +251,33 @@ def build_chat_protocol(sell: Sell, read: ReadMessage, fetch: FetchPhoto) -> Pro
             return SOMETHING_BROKE
         return listed_text(sold, wanted)
 
-    async def respond(
-        ctx: Context, sender: str, conversation: str, photos: list[Photo], text: str
+    async def answer_without_photo(
+        text: str, repeated: list[asyncio.Future[str]], wanted: SellerMessage
     ) -> str:
-        wanted = await read(text, bool(photos))
-        if not photos:
-            if wanted.intent == "sell":
-                return PHOTO_MISSING if _MENTIONS_PHOTO.search(text) else NEEDS_PHOTO
-            return BUYING_NOT_READY if wanted.intent == "buy" else HELP
+        # The planner repeats earlier links, and sellers ask "is it done?", so a message that
+        # only repeats a photo is about that photo, unless they've moved on to buying.
+        if repeated and wanted.intent != "buy":
+            job = repeated[0]
+            return job.result() if job.done() else ALREADY_WORKING
+        if wanted.intent == "sell":
+            return PHOTO_MISSING if _MENTIONS_PHOTO.search(text) else NEEDS_PHOTO
+        return BUYING_NOT_READY if wanted.intent == "buy" else HELP
 
-        job = asyncio.ensure_future(list_photo(ctx, conversation, photos[0], wanted))
-        extra = ""
-        if len(photos) > 1:
-            extra = "\n\n(I used the first photo. Send other items one message at a time.)"
-        done, _ = await asyncio.wait({job}, timeout=REPLY_WITHIN)
+    async def respond(
+        ctx: Context,
+        sender: str,
+        job: asyncio.Future[str] | None,
+        extra: str,
+        text: str,
+        repeated: list[asyncio.Future[str]],
+        deadline: float,
+    ) -> str:
+        if job is None:
+            return await answer_without_photo(text, repeated, await read(text, False))
+        # The deadline counts from when the message arrived, so reading the text with ASI:One
+        # (up to 20 s) can't push the reply past the planner's patience.
+        timeout = max(0.0, deadline - asyncio.get_running_loop().time())
+        done, _ = await asyncio.wait({job}, timeout=timeout)
         if done:
             return job.result() + extra
 
@@ -239,6 +291,8 @@ def build_chat_protocol(sell: Sell, read: ReadMessage, fetch: FetchPhoto) -> Pro
 
     @proto.on_message(ChatMessage)
     async def on_chat(ctx: Context, sender: str, msg: ChatMessage) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + REPLY_WITHIN
         await ctx.send(
             sender, ChatAcknowledgement(timestamp=datetime.now(UTC), acknowledged_msg_id=msg.msg_id)
         )
@@ -246,15 +300,37 @@ def build_chat_protocol(sell: Sell, read: ReadMessage, fetch: FetchPhoto) -> Pro
         # address, so the sender alone doesn't identify a conversation.
         conversation = f"session:{ctx.session}" if ctx.session else f"sender:{sender}"
         first_message = conversation not in handled
-        seen = handled.setdefault(conversation, set())
-        photos = [photo for photo in photos_in(msg) if photo.url not in seen]
-        seen.update(photo.url for photo in photos)
+        jobs = handled.setdefault(conversation, {})
+        new: list[Photo] = []
+        repeated: list[asyncio.Future[str]] = []
+        for photo in photos_in(msg):
+            if photo.url in jobs:
+                repeated.append(jobs[photo.url])
+            elif all(photo.url != other.url for other in new):
+                new.append(photo)
         text = clean_text(msg)
+        if any(isinstance(item, StartSessionContent) for item in msg.content):
+            await ctx.send(sender, uploads_welcome())
+            if not text and not new and not repeated:
+                return  # ASI:One opening the session; nothing to answer yet
         ctx.logger.info(
-            f"Chat from {conversation}: {len(photos)} new photo(s), text {text[:120]!r}"
+            f"Chat from {conversation}: {len(new)} new photo(s), {len(repeated)} repeated, "
+            f"text {text[:120]!r}"
         )
+        # Start the job before anything slow so a redelivered message can't list the photo twice.
+        job: asyncio.Future[str] | None = None
+        extra = ""
+        if new:
+            job = asyncio.ensure_future(list_photo(ctx, conversation, new[0], text))
+            jobs[new[0].url] = job
+            for photo in new[1:]:
+                skipped: asyncio.Future[str] = loop.create_future()
+                skipped.set_result(SKIPPED_PHOTO)
+                jobs[photo.url] = skipped
+            if len(new) > 1:
+                extra = "\n\n(I used the first photo. Send other items one message at a time.)"
         try:
-            reply = await respond(ctx, sender, conversation, photos, text)
+            reply = await respond(ctx, sender, job, extra, text, repeated, deadline)
         except Exception:
             ctx.logger.exception(f"Chat message from {conversation} failed")
             reply = SOMETHING_BROKE

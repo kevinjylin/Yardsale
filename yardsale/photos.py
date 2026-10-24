@@ -5,15 +5,22 @@ from __future__ import annotations
 import base64
 import io
 import ipaddress
+import os
 from pathlib import Path
 from urllib.parse import urlparse
 
 import aiohttp
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
+from uagents_core.identity import Identity
+from uagents_core.storage import ExternalStorage
 
 MAX_EDGE = 1280  # pixels; plenty for identification and keeps agent messages small
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+# Where ASI:One puts chat uploads. Only the agent the file was sent to can read it, so the
+# download is signed with that agent's identity. ExternalStorage's own default URL is broken in
+# uagents_core 0.4.12 (it reads a config field that doesn't exist), so it's spelled out here.
+STORAGE_URL = os.getenv("AGENTVERSE_URL", "https://agentverse.ai").rstrip("/") + "/v1/storage"
 
 register_heif_opener()  # iPhone photos are HEIC
 
@@ -76,3 +83,16 @@ async def download_photo(url: str) -> bytes:
             return bytes(data)
     except (aiohttp.ClientError, TimeoutError) as ex:
         raise PhotoError("I couldn't download the photo. Try sending it again.") from ex
+
+
+def download_from_storage(identity: Identity, asset_id: str) -> bytes:
+    """Fetch a chat upload from Agentverse storage. Blocking: run it in a thread."""
+    storage = ExternalStorage(identity=identity, storage_url=STORAGE_URL)
+    try:
+        stored = storage.download(asset_id)
+        data = base64.b64decode(stored["contents"])
+    except (RuntimeError, KeyError, TypeError, ValueError) as ex:
+        raise PhotoError("I couldn't open the attachment. Please send the photo again.") from ex
+    if len(data) > MAX_DOWNLOAD_BYTES:
+        raise PhotoError("That photo is over 25 MB. Send a smaller one.")
+    return data
