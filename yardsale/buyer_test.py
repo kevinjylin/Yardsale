@@ -15,13 +15,12 @@ import argparse
 import asyncio
 import logging
 import sys
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from uuid import uuid4
 
 from uagents import Agent, Context, Protocol
 from uagents.registration import AlmanacApiRegistrationPolicy
-from uagents.resolver import AlmanacApiResolver, Resolver
+from uagents.resolver import Resolver
 from uagents_core.registration import AgentRegistrationPolicy
 from uagents_core.types import DeliveryStatus
 
@@ -29,10 +28,12 @@ from yardsale.common import (
     BUREAU_PORT,
     BUYER_PORT,
     MARKET_FILE,
+    almanac_endpoints,
     derive_seed,
     dollars,
     endpoint,
     read_json,
+    wait_until,
 )
 from yardsale.models import (
     AcceptCounter,
@@ -134,19 +135,6 @@ async def on_deal(ctx: Context, sender: str, msg: Deal) -> None:
 async def on_offer_rejected(ctx: Context, sender: str, msg: OfferRejected) -> None:
     tracker().failures.append(f"offer on {msg.item_id} rejected: {msg.reason}")
     tracker().check_done()
-
-
-async def wait_until(check: Callable[[], Awaitable[bool]], what: str) -> None:
-    for _ in range(60):
-        if await check():
-            return
-        await asyncio.sleep(1)
-    raise TimeoutError(f"timed out after 60s waiting for {what}")
-
-
-async def almanac_endpoints(address: str) -> list[str]:
-    _, endpoints = await AlmanacApiResolver().resolve(address)
-    return endpoints
 
 
 def report(t: Tracker, market: str, almanac: dict[str, list[str]] | None) -> int:
