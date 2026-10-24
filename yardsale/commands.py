@@ -1,6 +1,9 @@
 """Chat commands read without a model: approve, change prices, cancel, pick a result, offer,
 haggle, accept, and check a payment.
 
+A seller with several proposals waiting (one per photo) names them by number: "approve 2",
+"approve 1, 3", "approve all", "lowest 2 $40", "ask 3 $60", "cancel 2", "rules 2".
+
 The chat matches these before asking ASI:One anything, so selling and buying work the same with
 or without ASI_ONE_API_KEY, and no model's misreading can approve a listing or close a deal.
 """
@@ -148,6 +151,38 @@ _CRAIGSLIST_END = re.compile(
     r"\b(?:stop\s+selling|take|remove|end|unlist|delist|pull|delete)\b.*\b(?:on|off|from)\s+"
     r"craigslist\b"
 )
+# Several proposals at once, by number: "approve 1, 3 and 4", "approve all", "cancel 2".
+_NUMBER = r"(?:#|item\s*|number\s*|no\.?\s*|photo\s*)?\d{1,2}"
+_NUMBERS = _NUMBER + r"(?:\s*(?:,|&|\+|\band\b)\s*" + _NUMBER + r"|\s+" + _NUMBER + r")*"
+_EVERY = (
+    r"(?:them\s+all|all(?:\s+of\s+them|\s+(?:items?|listings?|photos?))?|everything|every\s*one)"
+)
+_APPROVE_SOME = re.compile(
+    r"^(?:yes\s+to|approve|confirm|publish|list)\s+(?:(" + _EVERY + r")|(" + _NUMBERS + r"))$"
+)
+_CANCEL_SOME = re.compile(
+    r"^(?:cancel|drop|discard|skip|don'?t\s+list)\s+(?:(" + _EVERY + r")|(" + _NUMBERS + r"))$"
+)
+_RULES_PICK = re.compile(
+    r"^(?:rules|edit|prices?\s+form|set\s+(?:my\s+)?(?:rules|prices))\s+(?:for\s+)?" + _PICK + r"$"
+)
+# A price for one of several proposals: "lowest 2 $40", "ask #3 to 60", "approve 2 at $50".
+_PRICE_WORD = (
+    r"(?:ask(?:ing)?(?:\s+price)?|lowest(?:\s+price)?|floor(?:\s+price)?|minimum(?:\s+price)?|"
+    r"min|at\s+least|approve|publish)"
+)
+_PRICE_PICK = re.compile(
+    r"\b(" + _PRICE_WORD + r")\s+(?:for\s+|on\s+|of\s+)?(?:#|item\s*|number\s*|no\.?\s*|photo\s*)?"
+    r"(\d{1,2})\s+(?=(?:(?:to|at|of|is|for|be)\s+|[=:]\s*)?\$?\s?\d)"
+)
+# "#2: ask $60", "item 2, lowest 40", "for 3 lowest $25"
+_LEADING_PICK = re.compile(
+    r"^(?:(?:for\s+)?(?:#|item\s*|number\s*|no\.?\s*|photo\s*)(\d{1,2})|(\d{1,2})\s*[:)])\s*[:,-]?\s*"
+)
+# "lowest $40 on 2", "ask 60 for #3"
+_TRAILING_PICK = re.compile(
+    r"\s+(?:on|for)\s+(?:the\s+)?(?:#|item\s*|number\s*|no\.?\s*|photo\s*)?(\d{1,2})$"
+)
 _NOT_ACCEPTING = re.compile(
     r"\b(?:not|don'?t|doesn'?t|won'?t|never|decline[sd]?|reject(?:s|ed)?|cancel(?:s|led)?|"
     r"find|search|look(?:ing)?\s+for|show\s+me|another|instead|other)\b|n't\b"
@@ -165,6 +200,8 @@ class Command:
     error: str = ""  # a price that couldn't be used
     text: str = ""  # the message, for commands that also search ("haggle for a road bike")
     zip_code: str = ""  # a seller's ZIP code, for listing on eBay
+    picks: tuple[int, ...] = ()  # "approve 1, 3": proposals by number
+    every: bool = False  # "approve all", "cancel all"
 
 
 def _cents(match: re.Match[str] | None) -> tuple[int | None, str]:
@@ -198,6 +235,49 @@ def accepts_deal(text: str) -> bool:
     return bool(_ACCEPTS.search(lowered)) and not _NOT_ACCEPTING.search(lowered)
 
 
+def numbered_prices(text: str) -> Command | None:
+    """A price for one of several waiting proposals, by number: "lowest 2 $40", "ask 3 $60",
+    "#2: ask $60, lowest $45", "lowest $40 on 2", "approve 2 at $50". None if no number is named
+    next to a price."""
+    picks: set[int] = set()
+
+    def drop_pick(found: re.Match[str]) -> str:
+        picks.add(int(found.group(2)))
+        return found.group(1) + " "
+
+    rest = _PRICE_PICK.sub(drop_pick, text)
+    if not picks:
+        leading = _LEADING_PICK.search(rest)
+        trailing = _TRAILING_PICK.search(rest)
+        if leading is not None:
+            picks.add(int(leading.group(1) or leading.group(2)))
+            rest = rest[leading.end() :]
+        elif trailing is not None:
+            picks.add(int(trailing.group(1)))
+            rest = rest[: trailing.start()]
+    if not picks:
+        return None
+    asking, floor, error = seller_prices(rest)
+    if asking is None and floor is None and not error:
+        return None
+    if len(picks) > 1:
+        error = 'One item at a time, please, like "lowest 2 $40", then "lowest 3 $25".'
+    pick = min(picks)
+    if pick < 1:
+        return Command("edit", error="Item numbers start at 1.")
+    approve = bool(_APPROVE_TOO.search(text))
+    return Command(
+        "edit", asking_cents=asking, floor_cents=floor, pick=pick, approve=approve, error=error
+    )
+
+
+def _some(found: re.Match[str], kind: Kind) -> Command:
+    if found.group(1):
+        return Command(kind, every=True)
+    numbers = tuple(dict.fromkeys(int(n) for n in re.findall(r"\d{1,2}", found.group(2))))
+    return Command(kind, picks=numbers)
+
+
 def parse(text: str) -> Command | None:
     """The command in a chat message, or None for anything else (ASI:One reads that)."""
     lowered = " ".join(text.lower().split()).rstrip(".!?")
@@ -226,10 +306,22 @@ def parse(text: str) -> Command | None:
         amount, error = _cents(offer)
         pick = int(offer.group(2)) if offer.group(2) else None
         return Command("offer", amount_cents=amount, pick=pick, error=error)
+    numbered = numbered_prices(lowered)
+    if numbered is not None:
+        return numbered
     asking, floor, error = seller_prices(lowered)
     if asking is not None or floor is not None or error:
         approve = bool(_APPROVE_TOO.search(lowered))
         return Command("edit", asking_cents=asking, floor_cents=floor, approve=approve, error=error)
+    some = _APPROVE_SOME.search(lowered)
+    if some is not None:
+        return _some(some, "approve")
+    some = _CANCEL_SOME.search(lowered)
+    if some is not None:
+        return _some(some, "cancel")
+    rules = _RULES_PICK.search(lowered)
+    if rules is not None:
+        return Command("rules", pick=int(rules.group(1)))
     if HAGGLE.search(lowered):
         limit, error = budget(lowered)
         if limit is None and not error:
