@@ -65,7 +65,7 @@ That's the visual proof judges will remember.
 
 | Agent                       | Runs where                                  | Agentverse slots       |
 | --------------------------- | ------------------------------------------- | ---------------------- |
-| `@yardsale`                 | Fetch Business. ASI:One finds it.           | Unknown (mentor Q)     |
+| `@yardsale`                 | Fetch Business (a personal agent, Plus trial). Calls Yardsale's HTTP API to search, haggle, and buy; sends sellers to the Market. | Unknown (mentor Q) |
 | Market agent ("Yardsale Orchestrator", `@ys-orchestrator`) | Our Bureau server, Agentverse mailbox so ASI:One can reach it. Speaks the Chat Protocol. | 1 |
 | Identifier                  | Our Bureau server, Agentverse mailbox       | 1                      |
 | Researcher                  | Our Bureau server, Agentverse mailbox       | 1                      |
@@ -74,9 +74,9 @@ That's the visual proof judges will remember.
 | Item agents (one per item)  | Our Bureau server, Almanac only; or hosted on Agentverse (`YARDSALE_HOST_ITEMS`) | 0 in the server; 1 each hosted |
 | Buyers                      | ASI:One acts for them                       | 0                      |
 
-Buyer flow: ASI:One → `@yardsale` → Market agent → Shopper → item agents, all at once. The
-Market relays the result back, then passes the buyer's acceptance to the chosen item agent and
-sends a payment link.
+Buyer flow: ASI:One → Market agent (found by ASI:One) → Shopper → item agents, all at once. Or
+ASI:One → `@yardsale` → Yardsale's HTTP API → Shopper → item agents. The Market relays the result back, then passes the buyer's acceptance to the
+chosen item agent and sends a payment link.
 
 Seller flow: ASI:One chat (photo + text) → Market → Identifier → Researcher → Appraiser →
 Market → proposal in the chat → seller approves → new item agent → address in the chat. The next
@@ -156,6 +156,37 @@ Code: [chat.py](../yardsale/chat.py), [shopper.py](../yardsale/shopper.py),
    provider; the server also checks every minute. Paid deals record the commission and the
    seller's payout, which the seller sees under `my listings`.
 
+## Buying through `@yardsale` (Fetch Business)
+
+Code: [business_api.py](../yardsale/business_api.py).
+
+`@yardsale` can't message our agents, but a Fetch Business agent on a paid plan can call an
+HTTP API described by OpenAPI (an "OpenAPI Integration", which Fetch calls a Business Tool).
+So the server also runs a small API on `127.0.0.1:8110` when `YARDSALE_API_KEY` is set. It
+uses the same Market backend as the chat:
+
+- `GET /listings` searches active listings (asking prices only).
+- `POST /haggles` sends the Shopper to haggle with every match at once. It answers within 25
+  seconds with the result, or with `status: "running"` and a `haggle_id`.
+- `GET /haggles/{haggle_id}` returns the result, waiting up to 25 seconds while it's running.
+- `POST /haggles/{haggle_id}/accept` buys the best price (or a named item's) and returns the
+  payment link.
+- `GET /deals/{deal_id}` says whether it's paid.
+- `GET /openapi.json` is the description Fetch reads. It needs no key; everything else needs
+  the key in `X-Yardsale-Key` (or `Authorization: Bearer`).
+
+Each haggle is its own buyer (`buyer_ref` `api-<haggle id>`), so its prices and deals are
+separate from chat buyers', and the API only shows deals made through it. Floors never appear,
+and the log has one line per call (the method, the route pattern, the status, and the time),
+never a buyer's max or a whole haggle ID. A running haggle answers with a plain 200, because a
+tool runner may treat 202 as a failure.
+
+It runs only on this machine, so a tunnel makes it public:
+`cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8110` (TCP, since
+the default QUIC connection dropped on venue Wi-Fi). A quick tunnel gets a new URL each time it
+starts. Live on October 24, `@yardsale` searched, haggled, and accepted through it; see
+[calhacks-plan.md](calhacks-plan.md#what-fetch-business-offers).
+
 ## Saved state
 
 [store.py](../yardsale/store.py) keeps listings (and whether each agent runs in the server or on
@@ -231,7 +262,8 @@ per agent, because agent addresses come from the master seed and don't change.
 ## Not built or unknown
 
 - **Public address.** `YARDSALE_PUBLIC_URL` sets the URL item agents advertise. It's untested:
-  the server needs a hosted machine or a tunnel such as ngrok.
+  the server needs a hosted machine or a tunnel such as ngrok. (`@yardsale`'s HTTP API was made
+  public with a Cloudflare quick tunnel on October 24; the Bureau's port hasn't been.)
 - **ASI:One end to end.** The Market speaks the Chat Protocol, publishes it to Agentverse, and
   has a mailbox, and tests cover selling and buying with fakes. On October 23 photos sent from
   the real ASI:One app were priced: one was listed before seller approval was added, and one
@@ -264,9 +296,12 @@ per agent, because agent addresses come from the master seed and don't change.
 - **Live buyer test needs the Market connected.** In live mode the Market's Almanac entry points
   at its Agentverse mailbox, so `buyer_test` without `--offline` only reaches it once it's
   connected to Agentverse.
-- **`@yardsale` handing off to our agents.** Unknown whether a Fetch Business agent can pass buyers
-  to an outside uAgent address. Fallback: run everything on Agentverse and pitch Fetch Business as
-  the graduation path for power sellers. No code depends on it.
+- **`@yardsale` and our agents.** It can't message `@ys-orchestrator`, but on the Plus trial
+  (started October 24) it calls Yardsale's HTTP API, so buyers can search, haggle, and buy in
+  its chat. Sellers still go to `@ys-orchestrator`, since a photo has to reach Claude. Its
+  Orders page takes orders only from Square or SumUp POS, so our sales don't show there. The
+  API is public only through a quick tunnel, whose URL changes when it restarts. Details are in
+  [calhacks-plan.md](calhacks-plan.md#what-fetch-business-offers).
 - **Telling sellers about a sale.** The seller sees a sale under "my listings"; Yardsale doesn't
   message them when it happens.
 - **Interactive Cards in the real app.** Proposals, the eBay sales behind a price (a carousel),
@@ -275,9 +310,9 @@ per agent, because agent addresses come from the master seed and don't change.
   (metadata only, no protocol digest change). Only the Approve card has been seen in ASI:One's
   web app; ASI:One's planner API received the haggling card as a card for the buyer to act on.
   Every reply also works as plain text, and typed commands do the same things.
-- **Payments.** Built for test mode, and tested against local stand-ins for Stripe and Visa, but
-  not yet run against either. Visa's "paid" check searches transactions for the deal ID; whether
-  Pay By Link payments are filed under it is unverified. Payouts to sellers aren't automated.
+- **Payments.** Built for test mode. On October 24, a hosted test bike was haggled to $295 from a chat, and the Stripe test checkout was paid with Stripe's test card. Within a minute the server's Stripe check marked the deal paid, recorded a $14.75 commission and a $280.25 payout, and marked the listing sold. Visa hasn't been run (no sandbox keys):
+  its "paid" check searches transactions for the deal ID, and whether Pay By Link payments are
+  filed under it is unverified. Payouts to sellers aren't automated.
 - **Hosting on Agentverse.** Run live on October 24: the Hosting API calls (create, secret,
   storage, code, start) all worked, the generated code compiled, and the agent registered on
   the Almanac about 3 seconds after starting. Two test bikes were hosted; each got a public
@@ -297,20 +332,22 @@ anything reaches beyond localhost.
 
 ## Fetch Business to-dos from the chat
 
-These were planned in the chat; whether they're done wasn't recorded.
+These were planned in the chat. Items 1 to 3 were done on October 24.
 
 1. Set up `@yardsale` on Fetch Business: name, description, and a knowledge blurb about how
-   Yardsale works.
+   Yardsale works. *Done, plus a skill and starter prompts.*
 2. Check whether it can hand off to an outside uAgent address, or at least point to the Market
-   agent.
-3. Test that ASI:One can find `@yardsale`.
+   agent. *It can't message the Market; on the Plus trial it calls Yardsale's HTTP API instead.*
+3. Test that ASI:One can find `@yardsale`. *Its page is [asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale),
+   and it answers there.*
 4. Check the Agentverse profile page to confirm whether the "premium" from a past hackathon is
    Agentverse Premium or ASI:One premium.
 
 ## Questions for a Fetch mentor
 
 - Can deals closed by outside agents show up as orders in `@yardsale`'s Fetch Business workbench?
-- Can a Fetch Business agent hand off to an outside uAgent address?
+- Can a Fetch Business agent hand off to an outside uAgent address? (Ours says it can't; it
+  calls our HTTP API instead.)
 - Does a Fetch Business agent count against the Agentverse agent limit?
 
 ## Code to borrow from Maestro

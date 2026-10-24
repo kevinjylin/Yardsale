@@ -14,13 +14,15 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import aiohttp
 import pytest
 import uagents
+from aiohttp import web
 from uagents import Agent, Model
 from uagents_core.identity import Identity
 
 from tests import sim
-from tests.helpers import Peer
+from tests.helpers import Peer, local_server
 from yardsale import hosting, models
 from yardsale.hosting import HOSTED_MODELS, HostingClient, HostingError, host_item, item_agent_code
 from yardsale.models import AcceptCounter, Counter, Deal, ItemSold, Offer, OfferRejected
@@ -249,6 +251,21 @@ async def test_a_failed_start_deletes_the_half_made_agent() -> None:
     with pytest.raises(HostingError):
         await host_item(agentverse, bike(), 1500, "agent1qmarket", "agent1qshopper")
     assert agentverse.hosted == {} and len(agentverse.deleted) == 1
+
+
+async def test_a_slow_agentverse_is_a_hosting_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timeout is a HostingError, so approval falls back to running the agent in the server."""
+
+    async def slow(request: web.Request) -> web.Response:
+        await asyncio.sleep(1)
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_post("/v1/hosting/agents", slow)
+    monkeypatch.setattr(hosting, "TIMEOUT", aiohttp.ClientTimeout(total=0.05))
+    async with local_server(app) as base:
+        with pytest.raises(HostingError, match="couldn't be reached"):
+            await HostingClient("av-test-key", base).create("Trek FX 2", "readme", "a bike")
 
 
 def test_hosting_is_off_unless_a_limit_is_set(monkeypatch: pytest.MonkeyPatch) -> None:

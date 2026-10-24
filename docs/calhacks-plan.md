@@ -66,9 +66,9 @@ links a [submission document](https://docs.google.com/document/d/1UDW-X1C24hxZvi
 | Bonus | How Yardsale gets it |
 | --- | --- |
 | Effective multi-agent collaboration | The pricing agents; a buyer agent haggling with several item agents at once over a published protocol (code done October 24). |
-| Payment Protocol with a credible monetization model | The Market sends agent buyers a Payment Protocol `RequestPayment` with the payment link; Yardsale keeps a 5% commission on each sale (code done October 24, test mode, not yet run against Visa or Stripe). |
+| Payment Protocol with a credible monetization model | The Market sends agent buyers a Payment Protocol `RequestPayment` with the payment link; Yardsale keeps a 5% commission on each sale (test mode; a Stripe test payment went through end to end on October 24; Visa not yet run). |
 | Interactive Cards | Approve card (seen in ASI:One); sales carousel, seller prices form, haggling card, and payment card (code done October 24, not yet seen in ASI:One). |
-| Reliability and recovery from failed tool calls | Failed pricing steps return a reason, a resent message gets the same answer, and restarts bring every active item agent back. |
+| Reliability and recovery from failed tool calls | Failed pricing steps return a reason, a resent message gets the same answer, restarts bring every active item agent back, and the server starts even when Agentverse drops the connection. |
 | Creative use of real-time data and external services | Live eBay sold listings through Apify. |
 | Could keep running after the hackathon | Saved state in SQLite; needs a hosted server. |
 
@@ -230,20 +230,60 @@ From the workbench at `business.fetch.ai/workbench`:
 
 - Anyone can sign in with a personal email and create a personal agent. Claiming a verified brand
   handle is a separate step.
-- The sidebar has Home, Claim Your Agent, Profile & Instructions, Business Information, Socials
-  Library, Workflows & Tasks, Agent Messages, Agent Network, Orders, and Integrations.
+- The sidebar (October 24) has Brand Studio, Business Information, Analytics, Services (Artifacts,
+  Schedule, Skills), Social Media, Events, Sphere, Integrations, Orders, Messages, and Settings.
 - The Orders page lists each order with a status (Pending, Confirmed, Cancelled, Completed,
   Rejected) and can be searched by notes. Its URL names the agent:
   `business.fetch.ai/workbench/orders?agentId=...`.
 - A bubble tea shop's ordering agent, connected through Square, has put real orders on that page,
-  each with the drink, its options, the customer, and the time. How an outside agent adds orders
-  isn't documented. The Integrations tab is the first place to look.
+  each with the drink, its options, the customer, and the time.
 - A used-item sale maps onto those statuses: Pending when a price is agreed, Confirmed when the
   seller approves, Completed when it's paid.
 
-Unknown, so ask the Fetch team: whether `@yardsale` can connect to our own Market agent (likely
-through Integrations), whether its "custom inventory" connection could read our listings, and how
-an outside agent adds orders.
+**What we set up on October 24.** `@yardsale` is a personal Fetch Business agent named YardSale
+(handle `yardsale`), with a public page at [asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale):
+
+- Brand Studio: a description of Yardsale and five starter prompts (finding a deal, selling,
+  paying, haggling, pricing).
+- Business Information: a Plain Text entry explaining how buying and selling work and naming the
+  Market agent, `@ys-orchestrator`, with its address.
+- Skills: "Find, haggle for, and buy used items on Yardsale", a playbook that says which
+  Yardsale tool to call for browsing, haggling, buying, and checking a payment, never to make
+  up listings, and to send sellers (who need to attach a photo) to `@ys-orchestrator`.
+- Integrations: an OpenAPI Integration ("Business Tool") named Yardsale Market, pointing at
+  Yardsale's HTTP API ([business_api.py](../yardsale/business_api.py)) through a Cloudflare
+  tunnel. Fetch made 6 tools from its OpenAPI description (`searchListings`, `startHaggle`,
+  `getHaggle`, `acceptDeal`, `getDeal`, and the description itself). It asks the buyer to
+  confirm before `startHaggle` and `acceptDeal`.
+
+First, on the free plan, `@yardsale` could only point people to the Market. Before the first
+skill it searched the web and made up a "listing sweep". With the skill, it gave the exact
+`@ys-orchestrator` message to send, and said it can't message `@ys-orchestrator` itself. Every
+integration showed "Upgrade".
+
+Then the Plus plan's 14-day trial was started on October 24 ($75 a month afterwards, so cancel
+before November 7 unless it's kept), and the OpenAPI Integration was added. Tested in
+`@yardsale`'s own ASI:One chat, with no `@ys-orchestrator`:
+
+- "Find me a used hybrid bike, haggle for me, max $300": it searched, haggled through
+  `startHaggle` (Yardsale's buyer agent against a hosted item agent, $221 then $270 agreed, in
+  22 seconds), showed both rounds, and offered a "Yes, buy it" button.
+- On an earlier haggle that was agreed at $283, "Accept the deal" called `acceptDeal`, which
+  closed the deal and made a Stripe test checkout link in 6 seconds.
+- The first try failed. Agentverse briefly dropped the buyer agent's mailbox, the haggle ran past
+  the 25 seconds `startHaggle` waits, and `@yardsale`'s follow-up checks failed; it told the
+  buyer Yardsale's "status service" had an error. Since then a running haggle answers with a
+  plain 200 (not 202), and `getHaggle` waits up to 25 seconds for the result.
+
+So `@yardsale` is now a working front door for buyers. Sellers still go to `@ys-orchestrator`,
+because a photo has to reach Claude.
+
+Orders: with the trial, the apps (Stripe, Square, SumUp, SumUp POS, E-commerce, Google
+Calendar) became toggles that connect an outside account, and orders come from Square or SumUp
+POS. Nothing lets an outside API add orders, so Yardsale's sales don't reach the Orders page.
+
+Still to ask the Fetch team: how an outside agent or API adds orders, and whether a Business Tool
+can point at a URL that changes (each quick tunnel gets a new one).
 
 ## The demo, step by step
 
@@ -254,11 +294,11 @@ Every step happens inside one ASI:One conversation, and every sponsor is one ste
 | 1. Snap | A seller attaches a photo in ASI:One. Claude identifies it. | Claude | Yes |
 | 2. Price | Our own "resale comps" Actor finds recent eBay sales. Code sets the price. | Apify | Actor pushed but blocked by eBay (403); the Researcher still calls a third-party Actor. Apify credit is nearly used up |
 | 3. Approve | Cards show the sales behind the price and a form for the seller's rules. The seller approves. | Fetch (Interactive Cards) | Yes (carousel and form not yet seen in ASI:One) |
-| 4. Live | The item's agent goes live on Agentverse under `@yardsale`, with its own profile page. | Fetch Business, Agentverse | Hosting yes, run live October 24; `@yardsale` no |
+| 4. Live | The item's agent goes live on Agentverse under `@yardsale`, with its own profile page. | Fetch Business, Agentverse | Hosting yes, run live October 24. `@yardsale` haggles and buys through Yardsale's API (Plus trial, October 24); sellers still go to `@ys-orchestrator` |
 | 5. Found | A buyer asks ASI:One, which finds Yardsale. | Fetch (ASI:One) | Yes, without an @mention, through ASI:One's planner (October 24) |
 | 6. Haggle | The buyer says their max. A buyer agent haggles with the matching item agents over several rounds, neither side revealing its limit, and a card shows every round and the best deal. | Fetch (uAgents) | Yes, live with hosted item agents, ending in a recorded deal |
-| 7. Pay | The buyer accepts. The chat shows a Visa Pay By Link, and an agent buyer gets a Payment Protocol request. Once it's paid, the item is sold and Yardsale's commission is recorded. | Visa, Fetch (Payment Protocol) | Code yes; needs Visa sandbox or Stripe test keys |
-| 8. Order | The sale shows up on `@yardsale`'s Fetch Business Orders page. | Fetch Business | Orders webhook yes; the Fetch Business side is unknown |
+| 7. Pay | The buyer accepts. The chat shows a Visa Pay By Link, and an agent buyer gets a Payment Protocol request. Once it's paid, the item is sold and Yardsale's commission is recorded. | Visa, Fetch (Payment Protocol) | Stripe test mode run live October 24, from deal to paid; Visa needs sandbox keys |
+| 8. Order | The sale shows up on `@yardsale`'s Fetch Business Orders page. | Fetch Business | Orders webhook yes. Fetch Business's Orders page only takes orders from Square or SumUp POS, so no |
 
 ## How close the code is
 
@@ -273,8 +313,8 @@ State of the code on Saturday, October 24, morning (not yet committed; live runs
 | Buyer search and offers in the chat | Built. Live October 24: haggled and bought from a second ASI:One chat, and through ASI:One's planner with no @mention. |
 | Haggling within the seller's limits | Rebuilt: several rounds, agree-then-accept, counters stop a private gap above the floor. |
 | Buyer agent holding the shopper's max | Built (the Shopper), with a haggling card. |
-| `@yardsale` on Fetch Business | Not set up. Every order status change can go to `YARDSALE_ORDERS_WEBHOOK`. |
-| Payment Protocol, Visa, commission | Built for test mode: Visa Pay By Link sandbox or Stripe test checkout, Payment Protocol for agent buyers, 5% commission. Not yet run against Visa or Stripe. |
+| `@yardsale` on Fetch Business | Set up October 24: a description, a knowledge entry, a skill, and (on the Plus trial) an OpenAPI Integration with Yardsale's HTTP API, so it searches, haggles, and buys in its own chat. Live October 24 through a Cloudflare quick tunnel. Sellers still go to `@ys-orchestrator`. The Orders page takes orders only from Square or SumUp POS; every order status change can go to `YARDSALE_ORDERS_WEBHOOK`. |
+| Payment Protocol, Visa, commission | Built for test mode: Visa Pay By Link sandbox or Stripe test checkout, Payment Protocol for agent buyers, 5% commission. Stripe run live October 24: a $295 deal was paid with a test card and recorded with its commission. Visa not yet run (no sandbox keys). |
 | Our own Apify Actor | Written in `actors/resale-comps/` and pushed to Apify (private). eBay answers 403 through Apify's default proxy, so it finds no sales yet. Switching is `YARDSALE_APIFY_ACTOR`. |
 | Innovation Lab badges, agent addresses in the README | Done in the repo. Agentverse shows the badges after each agent reconnects. |
 | Public URL | `YARDSALE_PUBLIC_URL` exists but hasn't been used. ASI:One reaches the Market through its Agentverse mailbox, and item agents run in the same server or on Agentverse, so the chat flow may not need it; outside agents do. |
@@ -298,6 +338,21 @@ read.
   demo, and don't price test photos.
 - **Accepting through ASI:One's planner** failed until October 24: the planner rewrites
   "accept" as a sentence. Fixed; see [background.md](background.md).
+- **Wi-Fi that intercepts HTTPS cuts the server off.** On the morning of October 24, every
+  agent's mailbox check failed for a long stretch with "certificate is not valid for
+  agentverse.ai" (a network answering for Agentverse with its own certificate, as a sign-in
+  page on public Wi-Fi does). While that lasts, ASI:One's messages wait in the mailboxes and
+  the chat gets no answer. The server recovered by itself once the network was fixed, but a
+  restart during a dropped connection crashed it until a fix the same day. On stage, use a phone
+  hotspot or a network already signed in, and check the server log before starting.
+- **The Orders page can't show our sales.** On the Plus trial, orders come only from a connected
+  Square or SumUp POS account, so the planned closing moment (a sale on the Orders page) isn't
+  possible. Show `@yardsale` haggling and buying in its own chat instead.
+- **`@yardsale` depends on the tunnel.** Its Business Tool calls Yardsale's API through a
+  Cloudflare quick tunnel, which gets a new URL every time `cloudflared` restarts; the Business
+  Tool then has to be pointed at the new URL. Keep the tunnel running from before the demo to
+  after it, and check `curl <tunnel>/openapi.json` first.
+- **The Plus trial ends November 7.** Started October 24; it's $75 a month after that.
 
 ## Build order
 
@@ -325,7 +380,9 @@ read.
 4. Set up `@yardsale` on Fetch Business as the front door, following the Fetch team's answers.
    Check the Integrations tab first, since it's the likeliest way to connect `@yardsale` to the
    Market. Time-box this to a few hours. Fallback: keep the Market as the entry point on
-   Agentverse and pitch Fetch Business as the next step.
+   Agentverse and pitch Fetch Business as the next step. *Done October 24 (see "What we set up on
+   October 24" above): on the Plus trial, an OpenAPI Integration with Yardsale's HTTP API
+   (`business_api.py`) lets `@yardsale` search, haggle, and buy in its own chat.*
 5. Tune the Market's Agentverse profile so ASI:One finds it without an @mention. ASI:One picks
    agents by their Agentverse descriptions, so write for what buyers and sellers actually type.
    Rehearse the exact demo query, and keep the @mention as a fallback. (The badges and the
@@ -340,12 +397,12 @@ read.
    Visa Pay By Link (Visa Acceptance sandbox). Once it's paid, mark the item sold and record the
    commission. Fallback: a Stripe test checkout link, which loses the Visa track. *Code done
    October 24 (`payments.py`, `checkout.py`); the Market sends the request, since Yardsale is
-   the merchant. Needs sandbox keys to try.*
+   the merchant. Stripe test mode run live October 24; Visa still needs sandbox keys.*
 8. Put closed deals on `@yardsale`'s Orders page: Pending when a price is agreed, Confirmed when
    the seller approves, Completed when it's paid. This depends on what step 4 finds, and it's the
    demo's closing moment. *October 24: every status change (pending when agreed, confirmed when
-   the payment link goes out, completed when paid) is POSTed to `YARDSALE_ORDERS_WEBHOOK`;
-   connecting it to Fetch Business is still unknown.*
+   the payment link goes out, completed when paid) is POSTed to `YARDSALE_ORDERS_WEBHOOK`.
+   Fetch Business's Orders page takes orders only from Square or SumUp POS, so this is cut.*
 9. Publish our own "resale comps" Actor on the Apify Store, and have the Researcher call it.
    *Written October 24 in `actors/resale-comps/`; publish with `apify push`, run it once, then
    set `YARDSALE_APIFY_ACTOR`.*
@@ -376,7 +433,9 @@ The big screen shows two ASI:One chats: the seller's and the buyer's.
    item's own agent goes live: open its Agentverse profile.
 5. **1:45** A second judge asks ASI:One for it with a max price. The haggling card shows each
    round, the judge accepts, the Visa link goes out, and the payment clears.
-6. **2:15** Open `@yardsale`'s Fetch Business workbench: the sale is there as an order.
+6. **2:15** The reveal: ask `@yardsale`, Yardsale's Fetch Business agent, for a bike with a max.
+   It haggles and offers to buy in its own chat, through Yardsale's API. (The original plan was
+   a sale on its Orders page, which only takes Square or SumUp POS orders.)
 7. **2:35** What's real today, how Yardsale makes money, and what's next: power sellers move to
    their own Fetch Business agent; eBay and Facebook listings later.
 
@@ -384,8 +443,8 @@ The big screen shows two ASI:One chats: the seller's and the buyer's.
 
 - **"Isn't it your agent talking to your agent?"** The haggling protocol is published, so any
   agent can take the buyer's seat. Our buyer agent stands in for the ASI:One personal AI.
-- **"Is the payment real?"** It runs on Visa's API in sandbox. Going live is a change of
-  credentials. Don't call it real money.
+- **"Is the payment real?"** It runs on Stripe's test mode (Visa's sandbox once we have keys).
+  Going live is a change of credentials. Don't call it real money.
 - **"How does Yardsale make money?"** A commission on each sale, taken before the seller's
   payout. Pricing a photo is free.
 - **"Why one agent per item instead of a database?"** The item agent holds the seller's floor

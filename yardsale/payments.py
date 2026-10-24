@@ -150,7 +150,7 @@ class StripeCheckout:
                 ) as response,
             ):
                 data = await _json(response, "Stripe")
-        except aiohttp.ClientError as ex:
+        except (aiohttp.ClientError, TimeoutError) as ex:
             raise PaymentError("Stripe couldn't be reached") from ex
         if not data.get("id") or not data.get("url"):
             raise PaymentError("Stripe didn't return a checkout link")
@@ -165,7 +165,7 @@ class StripeCheckout:
                 ) as response,
             ):
                 data = await _json(response, "Stripe")
-        except aiohttp.ClientError as ex:
+        except (aiohttp.ClientError, TimeoutError) as ex:
             raise PaymentError("Stripe couldn't be reached") from ex
         if data.get("payment_status") == "paid":
             return "paid"
@@ -251,7 +251,7 @@ class VisaPayByLink:
                 ) as response,
             ):
                 return await _json(response, "Visa")
-        except aiohttp.ClientError as ex:
+        except (aiohttp.ClientError, TimeoutError) as ex:
             raise PaymentError("Visa couldn't be reached") from ex
 
     async def create(self, deal_id: str, title: str, price_cents: int) -> PaymentLink:

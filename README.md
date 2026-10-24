@@ -16,9 +16,10 @@ payment links, saved state, and restarts work and are tested with fake Claude, A
 and payment answers (the fakes are test-only; the server always uses the real services). On
 October 23, photos sent from the real ASI:One app were priced with real Claude and Apify keys.
 On October 24, buyers haggled and bought from the ASI:One app and through ASI:One's planner
-(which found Yardsale without an @mention), and item agents were hosted on Agentverse. Not yet
-tried for real: a Visa or Stripe sandbox payment (see [Going live](#going-live)). Payments are
-test mode only: live keys are refused.
+(which found Yardsale without an @mention), item agents were hosted on Agentverse, a Stripe
+test payment went through end to end, and `@yardsale` on Fetch Business haggled and bought
+through Yardsale's HTTP API. Not yet tried: Visa's sandbox (see [Going live](#going-live)).
+Payments are test mode only: live keys are refused.
 [docs/background.md](docs/background.md) has the decisions made so far and what's still open, and
 [docs/calhacks-plan.md](docs/calhacks-plan.md) has the Cal Hacks plan.
 
@@ -65,6 +66,9 @@ running.
   [Visa Acceptance sandbox](https://developer.visaacceptance.com/) account for Pay By Link
   (`VISA_MERCHANT_ID`, `VISA_KEY_ID`, `VISA_SHARED_SECRET`), or a
   [Stripe](https://dashboard.stripe.com/test/apikeys) test key (`STRIPE_SECRET_KEY=sk_test_...`).
+- `YARDSALE_API_KEY` (optional): turns on the HTTP API that `@yardsale` on Fetch Business calls.
+  It's any random string of 24 or more characters; see [`@yardsale` on Fetch
+  Business](#yardsale-on-fetch-business).
 
 The addresses above come from this deployment's master seed. A server started with a different
 seed gets different addresses.
@@ -191,11 +195,53 @@ seller what they get. Payouts to sellers aren't automated.
 - **Visa Pay By Link** (Visa Acceptance sandbox, `apitest.visaacceptance.com` only). Requests are
   signed with Visa's HTTP Signature (HMAC-SHA256). Payment is checked by searching transactions
   for the deal ID. Not yet run against Visa.
-- **Stripe Checkout**, test keys only.
+- **Stripe Checkout**, test keys only. Run live on October 24: a $295 deal was paid with
+  Stripe's test card and marked paid by the server's check within a minute.
 
 Each order's status change can also be POSTed to `YARDSALE_ORDERS_WEBHOOK`, signed with
 `YARDSALE_ORDERS_SECRET` ([orders.py](yardsale/orders.py)). It's meant for an order list such as
-`@yardsale`'s Orders page on Fetch Business, once it's known how to add orders there.
+`@yardsale`'s Orders page on Fetch Business, though that page takes orders only from a
+connected Square or SumUp POS account.
+
+## `@yardsale` on Fetch Business
+
+`@yardsale` ([asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale)) is Yardsale's Fetch Business
+agent. It can't message our agents, but it calls Yardsale's HTTP API
+([business_api.py](yardsale/business_api.py)) through an OpenAPI Integration, so a buyer can
+search, haggle, and buy in its chat. Sellers still go to `@ys-orchestrator`, because a photo has
+to reach Claude.
+
+| Call | Tool | Does |
+| --- | --- | --- |
+| `GET /listings?q=&max_usd=` | `searchListings` | Active listings, with asking prices only |
+| `POST /haggles` `{"looking_for", "max_usd"}` | `startHaggle` | The buyer agent haggles with every match at once. Answers within 25 s with the result, or `status: "running"` |
+| `GET /haggles/{haggle_id}` | `getHaggle` | The result; waits up to 25 s while it's running |
+| `POST /haggles/{haggle_id}/accept` `{"item_id"?}` | `acceptDeal` | Buys the best price (or the named item's) and returns the payment link |
+| `GET /deals/{deal_id}` | `getDeal` | Whether it's paid |
+| `GET /openapi.json` | | The OpenAPI 3.0 description Fetch reads; no key needed |
+
+Every call except `/openapi.json` needs the key in `X-Yardsale-Key` (or
+`Authorization: Bearer`). The API never shows a floor, and its log line for each call has the
+method, the route pattern, the status, and the time, never a buyer's max.
+
+To connect it (needs a paid Fetch Business plan; the Plus trial worked):
+
+1. Set `YARDSALE_API_KEY` in `.env`, for example from
+   `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`, and start the server. It
+   listens on `127.0.0.1:8110` (`YARDSALE_API_PORT`).
+2. Make it public:
+
+   ```bash
+   cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8110
+   ```
+
+   It prints an `https://<words>.trycloudflare.com` URL, which changes every time it restarts.
+3. In the Fetch Business workbench, pick the agent, open Integrations, and under OpenAPI
+   Integration click Create Business Tool: From URL `<tunnel URL>/openapi.json`, API Key in a
+   Header named `X-Yardsale-Key`, and the key as the Agent Credential. Fetch makes one tool per
+   call and asks the buyer to confirm before `startHaggle` and `acceptDeal`.
+4. Add a skill that says when to call each tool. Ours is in
+   [calhacks-plan.md](docs/calhacks-plan.md#what-fetch-business-offers).
 
 ## Hosting on Agentverse
 
@@ -310,6 +356,8 @@ agent can't accept a chat buyer's counter-offer.
   item agents hosted on Agentverse.
 - [photos.py](yardsale/photos.py): downloads (public addresses only, checked again after every
   redirect and at connect time; 25 MB cap), rotation, HEIC, and a 50-megapixel limit.
+- [business_api.py](yardsale/business_api.py): the HTTP API and OpenAPI description that
+  `@yardsale` on Fetch Business calls.
 - [config.py](yardsale/config.py): settings, the public endpoint, and the readiness check.
 - [agentverse.py](yardsale/agentverse.py): Agentverse profiles and mailbox connection.
 - [offline.py](yardsale/offline.py): offline mode's local stand-in for the Almanac, and the switch
@@ -323,8 +371,8 @@ agent can't accept a chat buyer's counter-offer.
 
 ## Going live
 
-These need accounts, keys, or a public machine. Steps 1, 3, 4, 5, and 6 were done on October 23;
-the rest haven't been verified. Run `uv run python -m yardsale.bureau_server --check` to see which
+These need accounts, keys, or a public machine. Steps 1 and 3 to 6 were done on October 23, and
+7, 9, and 10 on October 24; 2 and 8 haven't been verified. Run `uv run python -m yardsale.bureau_server --check` to see which
 keys are set; it never prints values.
 
 1. **Keys.** Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` and `APIFY_TOKEN`
@@ -344,12 +392,13 @@ keys are set; it never prints values.
    planner routes "sell this" to Yardsale without an @mention.
 6. **Sessions.** Confirm that one ASI:One chat keeps one session ID across messages. Approval and
    haggling rely on it to recognize the same person. One chat kept one session ID on October 23.
-7. **Fetch Business.** Set up `@yardsale`, and test whether ASI:One finds it and whether it can
-   hand off to the Market's address. No code depends on this; it's unverified.
+7. **Fetch Business.** Done on October 24: `@yardsale` ([asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale))
+   searches, haggles, and buys through Yardsale's HTTP API on the Plus trial; see
+   [`@yardsale` on Fetch Business](#yardsale-on-fetch-business). Nothing else depends on it.
 8. **Live buyer test.** `buyer_test` without `--offline` reaches the Market through its
    Agentverse mailbox, so connect it first.
 9. **Payments.** Set Visa sandbox keys or a Stripe test key, close a deal from the chat, pay
-   with a test card, and say "paid". Unverified so far.
+   with a test card, and say "paid". Done with Stripe on October 24; Visa is unverified.
 10. **Hosting.** Set `YARDSALE_HOST_ITEMS=1`, approve a listing, and check that its Agentverse
     profile appears and that an offer from the chat gets an answer. Done on October 24.
 
@@ -362,3 +411,4 @@ keys are set; it never prints values.
 | Offline server with fake services (a mode since removed), `buyer_test --count 12` | 12/12 deals |
 | Offline server with fake services (a mode since removed), `sell --yes`, then restart | listed, then restored at the same address |
 | Live, real ASI:One app, real Claude and Apify keys | photos priced; a photo of Air Jordan 4s priced from 20 eBay sales of the same product; the Approve card showed in ASI:One |
+| Live, `@yardsale` on Fetch Business through the HTTP API and a Cloudflare tunnel (October 24) | searched and haggled with a hosted item agent ($221, then $270 agreed, 22 s); an accepted $283 deal got a Stripe test link in 6 s |

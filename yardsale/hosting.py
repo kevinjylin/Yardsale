@@ -173,7 +173,7 @@ class HostingClient:
                         f"{response.status}: {text[:200]}"
                     )
                 return json.loads(text) if text.strip() else None
-        except aiohttp.ClientError as ex:
+        except (aiohttp.ClientError, TimeoutError) as ex:
             raise HostingError(f"Agentverse couldn't be reached ({type(ex).__name__})") from ex
 
     async def create(self, name: str, readme: str, short_description: str) -> str:

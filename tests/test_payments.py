@@ -11,12 +11,13 @@ import json
 from decimal import Decimal
 from typing import Any
 
+import aiohttp
 import pytest
 from aiohttp import web
 
 from tests import fakes
 from tests.helpers import local_server
-from yardsale import orders
+from yardsale import orders, payments
 from yardsale.checkout import Checkout
 from yardsale.payments import (
     PaymentConfigError,
@@ -148,6 +149,27 @@ async def test_stripe_checkout_links_and_states() -> None:
         with pytest.raises(PaymentError, match="404: No such session") as error:
             await stripe.state(PaymentLink("stripe", "cs_missing", ""))
         assert "sk_test" not in str(error.value)
+
+
+async def test_a_provider_that_times_out_counts_as_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow network (as at a venue) is a PaymentError, so the minute-by-minute check moves on."""
+
+    async def slow(request: web.Request) -> web.Response:
+        await asyncio.sleep(1)
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_post("/v1/checkout/sessions", slow)
+    app.router.add_get("/v1/checkout/sessions/{id}", slow)
+    monkeypatch.setattr(payments, "TIMEOUT", aiohttp.ClientTimeout(total=0.05))
+    async with local_server(app) as base:
+        stripe = StripeCheckout("sk_test_abc", base_url=base)
+        with pytest.raises(PaymentError, match="couldn't be reached"):
+            await stripe.create("deal-1", "Trek FX 2", 34000)
+        with pytest.raises(PaymentError, match="couldn't be reached"):
+            await stripe.state(PaymentLink("stripe", "cs_test_1", ""))
 
 
 # --- Visa Pay By Link ---------------------------------------------------------------------------

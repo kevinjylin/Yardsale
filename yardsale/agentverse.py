@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 from urllib.parse import quote
 
+import aiohttp
 from uagents import Agent
 from uagents.mailbox import AgentverseConnectRequest, register_in_agentverse
 from uagents_core.registration import RegistrationRequest
@@ -60,7 +61,9 @@ def inspector_url(agent: Agent, port: int) -> str:
 
 
 async def connect_mailbox(agent: Agent, api_key: str) -> tuple[bool, str]:
-    """Do what the Inspector's Connect -> Mailbox button does, using an Agentverse API key."""
+    """Do what the Inspector's Connect -> Mailbox button does, using an Agentverse API key.
+    A network failure is reported, not raised, so the server still starts: an agent connected
+    before keeps its mailbox."""
     # Mirrors Agent._handle_connect in uagents 0.25.x.
     details = RegistrationRequest(
         address=agent.address,
@@ -72,11 +75,14 @@ async def connect_mailbox(agent: Agent, api_key: str) -> tuple[bool, str]:
         protocols=list(agent.protocols.keys()),
         metadata=agent.metadata,
     )
-    result = await register_in_agentverse(
-        request=AgentverseConnectRequest(user_token=api_key, agent_type="mailbox"),
-        identity=agent._identity,
-        prefix=agent._prefix,
-        agentverse=agent._agentverse,
-        agent_details=details,
-    )
+    try:
+        result = await register_in_agentverse(
+            request=AgentverseConnectRequest(user_token=api_key, agent_type="mailbox"),
+            identity=agent._identity,
+            prefix=agent._prefix,
+            agentverse=agent._agentverse,
+            agent_details=details,
+        )
+    except (aiohttp.ClientError, TimeoutError) as ex:
+        return False, f"Agentverse couldn't be reached ({type(ex).__name__})"
     return result.success, result.detail or ""

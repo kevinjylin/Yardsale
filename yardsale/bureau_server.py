@@ -43,12 +43,13 @@ from dataclasses import dataclass, field
 from typing import TypeVar
 from uuid import uuid4
 
+from aiohttp import web
 from uagents import Agent, Bureau, Context, Model, Protocol
 from uagents.registration import BatchAlmanacApiRegistrationPolicy
 from uagents_core.registration import BatchRegistrationPolicy
 from uagents_core.types import DeliveryStatus
 
-from yardsale import config
+from yardsale import business_api, config
 from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
@@ -968,6 +969,27 @@ async def connect_to_agentverse(agents: list[Agent]) -> None:
         )
 
 
+async def start_business_api(market: Agent) -> web.AppRunner | None:
+    """@yardsale's HTTP API (business_api.py), when YARDSALE_API_KEY is set."""
+    try:
+        key = business_api.api_key()
+        port = business_api.api_port()
+    except business_api.ApiConfigError as error:
+        log.error(f"The Fetch Business API is off: {error}")
+        return None
+    if key is None:
+        return None
+    api = business_api.BusinessApi(
+        MarketBackend(runtime()),
+        market._build_context,
+        key,
+        os.getenv("YARDSALE_API_URL", "").strip() or None,
+    )
+    runner = await business_api.serve(api, port)
+    log.info(f"Fetch Business API on http://127.0.0.1:{port} (its description: /openapi.json)")
+    return runner
+
+
 async def main(mode: str) -> None:
     offline = mode != "live"
     if offline:
@@ -996,6 +1018,7 @@ async def main(mode: str) -> None:
     )
     if not offline:
         await connect_to_agentverse([market, *services])
+    await start_business_api(market)
 
     write_json(MARKET_FILE, {"address": market.address, "offline": offline, "mode": mode})
     restored = len(runtime().agents)

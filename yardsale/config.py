@@ -84,6 +84,7 @@ def readiness(mode: str) -> list[Check]:
         ),
     ]
     checks.append(_payments_check())
+    checks.append(_business_api_check())
     checks.append(
         Check(
             "YARDSALE_ORDERS_WEBHOOK",
@@ -138,6 +139,28 @@ def _payments_check() -> Check:
             False,
         )
     return Check("payments", True, f"buyers get a {provider.label} link for each deal", False)
+
+
+def _business_api_check() -> Check:
+    from yardsale.business_api import ApiConfigError, api_key, api_port
+
+    try:
+        key, port = api_key(), api_port()
+    except ApiConfigError as ex:
+        return Check("YARDSALE_API_KEY", False, str(ex), True)
+    if key is None:
+        return Check(
+            "YARDSALE_API_KEY",
+            False,
+            "not set: no HTTP API for @yardsale's Fetch Business OpenAPI integration",
+            False,
+        )
+    return Check(
+        "YARDSALE_API_KEY",
+        True,
+        f"@yardsale's HTTP API listens on 127.0.0.1:{port}; tunnel it to make it public",
+        False,
+    )
 
 
 def _hosting_check() -> Check:

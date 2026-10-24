@@ -18,6 +18,7 @@ uv run python -m yardsale.bureau_server --check     # which live-mode keys are s
 uv run python -m yardsale.buyer_test --count 12     # end-to-end test; needs the server running
 uv run python -m yardsale.sell photo.jpg            # photo listing; needs .env keys and the server
 uv run python -m yardsale.hosting --list            # item agents hosted on Agentverse (--cleanup)
+cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8110  # public URL for @yardsale's API
 uv run ruff format --check . && uv run ruff check . && uv run mypy yardsale
 uv run pytest                                       # no keys; fails if anything leaves localhost
 ```
