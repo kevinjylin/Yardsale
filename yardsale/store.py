@@ -1,17 +1,22 @@
-"""Durable state: listings, counter-offers, deals, and chat conversations, in one SQLite file.
+"""Durable state: listings, counter-offers, deals and their payments, and chat conversations, in
+one SQLite file.
 
 The Market, the item agents, and the chat share one connection in one event loop. Every status
 change is a conditional UPDATE inside a transaction, so a listing is approved, canceled, or sold
 at most once however messages interleave.
 
 No seeds are stored here. An item agent's address comes from the master seed and the item ID, so
-re-creating the agents for active listings after a restart gives the same addresses.
+re-creating the agents for active listings after a restart gives the same addresses. Item agents
+hosted on Agentverse (host = 'agentverse') keep running there and aren't re-created.
 
 Listing states:
 
     proposed --approve--> active --deal--> sold
         |                    |
         +------cancel--------+-----------> canceled
+
+A deal's payment: not_collected (no checkout yet) -> pending (payment link sent) -> paid, or
+expired / rejected when the buyer doesn't pay.
 """
 
 from __future__ import annotations
@@ -33,6 +38,14 @@ from yardsale.pricing import listing_prices
 
 PROPOSED, ACTIVE, SOLD, CANCELED = "proposed", "active", "sold", "canceled"
 COUNTER_TTL = 24 * 3600.0  # seconds a counter-offer can be accepted
+BUREAU, AGENTVERSE = "bureau", "agentverse"  # where a listing's item agent runs
+NOT_COLLECTED, PENDING, PAID, EXPIRED, REJECTED = (
+    "not_collected",
+    "pending",
+    "paid",
+    "expired",
+    "rejected",
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS listings (
@@ -53,6 +66,7 @@ CREATE TABLE IF NOT EXISTS listings (
     address TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
+    host TEXT NOT NULL DEFAULT 'bureau',
     UNIQUE (owner, listing_ref)
 );
 CREATE INDEX IF NOT EXISTS listings_by_status ON listings (status);
@@ -62,6 +76,8 @@ CREATE TABLE IF NOT EXISTS counters (
     offer_cents INTEGER NOT NULL,
     counter_cents INTEGER NOT NULL,
     expires_at REAL NOT NULL,
+    rounds INTEGER NOT NULL DEFAULT 0,
+    agreed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (item_id, buyer)
 );
 CREATE TABLE IF NOT EXISTS deals (
@@ -70,14 +86,38 @@ CREATE TABLE IF NOT EXISTS deals (
     buyer TEXT NOT NULL,
     price_cents INTEGER NOT NULL CHECK (price_cents > 0),
     payment_status TEXT NOT NULL DEFAULT 'not_collected',
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    payment_provider TEXT,
+    payment_ref TEXT,
+    payment_url TEXT,
+    commission_cents INTEGER,
+    payout_cents INTEGER,
+    paid_at REAL
 );
+CREATE INDEX IF NOT EXISTS deals_by_payment ON deals (payment_status);
 CREATE TABLE IF NOT EXISTS conversations (
     key TEXT PRIMARY KEY,
     state TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
 """
+
+# Columns added after the first prototype. Older database files get them on open.
+ADDED_COLUMNS = {
+    "listings": {"host": "TEXT NOT NULL DEFAULT 'bureau'"},
+    "counters": {
+        "rounds": "INTEGER NOT NULL DEFAULT 0",
+        "agreed": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "deals": {
+        "payment_provider": "TEXT",
+        "payment_ref": "TEXT",
+        "payment_url": "TEXT",
+        "commission_cents": "INTEGER",
+        "payout_cents": "INTEGER",
+        "paid_at": "REAL",
+    },
+}
 
 
 @dataclass
@@ -99,6 +139,7 @@ class Listing:
     address: str | None = None  # the item agent's, once approved
     created_at: float = 0.0
     updated_at: float = 0.0
+    host: str = BUREAU  # where the item agent runs: this server's Bureau, or Agentverse
 
     @property
     def asking_from(self) -> str:
@@ -124,9 +165,11 @@ class Listing:
 class CounterOffer:
     item_id: str
     buyer: str
-    offer_cents: int
-    counter_cents: int
+    offer_cents: int  # the buyer's latest offer
+    counter_cents: int  # the item agent's latest counter, or the price it agreed to
     expires_at: float
+    rounds: int = 0  # serious offers below the floor so far
+    agreed: bool = False
 
     @property
     def expires_iso(self) -> str:
@@ -139,15 +182,26 @@ class DealRecord:
     item_id: str
     buyer: str
     price_cents: int
-    payment_status: str  # not_collected: payments aren't built
+    payment_status: str  # not_collected | pending | paid | expired | rejected
     created_at: float
+    payment_provider: str | None = None  # stripe | visa
+    payment_ref: str | None = None  # the provider's checkout or payment link ID
+    payment_url: str | None = None  # where the buyer pays
+    commission_cents: int | None = None  # Yardsale's share, recorded when paid
+    payout_cents: int | None = None  # the seller's share, recorded when paid
+    paid_at: float | None = None
 
 
 _LISTING_COLUMNS = (
     "item_id, owner, seller_id, listing_ref, status, title, asking_cents, floor_cents, "
     "seller_asking_cents, seller_floor_cents, suggested_asking_cents, suggested_floor_cents, "
-    "item_json, appraisal_json, address, created_at, updated_at"
+    "item_json, appraisal_json, address, created_at, updated_at, host"
 )
+_DEAL_COLUMNS = (
+    "deal_id, item_id, buyer, price_cents, payment_status, created_at, payment_provider, "
+    "payment_ref, payment_url, commission_cents, payout_cents, paid_at"
+)
+_COUNTER_COLUMNS = "item_id, buyer, offer_cents, counter_cents, expires_at, rounds, agreed"
 
 
 def _listing(row: sqlite3.Row) -> Listing:
@@ -160,6 +214,16 @@ def _listing(row: sqlite3.Row) -> Listing:
     )
 
 
+def _deal(row: sqlite3.Row) -> DealRecord:
+    return DealRecord(**dict(row))
+
+
+def _counter(row: sqlite3.Row) -> CounterOffer:
+    data = dict(row)
+    data["agreed"] = bool(data["agreed"])
+    return CounterOffer(**data)
+
+
 class Store:
     def __init__(self, path: str | Path = ":memory:", clock: Callable[[], float] = time.time):
         self.path = str(path)
@@ -170,11 +234,19 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA foreign_keys = ON")
         self._db.executescript(SCHEMA)
+        self._add_missing_columns()
         if self.path != ":memory:":
             os.chmod(self.path, 0o600)  # seller IDs and floor prices
 
     def close(self) -> None:
         self._db.close()
+
+    def _add_missing_columns(self) -> None:
+        for table, columns in ADDED_COLUMNS.items():
+            have = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
+            for name, declaration in columns.items():
+                if name not in have:
+                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -194,7 +266,7 @@ class Store:
         listing.created_at = listing.updated_at = now
         try:
             self._db.execute(
-                f"INSERT INTO listings ({_LISTING_COLUMNS}) VALUES ({', '.join('?' * 17)})",
+                f"INSERT INTO listings ({_LISTING_COLUMNS}) VALUES ({', '.join('?' * 18)})",
                 (
                     listing.item_id,
                     listing.owner,
@@ -213,6 +285,7 @@ class Store:
                     listing.address,
                     now,
                     now,
+                    listing.host,
                 ),
             )
         except sqlite3.IntegrityError:
@@ -250,6 +323,14 @@ class Store:
         )
         return [_listing(row) for row in rows]
 
+    def hosted(self) -> list[Listing]:
+        """Every listing whose agent was hosted on Agentverse, whatever its state now."""
+        rows = self._db.execute(
+            f"SELECT {_LISTING_COLUMNS} FROM listings WHERE host = ? ORDER BY created_at",
+            (AGENTVERSE,),
+        )
+        return [_listing(row) for row in rows]
+
     def reprice(
         self, item_id: str, owner: str, seller_asking: int | None, seller_floor: int | None
     ) -> Listing | None:
@@ -276,13 +357,15 @@ class Store:
             )
         return self.get(item_id)
 
-    def activate(self, item_id: str, owner: str, address: str) -> Listing | None:
+    def activate(
+        self, item_id: str, owner: str, address: str, host: str = BUREAU
+    ) -> Listing | None:
         """proposed -> active. Approving twice returns the active listing; anything else (sold,
         canceled, someone else's) returns None."""
         self._db.execute(
-            "UPDATE listings SET status = ?, address = ?, updated_at = ? "
+            "UPDATE listings SET status = ?, address = ?, host = ?, updated_at = ? "
             "WHERE item_id = ? AND owner = ? AND status = ?",
-            (ACTIVE, address, self.clock(), item_id, owner, PROPOSED),
+            (ACTIVE, address, host, self.clock(), item_id, owner, PROPOSED),
         )
         listing = self.get(item_id)
         if listing is None or listing.owner != owner or listing.status != ACTIVE:
@@ -315,36 +398,53 @@ class Store:
     # --- Haggling ---------------------------------------------------------------------------
 
     def save_counter(
-        self, item_id: str, buyer: str, offer_cents: int, counter_cents: int
+        self,
+        item_id: str,
+        buyer: str,
+        offer_cents: int,
+        counter_cents: int,
+        rounds: int = 0,
+        agreed: bool = False,
     ) -> CounterOffer:
-        """This buyer's current counter-offer. A newer one replaces any earlier one."""
+        """This buyer's current counter-offer or agreed price. A newer one replaces any earlier
+        one."""
         counter = CounterOffer(
-            item_id, buyer, offer_cents, counter_cents, self.clock() + COUNTER_TTL
+            item_id,
+            buyer,
+            offer_cents,
+            counter_cents,
+            self.clock() + COUNTER_TTL,
+            rounds,
+            agreed,
         )
         self._db.execute(
-            "INSERT OR REPLACE INTO counters VALUES (?, ?, ?, ?, ?)",
-            (item_id, buyer, offer_cents, counter_cents, counter.expires_at),
+            f"INSERT OR REPLACE INTO counters ({_COUNTER_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (item_id, buyer, offer_cents, counter_cents, counter.expires_at, rounds, int(agreed)),
         )
         return counter
 
     def counter(self, item_id: str, buyer: str) -> CounterOffer | None:
         """This buyer's latest counter-offer for the item, expired or not."""
         row = self._db.execute(
-            "SELECT item_id, buyer, offer_cents, counter_cents, expires_at FROM counters "
-            "WHERE item_id = ? AND buyer = ?",
+            f"SELECT {_COUNTER_COLUMNS} FROM counters WHERE item_id = ? AND buyer = ?",
             (item_id, buyer),
         ).fetchone()
-        return CounterOffer(**dict(row)) if row else None
+        return _counter(row) if row else None
 
-    def close_deal(self, item_id: str, buyer: str, price_cents: int) -> DealRecord | None:
+    def close_deal(
+        self, item_id: str, buyer: str, price_cents: int, deal_id: str | None = None
+    ) -> DealRecord | None:
         """active -> sold with one deal. Returns None if the item isn't for sale anymore, so
-        two buyers can't both get it."""
+        two buyers can't both get it.
+
+        A hosted item agent closes its own deals and reports them with their deal_id; recording
+        the same deal_id again returns the deal already recorded."""
         deal = DealRecord(
-            deal_id=f"deal-{uuid4().hex[:12]}",
+            deal_id=deal_id or f"deal-{uuid4().hex[:12]}",
             item_id=item_id,
             buyer=buyer,
             price_cents=price_cents,
-            payment_status="not_collected",
+            payment_status=NOT_COLLECTED,
             created_at=self.clock(),
         )
         with self._transaction() as db:
@@ -353,9 +453,13 @@ class Store:
                 (SOLD, deal.created_at, item_id, ACTIVE),
             ).rowcount
             if not sold:
+                existing = self.deal(deal_id) if deal_id else None
+                if existing is not None and existing.item_id == item_id:
+                    return existing
                 return None
             db.execute(
-                "INSERT INTO deals VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO deals (deal_id, item_id, buyer, price_cents, payment_status, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     deal.deal_id,
                     item_id,
@@ -370,11 +474,64 @@ class Store:
 
     def deal_for(self, item_id: str) -> DealRecord | None:
         row = self._db.execute(
-            "SELECT deal_id, item_id, buyer, price_cents, payment_status, created_at FROM deals "
-            "WHERE item_id = ?",
-            (item_id,),
+            f"SELECT {_DEAL_COLUMNS} FROM deals WHERE item_id = ?", (item_id,)
         ).fetchone()
-        return DealRecord(**dict(row)) if row else None
+        return _deal(row) if row else None
+
+    def deal(self, deal_id: str) -> DealRecord | None:
+        row = self._db.execute(
+            f"SELECT {_DEAL_COLUMNS} FROM deals WHERE deal_id = ?", (deal_id,)
+        ).fetchone()
+        return _deal(row) if row else None
+
+    def deals(
+        self, *, buyer: str | None = None, payment_status: str | None = None
+    ) -> list[DealRecord]:
+        """Deals, newest first, optionally for one buyer or in one payment state."""
+        query, args = f"SELECT {_DEAL_COLUMNS} FROM deals WHERE 1 = 1", []
+        if buyer is not None:
+            query += " AND buyer = ?"
+            args.append(buyer)
+        if payment_status is not None:
+            query += " AND payment_status = ?"
+            args.append(payment_status)
+        query += " ORDER BY created_at DESC, rowid DESC"
+        return [_deal(row) for row in self._db.execute(query, args)]
+
+    # --- Payments ---------------------------------------------------------------------------
+
+    def start_payment(self, deal_id: str, provider: str, ref: str, url: str) -> DealRecord | None:
+        """not_collected -> pending, with the buyer's payment link. None if a link was already
+        made (or the deal is gone), so one deal never gets two links."""
+        changed = self._db.execute(
+            "UPDATE deals SET payment_status = ?, payment_provider = ?, payment_ref = ?, "
+            "payment_url = ? WHERE deal_id = ? AND payment_status = ?",
+            (PENDING, provider, ref, url, deal_id, NOT_COLLECTED),
+        ).rowcount
+        return self.deal(deal_id) if changed else None
+
+    def mark_paid(
+        self, deal_id: str, commission_cents: int, payout_cents: int
+    ) -> DealRecord | None:
+        """pending -> paid, recording Yardsale's commission and the seller's payout. None if it
+        wasn't pending, so a payment is only counted once."""
+        changed = self._db.execute(
+            "UPDATE deals SET payment_status = ?, commission_cents = ?, payout_cents = ?, "
+            "paid_at = ? WHERE deal_id = ? AND payment_status = ?",
+            (PAID, commission_cents, payout_cents, self.clock(), deal_id, PENDING),
+        ).rowcount
+        return self.deal(deal_id) if changed else None
+
+    def end_payment(self, deal_id: str, status: str) -> DealRecord | None:
+        """pending -> expired or rejected: the buyer didn't pay. The item stays sold; the
+        seller can list it again."""
+        if status not in (EXPIRED, REJECTED):
+            raise ValueError(f"not an ending payment status: {status}")
+        changed = self._db.execute(
+            "UPDATE deals SET payment_status = ? WHERE deal_id = ? AND payment_status IN (?, ?)",
+            (status, deal_id, PENDING, NOT_COLLECTED),
+        ).rowcount
+        return self.deal(deal_id) if changed else None
 
     # --- Chat conversations -----------------------------------------------------------------
 

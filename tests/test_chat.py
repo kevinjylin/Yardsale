@@ -32,6 +32,14 @@ from yardsale.store import ACTIVE, CANCELED, PROPOSED, Store
 
 BIKE = fakes.photo_url("bike")
 ADDRESS = re.compile(r"agent1q[0-9a-z]{50,}")
+COUNTERED = re.compile(r"countered with \$([\d,]+)")
+
+
+def countered_at(reply: str) -> int:
+    """The counter-offer in a chat reply, in cents."""
+    found = COUNTERED.search(reply)
+    assert found, reply
+    return int(found.group(1).replace(",", "")) * 100
 
 
 async def listed_bike(market: sim.Market, text: str = "sell this, at least $300") -> str:
@@ -155,9 +163,9 @@ async def test_a_resent_message_is_answered_again_not_redone(
     seller = market.user("seller")
     msg = sim.chat_message("sell", BIKE)
     await seller.send(msg)
-    first = (await seller.next_reply()).text()
+    first = [(await seller.next_reply()).text() for _ in range(2)]  # proposal, then its sales
     await seller.send(msg)
-    assert (await seller.next_reply()).text() == first
+    assert [(await seller.next_reply()).text() for _ in range(2)] == first
     assert len(store.owned(proposal_owner(store))) == 1
 
 
@@ -199,15 +207,20 @@ async def test_a_buyer_finds_haggles_and_buys(market: sim.Market, store: Store) 
     replies.append(await buyer.say("1"))
     assert address in replies[-1]
     replies.append(await buyer.say("offer $250"))
-    assert "countered with $305" in replies[-1]
+    first = countered_at(replies[-1])
+    assert 30000 < first < 36000
+    replies.append(await buyer.say("offer $270"))
+    second = countered_at(replies[-1])
+    assert 30000 < second < first  # comes down, but never to the floor
     replies.append(await buyer.say("yes"))  # a bare yes answers the counter-offer
-    assert "Deal! You agreed to buy the Trek FX 2 Disc hybrid bike, medium for $305" in replies[-1]
-    assert "No payment has been taken" in replies[-1]
+    price = f"${second // 100}"
+    assert f"Deal! The Trek FX 2 Disc hybrid bike, medium is yours for {price}" in replies[-1]
+    assert "payments aren't set up" in replies[-1]
     for reply in replies:  # the floor never reaches a buyer
         assert "$300" not in reply and "lowest" not in reply.lower()
     (listing,) = store.owned(proposal_owner(store))
     deal = store.deal_for(listing.item_id)
-    assert deal is not None and deal.price_cents == 30500
+    assert deal is not None and deal.price_cents == second
     assert "Sold: Trek" in await market.users[0].say("my listings")
 
 
@@ -236,7 +249,8 @@ async def test_competing_chat_buyers(market: sim.Market) -> None:
     for buyer in (alice, bob):
         await buyer.say("bike")
     assert "countered" in await bob.say("offer $220")
-    replies = await asyncio.gather(alice.say("offer $360"), bob.say("accept"))
+    assert "agreed to $360" in await alice.say("offer $360")
+    replies = await asyncio.gather(alice.say("accept"), bob.say("accept"))
     assert sum("Deal!" in reply for reply in replies) == 1
     assert "no longer for sale" in await bob.say("offer $360")
 
@@ -365,12 +379,12 @@ async def test_search_and_counter_cards(market: sim.Market, store: Store) -> Non
     counter = card_in(countered)
     assert counter is not None and isinstance(counter.payload, ReviewCardPayload)
     accept = counter.payload.approve_cta.selection
-    assert accept["cents"] == 30500
+    assert accept["cents"] == countered_at(countered.text())
     assert "isn't open anymore" in await buyer.tap({**accept, "cents": 30000})  # tampered
     assert "isn't open anymore" in await market.user("mallory").tap(accept)
     assert "Deal!" in await buyer.tap(accept)
     deal = store.deal_for(item.id)
-    assert deal is not None and deal.price_cents == 30500
+    assert deal is not None and deal.price_cents == accept["cents"]
 
 
 async def test_dismissed_cards_and_json_taps(market: sim.Market, store: Store) -> None:

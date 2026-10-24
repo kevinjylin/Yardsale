@@ -17,6 +17,7 @@ uv run python -m yardsale.bureau_server             # add --offline to skip Fetc
 uv run python -m yardsale.bureau_server --check     # which live-mode keys are set
 uv run python -m yardsale.buyer_test --count 12     # end-to-end test; needs the server running
 uv run python -m yardsale.sell photo.jpg            # photo listing; needs .env keys and the server
+uv run python -m yardsale.hosting --list            # item agents hosted on Agentverse (--cleanup)
 uv run ruff format --check . && uv run ruff check . && uv run mypy yardsale
 uv run pytest                                       # no keys; fails if anything leaves localhost
 ```
@@ -35,8 +36,15 @@ Code shell.
 - ASI:One's planner gives up on a reply after about 60 seconds. Chat replies must go out within
   `chat.REPLY_WITHIN` (40 s); slower work is sent as a second message.
 - `sell`, chat photo listings, and ASI:One calls spend real money or quota (Apify, Claude, ASI:One).
-  Ask before running them.
-- No code moves money yet. A `Deal` is only an agreed price.
+  Ask before running them, and before live hosting (`YARDSALE_HOST_ITEMS`, `yardsale.hosting
+  --cleanup`), which creates and deletes real Agentverse agents, or anything that calls Visa or
+  Stripe.
+- Payments are test mode only: Visa Acceptance sandbox (`apitest.` hosts) or Stripe test keys.
+  `payments.py` refuses live keys and production hosts; keep it that way. The payment provider,
+  never a buyer's word, decides that a deal is paid.
+- Haggling rules live in `haggle.py` (standard library only), because hosted item agents run a
+  copy of it. Counters must never show the floor, and the buyer agent never offers above or logs
+  the shopper's max.
 - Nothing is for sale until the seller approves it. Buyers never see a floor price, and floors
   and chat text stay out of logs.
 - The server always calls the real Claude, Apify, and ASI:One. Fakes live only in `tests/`

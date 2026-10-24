@@ -1,7 +1,7 @@
 # Background and decisions
 
 This page records Yardsale's product decisions and prototype behavior during Cal Hacks 13.0,
-including seller approval, buying in the chat, and saved state.
+including seller approval, haggling, payment, hosting, and saved state.
 
 The Cal Hacks 13.0 plan (the pitch, what Fetch Business offers, what's missing, and the build
 order) is in [calhacks-plan.md](calhacks-plan.md).
@@ -11,9 +11,10 @@ order) is in [calhacks-plan.md](calhacks-plan.md).
 1. A seller snaps a photo of an item.
 2. About 20 seconds later, Yardsale suggests a listing. Once the seller approves, the item is a
    live agent with its own address. It knows the seller's secret lowest price.
-3. A buyer asks ASI:One something like "find me a cheap road bike." ASI:One reaches Yardsale, and
-   Yardsale connects the buyer to the matching item agents.
-4. Item agents counter lowballs and close deals. The seller keeps the money.
+3. A buyer asks ASI:One something like "find me a cheap road bike, max $300." ASI:One reaches
+   Yardsale, and Yardsale's buyer agent haggles with every matching item agent at once.
+4. Neither side reveals its limit. The buyer accepts the best price and pays through a link.
+   Yardsale keeps a commission and the seller gets the rest.
 
 **Demo moment:** the item agent's address appears right after the seller approves the listing.
 That's the visual proof judges will remember.
@@ -28,39 +29,54 @@ That's the visual proof judges will remember.
    demo.
 2. **One uAgent per listed item, owned by Yardsale.** An agent's identity is a keypair made from its
    seed, and our server generates the seeds, so Yardsale owns every item agent. A buyer's ASI:One
-   account owns nothing. Each item agent records its seller's ID and payout details, so when a deal
-   closes the money goes to the seller, not to Yardsale. Pitch: "Yardsale manages the agents,
-   sellers keep the money."
-3. **Item agents stay off Agentverse.** Agentverse's agent limits only count agents connected to
-   your Agentverse account. The chat cited 8 hosted plus 8 mailbox agents on the free plan, and 25
-   each on Premium; these figures haven't been checked against our account. Item agents run in our
-   own server and register only on the Almanac, so there's no cap on them.
+   account owns nothing. Each listing records its seller's ID. Yardsale is the merchant: the buyer
+   pays Yardsale, which keeps a commission (5% by default) and owes the seller the rest. Pitch:
+   "Yardsale manages the agents, sellers keep the money." Payouts to sellers aren't automated.
+3. **Item agents run in our server by default; a few can be hosted on Agentverse.** Agentverse's
+   agent limits only count agents connected to your Agentverse account. The chat cited 8 hosted
+   plus 8 mailbox agents on the free plan, and 25 each on Premium; these figures haven't been
+   checked against our account. Item agents in our own server register only on the Almanac, so
+   there's no cap on them. Hosting gives an item its own Agentverse profile page, which is what
+   Fetch's track rewards, so `YARDSALE_HOST_ITEMS=N` hosts up to N active listings there (through
+   the Hosting API) and runs the rest in the server.
 4. **Graduation pitch:** power sellers can later move to their own Fetch Business agent that they
    own.
 5. **Photo work is split across three agents on Agentverse.** The Identifier, Researcher, and
    Appraiser each do one job, and each has its own Agentverse profile, so there's more than one
-   Yardsale agent on Agentverse. With the Market they take 4 mailbox slots in total, however many
-   items are listed.
+   Yardsale agent on Agentverse. With the Market and the buyer agent they take 5 mailbox slots in
+   total, plus any hosted item agents.
 6. **Sellers use the ASI:One chat. Claude reads photos, ASI:One reads text.** A seller attaches a
    photo in ASI:One, so the ASI:One app is our phone upload page. ASI:One's docs don't list image
    input for its models, so Claude does the photo work, and ASI:One's `asi1-mini` reads what the
    seller typed. This copies Maestro, the LA Hacks 2026 Fetch track winner
    ([repo](https://github.com/RogueL90/LA-Hacks-AI-Hackathon)): its agents send video frames to
    Claude and use `asi1-mini` only to read typed messages.
+7. **Haggling is two steps: agree, then accept.** An item agent agrees to any offer at or above
+   its floor, but nothing is sold until the buyer accepts. So a buyer agent can haggle with
+   several items at once and buy one. Below the floor, counters come down each round but stop a
+   private gap short of the floor, so a counter never shows it. The protocol is published
+   (`YardsaleHaggle` 1.0.0), so any agent can take the buyer's seat.
+8. **Payment links, test mode only.** Fetch's own Stripe example says plain ASI:One chat often
+   won't show an embedded checkout, so the chat gets a payment link (Visa Pay By Link, or Stripe
+   Checkout as the fallback) and agent buyers get the same link in a Payment Protocol
+   `RequestPayment`. Live keys and Visa's production host are refused.
 
 ## Architecture
 
 | Agent                       | Runs where                                  | Agentverse slots       |
 | --------------------------- | ------------------------------------------- | ---------------------- |
 | `@yardsale`                 | Fetch Business. ASI:One finds it.           | Unknown (mentor Q)     |
-| Market agent ("Yardsale")   | Our Bureau server, Agentverse mailbox so ASI:One can reach it. Speaks the Chat Protocol. | 1 |
+| Market agent ("Yardsale Orchestrator", `@ys-orchestrator`) | Our Bureau server, Agentverse mailbox so ASI:One can reach it. Speaks the Chat Protocol. | 1 |
 | Identifier                  | Our Bureau server, Agentverse mailbox       | 1                      |
 | Researcher                  | Our Bureau server, Agentverse mailbox       | 1                      |
 | Appraiser                   | Our Bureau server, Agentverse mailbox       | 1                      |
-| Item agents (one per item)  | Our Bureau server, Almanac only             | 0, at any count        |
+| Shopper (the buyer agent, `@ys-shopper`) | Our Bureau server, Agentverse mailbox | 1             |
+| Item agents (one per item)  | Our Bureau server, Almanac only; or hosted on Agentverse (`YARDSALE_HOST_ITEMS`) | 0 in the server; 1 each hosted |
 | Buyers                      | ASI:One acts for them                       | 0                      |
 
-Buyer flow: ASI:One → `@yardsale` → Market agent → item agent. The Market relays replies back.
+Buyer flow: ASI:One → `@yardsale` → Market agent → Shopper → item agents, all at once. The
+Market relays the result back, then passes the buyer's acceptance to the chosen item agent and
+sends a payment link.
 
 Seller flow: ASI:One chat (photo + text) → Market → Identifier → Researcher → Appraiser →
 Market → proposal in the chat → seller approves → new item agent → address in the chat. The next
@@ -116,21 +132,36 @@ the same answer again instead of being acted on twice.
 
 ## Buying in the ASI:One chat
 
+Code: [chat.py](../yardsale/chat.py), [shopper.py](../yardsale/shopper.py),
+[haggle.py](../yardsale/haggle.py), [negotiation.py](../yardsale/negotiation.py), and
+[checkout.py](../yardsale/checkout.py).
+
 1. The buyer asks for something ("find me a cheap road bike under $300"). The Market searches
    active listings by word ([search.py](../yardsale/search.py)), with no paid service. A budget
    filters on the asking price only, so results never hint at a floor.
-2. The buyer picks a result by number, or offers straight away (`offer $250 on 2`).
-3. The Market sends the offer to the item agent with the conversation as `buyer_ref`. Item agents
-   accept `buyer_ref` only from the Market, so no other agent can act as a chat buyer.
-4. At or above the floor, the deal closes at the offer. Below it, the agent counters halfway to
-   the asking price, never below the floor ([negotiation.py](../yardsale/negotiation.py)).
-5. `accept` takes the buyer's own latest counter at its exact price, within 24 hours. Two buyers
-   can't both buy: closing a deal is a conditional update that only one can win.
+2. With a max and "haggle" ("haggle for me, max $320"), the Market sends up to five matching
+   items asking at most about 1.4 times the max to the Shopper. The Shopper haggles with all of
+   them at once, up to 6 rounds each, and the reply lists every round for every item with the
+   best price, plus a card with a Buy button for each. Without a max, the Market asks for one.
+3. Or the buyer haggles by hand: picks a result by number and offers (`offer $250 on 2`).
+4. Offers reach item agents with the conversation as `buyer_ref`. Item agents accept `buyer_ref`
+   only from the Market and the Shopper, so no other agent can act as a chat buyer.
+5. An offer at or above the floor gets an agreement at that price. A lower one gets a counter
+   that comes down each round but stops a private gap above the floor; an offer under half the
+   asking price moves nothing ([haggle.py](../yardsale/haggle.py)).
+6. `accept` (or `accept 2`, or a Buy button) buys at the exact agreed or countered price, within
+   24 hours. Two buyers can't both buy: closing a deal is a conditional update that only one can
+   win.
+7. The deal gets a payment link (Visa Pay By Link or Stripe, test mode). `paid` asks the
+   provider; the server also checks every minute. Paid deals record the commission and the
+   seller's payout, which the seller sees under `my listings`.
 
 ## Saved state
 
-[store.py](../yardsale/store.py) keeps listings, proposals, counter-offers, deals, and chat
-conversation state in SQLite, one file per mode. Listings move `proposed → active → sold`, or to
+[store.py](../yardsale/store.py) keeps listings (and whether each agent runs in the server or on
+Agentverse), proposals, each buyer's haggle with each item (rounds, latest price, agreed or not),
+deals with their payment state, and chat conversation state in SQLite, one file per mode. Columns
+added since the first version are added to older databases when the server starts. Listings move `proposed → active → sold`, or to
 `canceled`. On start, the Bureau re-creates the agent of every active listing; seeds come from
 the item ID, so addresses don't change. Approval starts the agent before marking the listing
 active, so an interrupted approval leaves a proposal, never a live listing without an agent. A
@@ -207,16 +238,29 @@ per agent, because agent addresses come from the master seed and don't change.
   became a proposal whose Approve card showed in ASI:One. Uploads came as Cloudinary links with
   `mime_type` `"image"` and downloaded without authentication, and one chat kept one session ID
   across messages. ASI:One's chat page sometimes shows a slow reply only after a reload.
-  Unknown: whether tapping a card reaches the Market, and whether the planner routes "sell this"
-  to it without an @mention. Buying hasn't been tried from the real app.
+  On October 24, from a second ASI:One chat, the buyer agent haggled for a listed item and the
+  buyer accepted; the deal was recorded. Through ASI:One's planner API (`planner_mode`), "find
+  me a used hybrid bike ... haggle the price down, my max is $320", with no @mention, picked the
+  Market as "the best-fit agent for buying secondhand and haggling", haggled with a hosted item
+  agent to $296, and bought it when told to accept. The planner doesn't pass "accept" on word for
+  word: it wrote "The buyer accepts the negotiated deal ... Please proceed to complete the
+  purchase", which the Market first read as a new search. While a price is waiting, the Market
+  now reads such prose as accepting it (`commands.accepts_deal`). Selling is different: asked to
+  sell a lamp and sneakers, the planner offered to research prices itself and asked for photos,
+  without looking for an agent. Use the @mention for selling.
+  Unknown: whether tapping a card in the web app reaches the Market.
 - **Real keys.** On October 23, with real Claude and Apify keys, a photo of Air Jordan 4s was
-  identified and priced from 20 eBay sales of the same product. Matching quality for other kinds
-  of items, and how long pricing takes, are unproven.
-- **Lowballs reveal the floor.** A counter is the higher of the floor and the halfway point
-  between the offer and the asking price (`counter_price` in [pricing.py](../yardsale/pricing.py)).
-  With appraised prices the floor is at least 70% of the asking price, so any offer under about
-  40% of asking is countered at exactly the floor. [calhacks-plan.md](calhacks-plan.md) has the
-  fix in its build order.
+  identified and priced from 20 eBay sales of the same product. On October 24 the same kind of
+  photo took 36 seconds: identify 11 s, eBay research 12 s, appraise 14 s. Matching quality for
+  other kinds of items is unproven.
+- **A seller's lowest price far under the appraisal.** On October 24 a seller set "at least
+  $40" on shoes appraised at $190 (lowest $180), and the buyer agent's opening offer of $123 was
+  agreed at once. That follows the rules, but nothing warned the seller.
+- **Apify credit.** The account is on Apify's free plan ($5 a month), and $4.70 of the
+  October 14 – November 13 cycle was used by October 24, enough for 3 or 4 more photos.
+- **Probing the floor with new identities.** One buyer can't find a floor from counters or
+  agreements, but someone making many identities could still narrow it down by offering just
+  above and below, as on any marketplace with automatic offers.
 - **Live buyer test needs the Market connected.** In live mode the Market's Almanac entry points
   at its Agentverse mailbox, so `buyer_test` without `--offline` only reaches it once it's
   connected to Agentverse.
@@ -225,11 +269,25 @@ per agent, because agent addresses come from the master seed and don't change.
   the graduation path for power sellers. No code depends on it.
 - **Telling sellers about a sale.** The seller sees a sale under "my listings"; Yardsale doesn't
   message them when it happens.
-- **Interactive Cards in the real app.** Proposals, search results, and counter-offers carry cards
-  built with the installed `uagents_core.contrib.protocols.chat.cards` module (Approve, Details,
-  Accept buttons; metadata only, no protocol digest change). Whether ASI:One shows them is
-  unverified, so every reply also works as plain text and typed commands do the same things.
-- **Payments.** None. A deal records `payment_status="not_collected"`.
+- **Interactive Cards in the real app.** Proposals, the eBay sales behind a price (a carousel),
+  the seller's prices form, search results, counter-offers, the haggling result, and payment
+  carry cards built with the installed `uagents_core.contrib.protocols.chat.cards` module
+  (metadata only, no protocol digest change). Only the Approve card has been seen in ASI:One's
+  web app; ASI:One's planner API received the haggling card as a card for the buyer to act on.
+  Every reply also works as plain text, and typed commands do the same things.
+- **Payments.** Built for test mode, and tested against local stand-ins for Stripe and Visa, but
+  not yet run against either. Visa's "paid" check searches transactions for the deal ID; whether
+  Pay By Link payments are filed under it is unverified. Payouts to sellers aren't automated.
+- **Hosting on Agentverse.** Run live on October 24: the Hosting API calls (create, secret,
+  storage, code, start) all worked, the generated code compiled, and the agent registered on
+  the Almanac about 3 seconds after starting. Two test bikes were hosted; each got a public
+  profile with its README and badges, read its floor, haggled three rounds with the buyer agent
+  in about 20 seconds, and reported its sale to the Market. Agentverse shows only the first 32
+  characters of an agent's name, so hosted agents are named after the item, cut at a word.
+- **Our own Apify Actor.** Pushed to Apify (private) on October 24 as `resale-comps`. eBay
+  answered 403 to every request through Apify's default proxy, so it returned no sales; the
+  Researcher still uses `caffein.dev/ebay-sold-listings`. Getting past eBay's blocking (for
+  example with residential proxies) is an open decision.
 - **Sold or canceled items on the Almanac.** Their entries stay until they expire; the agent turns
   down offers, and after a restart it isn't re-created.
 
@@ -257,8 +315,8 @@ These were planned in the chat; whether they're done wasn't recorded.
 
 ## Code to borrow from Maestro
 
-Maestro ([LA Hacks repo](https://github.com/RogueL90/LA-Hacks-AI-Hackathon)) has working
-code for things Yardsale doesn't do yet: the Payment Protocol with Stripe test mode, and a
-working example of Interactive Cards in the real ASI:One app. It uses
+Maestro ([LA Hacks repo](https://github.com/RogueL90/LA-Hacks-AI-Hackathon)) has a working
+example of Interactive Cards in the real ASI:One app, and of the Payment Protocol with Stripe
+test mode (Yardsale now has its own). It uses
 uagents 0.26.1; Yardsale is pinned below 0.26 because it relies on Bureau and agent internals
 tested on 0.25.5.

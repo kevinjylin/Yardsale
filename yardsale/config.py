@@ -83,6 +83,17 @@ def readiness(mode: str) -> list[Check]:
             False,
         ),
     ]
+    checks.append(_payments_check())
+    checks.append(
+        Check(
+            "YARDSALE_ORDERS_WEBHOOK",
+            _is_set("YARDSALE_ORDERS_WEBHOOK"),
+            "each order's status is sent here"
+            if _is_set("YARDSALE_ORDERS_WEBHOOK")
+            else "not set: orders are only kept in the listings database",
+            False,
+        )
+    )
     if mode == "live":
         try:
             url = public_url()
@@ -103,12 +114,56 @@ def readiness(mode: str) -> list[Check]:
             Check(
                 "AGENTVERSE_API_KEY",
                 _is_set("AGENTVERSE_API_KEY"),
-                "connects the 4 mailbox agents at startup; without it, use the Inspector links "
+                "connects the 5 mailbox agents at startup; without it, use the Inspector links "
                 "the server logs",
                 False,
             )
         )
+        checks.append(_hosting_check())
     return checks
+
+
+def _payments_check() -> Check:
+    from yardsale.payments import PaymentConfigError, provider_from_env
+
+    try:
+        provider = provider_from_env()
+    except PaymentConfigError as ex:
+        return Check("payments", False, str(ex), True)
+    if provider is None:
+        return Check(
+            "payments",
+            False,
+            "no Visa or Stripe keys: deals close at an agreed price with no payment link",
+            False,
+        )
+    return Check("payments", True, f"buyers get a {provider.label} link for each deal", False)
+
+
+def _hosting_check() -> Check:
+    from yardsale.hosting import hosted_limit
+
+    limit = hosted_limit()
+    if limit == 0:
+        return Check(
+            "YARDSALE_HOST_ITEMS",
+            False,
+            "0: every item agent runs in this server and registers on the Almanac only",
+            False,
+        )
+    if not _is_set("AGENTVERSE_API_KEY"):
+        return Check(
+            "YARDSALE_HOST_ITEMS",
+            False,
+            f"{limit}, but hosting on Agentverse needs AGENTVERSE_API_KEY",
+            False,
+        )
+    return Check(
+        "YARDSALE_HOST_ITEMS",
+        True,
+        f"up to {limit} item agents are hosted on Agentverse; the rest run in this server",
+        False,
+    )
 
 
 def report(mode: str) -> tuple[str, bool]:

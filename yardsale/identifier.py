@@ -64,6 +64,7 @@ def build_identifier(identify: Identify, offline: bool) -> Agent:
     agent = service_agent(
         "identifier",
         "yardsale-identifier",
+        "ys-identifier",
         "Identifies a secondhand item from a photo and writes an eBay search query for it.",
         offline,
     )

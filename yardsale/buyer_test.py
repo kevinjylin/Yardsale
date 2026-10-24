@@ -3,8 +3,9 @@
     uv run python -m yardsale.buyer_test --count 12            # live
     uv run python -m yardsale.buyer_test --count 12 --offline
 
-This separate buyer agent lists N items through the Market, lowballs every item agent, accepts
-each counter-offer, and checks that every deal closes. In live mode the buyer finds the agents
+This separate buyer agent lists N items through the Market, offers every item agent 55% of its
+asking price (below the seller's floor, so the agent counters), accepts each counter-offer, and
+checks that every deal closes. In live mode the buyer finds the agents
 only through the Almanac, then looks every address up on the Almanac API to confirm it.
 Exits 0 when every check passes.
 """
@@ -68,7 +69,7 @@ SAMPLE_ITEMS = [
     ("Standing desk", 25000),
     ("Polaroid camera", 7000),
 ]
-LOWBALL_PERCENT = 30
+OFFER_PERCENT = 55  # below the floor, but not a lowball, so the item agent comes down
 FLOOR_PERCENT = 60
 
 
@@ -77,7 +78,7 @@ class Tracker:
     count: int
     done: asyncio.Event = field(default_factory=asyncio.Event)
     listed: dict[str, Listed] = field(default_factory=dict)  # item_id -> Listed
-    lowballs: dict[str, int] = field(default_factory=dict)
+    offers: dict[str, int] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     deals: dict[str, Deal] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
@@ -101,8 +102,8 @@ def tracker() -> Tracker:
 async def on_listed(ctx: Context, sender: str, msg: Listed) -> None:
     t = tracker()
     t.listed[msg.item_id] = msg
-    offer = msg.asking_cents * LOWBALL_PERCENT // 100
-    t.lowballs[msg.item_id] = offer
+    offer = msg.asking_cents * OFFER_PERCENT // 100
+    t.offers[msg.item_id] = offer
     status = await ctx.send(msg.item_address, Offer(item_id=msg.item_id, offer_cents=offer))
     if status.status == DeliveryStatus.FAILED:
         t.failures.append(f"{msg.title}: could not reach item agent ({status.detail})")
@@ -117,7 +118,12 @@ async def on_listing_rejected(ctx: Context, sender: str, msg: ListingRejected) -
 
 @buyer_proto.on_message(Counter)
 async def on_counter(ctx: Context, sender: str, msg: Counter) -> None:
-    tracker().counters[msg.item_id] = msg.counter_cents
+    t = tracker()
+    t.counters[msg.item_id] = msg.counter_cents
+    listed = t.listed.get(msg.item_id)
+    floor = listed.asking_cents * FLOOR_PERCENT // 100 if listed else 0
+    if not msg.agreed and msg.counter_cents <= floor:
+        t.failures.append(f"{msg.item_id}: a counter-offer showed the seller's floor")
     await ctx.send(sender, AcceptCounter(item_id=msg.item_id, counter_cents=msg.counter_cents))
 
 
@@ -144,12 +150,12 @@ def report(t: Tracker, market: str, almanac: dict[str, list[str]] | None) -> int
     print("\n=== Yardsale Bureau test ===")
     print(f"Mode: {'offline (local directory)' if almanac is None else 'live (Almanac API)'}")
     print(f"Market agent: {market}")
-    print(f"{'item':<20} {'ask':>9} {'lowball':>9} {'counter':>9} {'deal':>9}  item agent address")
+    print(f"{'item':<20} {'ask':>9} {'offer':>9} {'counter':>9} {'deal':>9}  item agent address")
     for item_id, item in t.listed.items():
         deal = t.deals.get(item_id)
         print(
             f"{item.title[:20]:<20} {dollars(item.asking_cents):>9} "
-            f"{dollars(t.lowballs.get(item_id, 0)):>9} {dollars(t.counters.get(item_id, 0)):>9} "
+            f"{dollars(t.offers.get(item_id, 0)):>9} {dollars(t.counters.get(item_id, 0)):>9} "
             f"{dollars(deal.price_cents) if deal else '-':>9}  {item.item_address}"
         )
 
@@ -159,7 +165,7 @@ def report(t: Tracker, market: str, almanac: dict[str, list[str]] | None) -> int
             f"unique item agent addresses: {len(set(addresses))}",
             len(set(addresses)) == t.count,
         ),
-        (f"lowballs countered: {len(countered)}/{t.count}", len(countered) == t.count),
+        (f"offers countered: {len(countered)}/{t.count}", len(countered) == t.count),
         (f"deals closed: {len(t.deals)}/{t.count}", len(t.deals) == t.count),
     ]
     if almanac is not None:

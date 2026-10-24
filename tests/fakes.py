@@ -25,6 +25,7 @@ from yardsale.appraiser import Judgement
 from yardsale.asione import SellerMessage, read_locally
 from yardsale.chat import Photo
 from yardsale.models import Comp, ItemDetails
+from yardsale.payments import PaymentError, PaymentLink, PaymentState
 from yardsale.photos import PhotoError
 from yardsale.researcher import ResearchError
 
@@ -218,3 +219,31 @@ async def fetch(ctx: Context, photo: Photo) -> bytes:
     if "broken" in name:
         raise PhotoError("I couldn't download the photo (the link returned 404).")
     return photo_bytes(name if name in CATALOG else "bike")
+
+
+class FakePayments:
+    """A payment provider that makes links on a made-up site; tests decide what's paid."""
+
+    name = "fake"
+    label = "Test pay link"
+
+    def __init__(self) -> None:
+        self.links: dict[str, PaymentLink] = {}
+        self.paid: set[str] = set()
+        self.expired: set[str] = set()
+        self.fail = False
+
+    async def create(self, deal_id: str, title: str, price_cents: int) -> PaymentLink:
+        if self.fail:
+            raise PaymentError("the test provider is down")
+        link = PaymentLink(self.name, f"pay-{deal_id}", f"https://pay.example.test/{deal_id}")
+        self.links[deal_id] = link
+        return link
+
+    async def state(self, link: PaymentLink) -> PaymentState:
+        if link.ref in self.paid:
+            return "paid"
+        return "expired" if link.ref in self.expired else "pending"
+
+    def pay(self, deal_id: str) -> None:
+        self.paid.add(self.links[deal_id].ref)

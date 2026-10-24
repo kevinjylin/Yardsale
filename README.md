@@ -5,39 +5,48 @@
 
 Snap a photo of something you want to sell. Yardsale identifies it, prices it from recent eBay
 sales, and suggests a listing. Once you approve, the item becomes a live Fetch.ai agent with its
-own address. The agent knows your lowest price and haggles with buyers for you. Buyers ask for
-what they want ("find me a cheap road bike"), and make offers in the same chat.
+own address. The agent knows your lowest price and haggles with buyers for you. Buyers say what
+they want and the most they'll pay ("find me a hybrid bike, haggle for me, max $320"), and
+Yardsale's buyer agent haggles with every matching item agent at once, over several rounds,
+without either side revealing its limit. The buyer accepts the best price and gets a payment
+link. Yardsale keeps a commission; the seller gets the rest.
 
-**Status:** prototype. Selling with approval, buying with offers and counter-offers, saved state,
-and restarts work and are tested with fake Claude, Apify, and ASI:One answers (the fakes are
-test-only; the server always uses the real services). On October 23, photos sent from the real
-ASI:One app were priced with real Claude and Apify keys. Buying hasn't been tried from the real
-app yet (see [Going live](#going-live)). No code moves money: a deal is an agreed price.
+**Status:** prototype. Selling with approval, multi-round haggling (yours or the buyer agent's),
+payment links, saved state, and restarts work and are tested with fake Claude, Apify, ASI:One,
+and payment answers (the fakes are test-only; the server always uses the real services). On
+October 23, photos sent from the real ASI:One app were priced with real Claude and Apify keys.
+On October 24, buyers haggled and bought from the ASI:One app and through ASI:One's planner
+(which found Yardsale without an @mention), and item agents were hosted on Agentverse. Not yet
+tried for real: a Visa or Stripe sandbox payment (see [Going live](#going-live)). Payments are
+test mode only: live keys are refused.
 [docs/background.md](docs/background.md) has the decisions made so far and what's still open, and
 [docs/calhacks-plan.md](docs/calhacks-plan.md) has the Cal Hacks plan.
 
 ## Agents
 
 Yardsale was started during [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/), October 23–25,
-2026. These four agents are registered on Agentverse as mailbox agents and run in one Bureau
-server:
+2026. These agents are Agentverse mailbox agents and run in one Bureau server:
 
-| Agent | Address | Does |
-| --- | --- | --- |
-| [Yardsale](https://agentverse.ai/agents/details/agent1qtm5uclxjx5ye4fhtjcqcc2d4vh5aucary75dn90lwq7808uyzvt2std9nj/profile) (the Market) | `agent1qtm5uclxjx5ye4fhtjcqcc2d4vh5aucary75dn90lwq7808uyzvt2std9nj` | Talks to sellers and buyers in ASI:One through the Agent Chat Protocol. Runs pricing, proposals, search, and offers, and starts an item agent for each approved listing. |
-| [yardsale-identifier](https://agentverse.ai/agents/details/agent1q2efftklrnnu6z95xu43lxj4gk8jn94hjhap3n90mvfrf8t8n29mz97x60k/profile) | `agent1q2efftklrnnu6z95xu43lxj4gk8jn94hjhap3n90mvfrf8t8n29mz97x60k` | Claude works out what's in a photo and writes an eBay search for it. |
-| [yardsale-researcher](https://agentverse.ai/agents/details/agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2/profile) | `agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2` | Finds what that product sold for on eBay in the last 90 days, through Apify. |
-| [yardsale-appraiser](https://agentverse.ai/agents/details/agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k/profile) | `agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k` | Claude picks which sales are the same product; code sets the asking price and the floor. |
+| Agent | Handle | Address | Does |
+| --- | --- | --- | --- |
+| [Yardsale Orchestrator](https://agentverse.ai/agents/details/agent1qtm5uclxjx5ye4fhtjcqcc2d4vh5aucary75dn90lwq7808uyzvt2std9nj/profile) (the Market) | `@ys-orchestrator` | `agent1qtm5uclxjx5ye4fhtjcqcc2d4vh5aucary75dn90lwq7808uyzvt2std9nj` | Talks to sellers and buyers in ASI:One through the Agent Chat Protocol. Runs pricing, proposals, search, and offers, and starts an item agent for each approved listing. |
+| [yardsale-identifier](https://agentverse.ai/agents/details/agent1q2efftklrnnu6z95xu43lxj4gk8jn94hjhap3n90mvfrf8t8n29mz97x60k/profile) | `@ys-identifier` | `agent1q2efftklrnnu6z95xu43lxj4gk8jn94hjhap3n90mvfrf8t8n29mz97x60k` | Claude works out what's in a photo and writes an eBay search for it. |
+| [yardsale-researcher](https://agentverse.ai/agents/details/agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2/profile) | `@ys-researcher` | `agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2` | Finds what that product sold for on eBay in the last 90 days, through Apify. |
+| [yardsale-appraiser](https://agentverse.ai/agents/details/agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k/profile) | `@ys-appraiser` | `agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k` | Claude picks which sales are the same product; code sets the asking price and the floor. |
+| [yardsale-shopper](https://agentverse.ai/agents/details/agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs/profile) | `@ys-shopper` | `agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs` | The buyer agent: haggles with several item agents at once for a shopper, never above their max. New; it connects to Agentverse the next time the server starts live. |
 
 Every approved listing also gets its own **item agent**, which holds the seller's private floor
-and haggles with buyers. Item agents are registered on Fetch's Almanac only, not Agentverse, so
-there's no limit on how many there are. The chat gives each one's address when the seller
-approves.
+and haggles with buyers. By default item agents run in the Bureau and register on Fetch's Almanac
+only, so there's no limit on how many there are. With `YARDSALE_HOST_ITEMS` set, the first few are
+created on Agentverse instead, each with its own profile page
+([Hosting on Agentverse](#hosting-on-agentverse)). The chat gives each one's address when the
+seller approves.
 
-**Try it in ASI:One:** open [asi1.ai](https://asi1.ai), start a chat with the Yardsale agent
-(from its Agentverse profile, or by mentioning its address), attach a photo, and type something
-like "sell this, at least $40". To buy, ask for something like "find me a cheap road bike". The
-agents answer only while the server is running.
+**Try it in ASI:One:** open [asi1.ai](https://asi1.ai), start a chat with the Yardsale
+Orchestrator (from its Agentverse profile, or by mentioning `@ys-orchestrator` or its address),
+attach a photo, and type something like "sell this, at least $40". To buy, ask for something
+like "find me a road bike, haggle for me, max $300". The agents answer only while the server is
+running.
 
 **To run it yourself** you need these accounts and keys (put them in `.env`; see
 [.env.example](.env.example)):
@@ -49,9 +58,13 @@ agents answer only while the server is running.
   $0.08 per photo.
 - [ASI:One API key](https://asi1.ai/developer) (`ASI_ONE_API_KEY`, recommended): `asi1-mini` reads what
   people type. Without it, a simpler keyword reader is used.
-- [Agentverse API key](https://agentverse.ai/) (`AGENTVERSE_API_KEY`, optional): connects the four
-  agents' mailboxes at startup and uploads their profile READMEs from
-  [yardsale/readmes/](yardsale/readmes/).
+- [Agentverse API key](https://agentverse.ai/) (`AGENTVERSE_API_KEY`, optional): connects the
+  five agents' mailboxes at startup and uploads their profile READMEs from
+  [yardsale/readmes/](yardsale/readmes/). With `YARDSALE_HOST_ITEMS`, it also hosts item agents.
+- Payment links (optional; without them a deal is an agreed price only): a
+  [Visa Acceptance sandbox](https://developer.visaacceptance.com/) account for Pay By Link
+  (`VISA_MERCHANT_ID`, `VISA_KEY_ID`, `VISA_SHARED_SECRET`), or a
+  [Stripe](https://dashboard.stripe.com/test/apikeys) test key (`STRIPE_SECRET_KEY=sk_test_...`).
 
 The addresses above come from this deployment's master seed. A server started with a different
 seed gets different addresses.
@@ -93,7 +106,7 @@ uv run ruff format --check . && uv run ruff check . && uv run mypy yardsale
 uv run pytest
 ```
 
-The tests (about 210, a few seconds) run the real agents in one process with fake providers.
+The tests (about 290, a few seconds) run the real agents in one process with fake providers.
 They fail if any test looks up or connects to anything but localhost, so they can never spend
 money or reach Fetch's servers.
 
@@ -127,16 +140,92 @@ Market acknowledges every message at once and replies within 40 seconds: with th
 
 1. The buyer says what they want ("find me a cheap road bike under $300"). The Market searches
    active listings by word, cheapest first among equal matches. No paid service is involved.
-2. They pick a result by number for details, or offer straight away (`offer $250 on 2`).
-3. The Market passes the offer to the item agent. At or above the floor, the deal closes at the
-   offer. Below it, the agent counters halfway to the asking price, never below the floor.
-4. `accept` (or `yes`) takes the buyer's latest counter-offer, at its exact price, within 24
-   hours. A newer counter replaces an older one.
+2. **Haggle for me.** With a max ("haggle for me, max $320", or `haggle $320` after a search), the
+   Market sends the buyer agent (the Shopper) the matching items asking up to about 1.4 times the
+   max, five at most. The Shopper haggles with all of them at once and the reply, with a card,
+   shows every round for every item and the best price. `accept` buys the best one, `accept 2`
+   another, or tap Buy on the card.
+3. **Or haggle yourself.** Pick a result by number for details, then offer (`offer $250 on 2`).
+   Each offer gets an answer from the item agent: agreed, or a counter.
+4. `accept` (or `yes`) buys at the latest counter or agreed price, exactly, within 24 hours.
+5. **Pay.** The reply has a payment link (Visa Pay By Link or Stripe, test mode) and a card with
+   "I've paid". `paid` checks with the provider; `my orders` lists purchases. The server also
+   checks pending payments every minute. Without payment keys, the deal is an agreed price only.
 
-Buyers never see a floor: not in search results, details, or the agents' descriptions, and a
-budget filters on the asking price only. Floors also stay out of server logs, and message text
-isn't logged at all. Offers above the asking price are refused in chat, and sellers can't buy
-their own items.
+**The haggling rules** ([haggle.py](yardsale/haggle.py)), the same wherever an item agent runs:
+
+- An item agent agrees to any offer at or above the seller's floor. An agreement isn't a sale:
+  the buyer closes it with `accept`, so a buyer agent can haggle with several items and buy one.
+- Below the floor it counters, keeping 60% of the remaining distance each round, but its counters
+  stop short of the floor by a private gap (15 to 35% of the asking-to-floor spread, set by a
+  secret for each item). So no counter shows the floor, even to someone who knows these rules.
+- An offer under half the asking price is a lowball, and the agent doesn't come down for it.
+- Counters never go back up, and once an agent has agreed a price with a buyer, that buyer's
+  lower offers get the same price back, so agreements can't be used to probe for the floor.
+- The buyer agent opens at 65% of the asking price, meets each counter halfway, makes its last
+  offer at the max, and gives up after 6 rounds. It never offers above the max, and the max
+  isn't logged.
+
+Any agent can take the buyer's seat with the published protocol, **YardsaleHaggle 1.0.0**
+(`Offer` → `Counter` with `agreed`, then `AcceptCounter` → `Deal`). An agent buyer that closes a
+deal gets a `RequestPayment` from the Market through Fetch's Agent Payment Protocol, with the
+payment link, and answers `CommitPayment` once it has paid. The
+[Shopper's profile](yardsale/readmes/shopper.md) documents the messages.
+
+Buyers never see a floor: not in search results, details, cards, or the agents' descriptions,
+and a budget filters on the asking price only. Floors and buyers' maxes stay out of server logs,
+and message text isn't logged at all. Offers above the asking price are refused in chat, and
+sellers can't buy their own items. Known limit: a buyer who keeps making new identities could
+still narrow down a floor, as on any marketplace with automatic offers.
+
+## Payments
+
+Yardsale is the merchant for every sale ([payments.py](yardsale/payments.py),
+[checkout.py](yardsale/checkout.py)). When a deal closes, the Market makes one payment link for
+it, and the deal goes `not_collected → pending → paid` (or `expired` when the provider says the
+link expired, or `rejected` when an agent buyer declines). The provider decides whether a payment happened; a buyer saying so never marks a
+deal paid. When it's paid, the deal records Yardsale's commission (`YARDSALE_COMMISSION_PERCENT`,
+5% by default, rounded half up to the cent) and the seller's payout, and `my listings` shows the
+seller what they get. Payouts to sellers aren't automated.
+
+- **Visa Pay By Link** (Visa Acceptance sandbox, `apitest.visaacceptance.com` only). Requests are
+  signed with Visa's HTTP Signature (HMAC-SHA256). Payment is checked by searching transactions
+  for the deal ID. Not yet run against Visa.
+- **Stripe Checkout**, test keys only.
+
+Each order's status change can also be POSTed to `YARDSALE_ORDERS_WEBHOOK`, signed with
+`YARDSALE_ORDERS_SECRET` ([orders.py](yardsale/orders.py)). It's meant for an order list such as
+`@yardsale`'s Orders page on Fetch Business, once it's known how to add orders there.
+
+## Hosting on Agentverse
+
+With `AGENTVERSE_API_KEY` set and `YARDSALE_HOST_ITEMS=N` in live mode, approving a listing
+creates its item agent on Agentverse through the Hosting API ([hosting.py](yardsale/hosting.py)),
+up to N at once; past that, or if Agentverse fails, the agent runs in the Bureau as before. A
+hosted agent gets a profile page (title, asking price, how to make an offer, never the floor),
+its floor and private gap as an Agentverse secret, and code built from
+[hosted_item_template.py](yardsale/hosted_item_template.py) with [haggle.py](yardsale/haggle.py)
+and the message classes pasted in, so it haggles by exactly the same rules. When it sells, it
+tells the Market (`ItemSold`), which records the deal and handles payment.
+
+```bash
+uv run python -m yardsale.hosting --list      # Yardsale's hosted item agents
+uv run python -m yardsale.hosting --cleanup   # delete the ones whose listing isn't active
+```
+
+Agentverse's agent limits (reportedly 8 on the free plan and 25 on Premium; not checked against
+our account) count the five mailbox agents too. Hosting was run live on October 24: a hosted
+agent starts in about 3 seconds and answers a haggle round through Agentverse in a few seconds.
+Agentverse shows only 32 characters of a name, so each hosted agent is named after its item.
+
+## Resale Comps Actor
+
+[actors/resale-comps/](actors/resale-comps/) is an Apify Actor written for Yardsale: recent eBay
+sold prices for one item, with lots, bundles, parts, and empty boxes screened out, plus the price
+spread. Its input and output match the `caffein.dev/ebay-sold-listings` Actor the Researcher uses
+today, so switching is one setting once it's published:
+`YARDSALE_APIFY_ACTOR=<username>~resale-comps`. Its parser is tested here. On Apify, eBay
+answered 403 to every request through Apify's default proxy, so it doesn't find sales yet.
 
 ## Pricing rules
 
@@ -166,14 +255,15 @@ All agents run inside one uAgents `Bureau`: one process, one port (8100).
 
 | Agent | Does | Agentverse |
 | --- | --- | --- |
-| Market ("Yardsale") | ASI:One chat for sellers and buyers, proposals, item agent lifecycle | mailbox |
+| Market ("Yardsale Orchestrator") | ASI:One chat for sellers and buyers, proposals, item agent lifecycle, checkout | mailbox |
 | Identifier | Claude names the item in a photo | mailbox |
 | Researcher | Apify finds eBay sold listings | mailbox |
 | Appraiser | Claude matches sales; code sets the price | mailbox |
-| Item agents, one per listing | hold the private floor, counter, close deals | none (Almanac only) |
+| Shopper | the buyer agent: haggles with several item agents at once | mailbox |
+| Item agents, one per listing | hold the private floor, haggle, close deals | none (Almanac only), or hosted on Agentverse |
 
-Item agents don't connect to Agentverse, so there's no cap on them from Agentverse's agent
-limits. Their seeds come from one master secret and the item ID, so an item always has the same
+Item agents in the Bureau don't connect to Agentverse, so there's no cap on them from
+Agentverse's agent limits. Their seeds come from one master secret and the item ID, so an item always has the same
 address. The master secret comes from `YARDSALE_MASTER_SEED` or is generated once into
 `.agent-data/yardsale-bureau/master_seed` (gitignored, readable only by you).
 
@@ -208,9 +298,16 @@ agent can't accept a chat buyer's counter-offer.
 - [identifier.py](yardsale/identifier.py), [researcher.py](yardsale/researcher.py),
   [appraiser.py](yardsale/appraiser.py): the three pricing agents. [llm.py](yardsale/llm.py) holds
   the shared Claude call.
-- [pricing.py](yardsale/pricing.py), [negotiation.py](yardsale/negotiation.py),
-  [search.py](yardsale/search.py), [store.py](yardsale/store.py): money rules, haggling rules,
-  buyer search, and saved state.
+- [pricing.py](yardsale/pricing.py), [haggle.py](yardsale/haggle.py),
+  [negotiation.py](yardsale/negotiation.py), [search.py](yardsale/search.py),
+  [store.py](yardsale/store.py): money rules, haggling rules for both sides, how an item agent
+  answers, buyer search, and saved state.
+- [shopper.py](yardsale/shopper.py): the buyer agent.
+- [payments.py](yardsale/payments.py), [checkout.py](yardsale/checkout.py),
+  [orders.py](yardsale/orders.py): payment links, the Agent Payment Protocol, commission, and the
+  orders webhook.
+- [hosting.py](yardsale/hosting.py), [hosted_item_template.py](yardsale/hosted_item_template.py):
+  item agents hosted on Agentverse.
 - [photos.py](yardsale/photos.py): downloads (public addresses only, checked again after every
   redirect and at connect time; 25 MB cap), rotation, HEIC, and a 50-megapixel limit.
 - [config.py](yardsale/config.py): settings, the public endpoint, and the readiness check.
@@ -221,8 +318,8 @@ agent can't accept a chat buyer's counter-offer.
   and photo downloads, and the in-process harness. Only the tests use them.
 - [sell.py](yardsale/sell.py), [buyer_test.py](yardsale/buyer_test.py): command line seller and
   end-to-end buyer test.
-- [models.py](yardsale/models.py): agent messages. A `Deal` carries
-  `payment_status="not_collected"`.
+- [models.py](yardsale/models.py): agent messages and the `YardsaleHaggle` protocol spec.
+- [actors/resale-comps/](actors/resale-comps/): the Resale Comps Apify Actor.
 
 ## Going live
 
@@ -251,8 +348,10 @@ keys are set; it never prints values.
    hand off to the Market's address. No code depends on this; it's unverified.
 8. **Live buyer test.** `buyer_test` without `--offline` reaches the Market through its
    Agentverse mailbox, so connect it first.
-
-Payments aren't built. A deal records the agreed price and `payment_status="not_collected"`.
+9. **Payments.** Set Visa sandbox keys or a Stripe test key, close a deal from the chat, pay
+   with a test card, and say "paid". Unverified so far.
+10. **Hosting.** Set `YARDSALE_HOST_ITEMS=1`, approve a listing, and check that its Agentverse
+    profile appears and that an offer from the chat gets an answer. Done on October 24.
 
 ## Test results
 

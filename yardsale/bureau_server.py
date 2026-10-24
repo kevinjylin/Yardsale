@@ -1,4 +1,4 @@
-"""Yardsale Bureau: the Market, three helper agents, and a new uAgent for every listed item.
+"""Yardsale Bureau: the Market, its helper agents, and a new uAgent for every listed item.
 
     uv run python -m yardsale.bureau_server                    # live: Almanac + Agentverse
     uv run python -m yardsale.bureau_server --offline          # no Fetch servers; real Claude/Apify
@@ -16,13 +16,18 @@ For a photo, the Market asks the Identifier what it is, the Researcher for recen
 listings, and the Appraiser which of those match and what to charge. It saves the proposal
 (store.py), and spawns the item agent only once the seller approves.
 
-Item agents hold a private floor price and haggle with buyers (negotiation.py). They register on
-the Almanac API with the Bureau's endpoint. The Market, Identifier, Researcher, and Appraiser use
-Agentverse mailboxes in live mode, so only those four use Agentverse slots.
+Item agents hold a private floor price and haggle with buyers over the published YardsaleHaggle
+protocol (haggle.py, negotiation.py). Most run in this Bureau and register on the Almanac API
+with its endpoint. With hosting on (hosting.py), approved items get an agent hosted on
+Agentverse instead, up to YARDSALE_HOST_ITEMS of them. The Market, the buyer agent (shopper.py),
+the Identifier, Researcher, and Appraiser use Agentverse mailboxes in live mode.
 
-Listings, proposals, counter-offers, and deals are saved in SQLite. On start the Bureau
-re-creates the agent of every active listing. Seeds come from the master seed and the item ID,
-so the addresses are the same as before.
+When a buyer accepts, the deal is recorded and the Market's checkout (checkout.py) sends a payment
+link through the Agent Payment Protocol, or in the chat for chat buyers.
+
+Listings, proposals, counter-offers, deals, and payments are saved in SQLite. On start the
+Bureau re-creates the agent of every active listing it runs. Seeds come from the master seed and
+the item ID, so the addresses are the same as before. Hosted agents keep running on Agentverse.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
@@ -47,6 +53,7 @@ from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
 from yardsale.chat import FetchPhoto, build_chat_protocol, fetch_photo
+from yardsale.checkout import CHECK_EVERY, Checkout, build_payment_protocol
 from yardsale.common import (
     BUREAU_PORT,
     MARKET_FILE,
@@ -56,8 +63,10 @@ from yardsale.common import (
     dollars,
     write_json,
 )
+from yardsale.hosting import HostingClient, HostingError, host_item, hosted_limit
 from yardsale.identifier import Identify, build_identifier, identify_with_claude
 from yardsale.models import (
+    HAGGLE_SPEC,
     AcceptCounter,
     Appraisal,
     Appraised,
@@ -66,9 +75,12 @@ from yardsale.models import (
     CancelListing,
     Counter,
     Deal,
+    HaggleRequest,
+    HaggleResult,
     Identified,
     IdentifyRequest,
     ItemDetails,
+    ItemSold,
     Listed,
     ListingRejected,
     ListingUpdate,
@@ -81,17 +93,19 @@ from yardsale.models import (
     ResearchResult,
     ServiceError,
 )
-from yardsale.negotiation import answer_accept, answer_offer, buyer_key
+from yardsale.negotiation import answer_accept, answer_offer, buyer_key, gap_cents
 from yardsale.offline import (
     LocalDirectoryResolver,
     NoBatchRegistration,
     publish_locally,
     stay_offline,
 )
+from yardsale.payments import PaymentConfigError, PaymentProvider, provider_from_env
 from yardsale.photos import PhotoError, check_prepared_photo
 from yardsale.pricing import NoSuggestedPrice, PriceError, listing_prices, valid_cents
 from yardsale.researcher import Research, build_researcher, search_ebay_sold
-from yardsale.store import ACTIVE, PROPOSED, Listing, Store
+from yardsale.shopper import Shopper, build_shopper, haggle_timeout
+from yardsale.store import ACTIVE, AGENTVERSE, BUREAU, PROPOSED, DealRecord, Listing, Store
 
 log = logging.getLogger("yardsale.bureau")
 
@@ -102,7 +116,8 @@ Progress = Callable[[str, str], Awaitable[None]]  # (stage, text) -> tell the se
 IDENTIFY_TIMEOUT = 180.0
 RESEARCH_TIMEOUT = 240.0
 APPRAISE_TIMEOUT = 240.0
-NEGOTIATE_TIMEOUT = 15.0  # item agents run in this process and answer in milliseconds
+NEGOTIATE_TIMEOUT = 15.0  # item agents in this Bureau answer in milliseconds
+HOSTED_NEGOTIATE_TIMEOUT = 60.0  # hosted ones answer through Agentverse mailboxes
 
 
 @dataclass
@@ -126,7 +141,12 @@ class Runtime:
     endpoint: str
     services: Services
     store: Store
+    checkout: Checkout
     market: str = ""
+    shopper: str = ""  # the buyer agent
+    hosting: HostingClient | None = None  # set when item agents may be hosted on Agentverse
+    host_limit: int = 0  # how many active listings may be hosted at once
+    round_timeout: float = 30.0  # the buyer agent's wait for one item agent's answer
     boot_id: str = field(default_factory=lambda: uuid4().hex)
     started: bool = False  # the Bureau is running, so new agents start themselves
     agents: dict[str, Agent] = field(default_factory=dict)  # item_id -> its agent
@@ -138,8 +158,9 @@ class Runtime:
 
 RUNTIME: Runtime | None = None
 
-market_proto = Protocol(name="YardsaleMarket", version="0.3.0")
-item_proto = Protocol(name="YardsaleHaggle", version="0.2.0")
+market_proto = Protocol(name="YardsaleMarket", version="0.4.0")
+item_proto = Protocol(spec=HAGGLE_SPEC, role="item")  # every item agent in this Bureau
+market_buyer = Protocol(spec=HAGGLE_SPEC, role="buyer")  # the Market, haggling for chat buyers
 
 
 def runtime() -> Runtime:
@@ -206,13 +227,48 @@ async def start_item_agent(rt: Runtime, item_id: str) -> tuple[Agent, bool]:
     return agent, rt.registered[item_id]
 
 
+def _hosted_count(rt: Runtime) -> int:
+    return sum(listing.host == AGENTVERSE for listing in rt.store.active())
+
+
+async def _host_on_agentverse(ctx: Context, rt: Runtime, listing: Listing) -> Listing | None:
+    """Host the item agent on Agentverse and mark the listing active. None when hosting is off,
+    full, or failed; the caller then runs the agent in this Bureau."""
+    if rt.hosting is None or _hosted_count(rt) >= rt.host_limit:
+        return None
+    try:
+        address = await host_item(rt.hosting, listing, gap_cents(listing), rt.market, rt.shopper)
+    except HostingError as ex:
+        ctx.logger.warning(f"Hosting {listing.item_id} on Agentverse failed, so it runs here: {ex}")
+        return None
+    live = rt.store.activate(listing.item_id, listing.owner, address, host=AGENTVERSE)
+    if live is None:
+        try:
+            await rt.hosting.delete(address)
+        except HostingError:
+            ctx.logger.warning(f"Couldn't delete the unused hosted agent {address}")
+        raise PipelineError("That listing was canceled or sold, so it can't go live.")
+    ctx.logger.info(
+        f"Item agent for '{live.title}' at {dollars(live.asking_cents)} is hosted on "
+        f"Agentverse: {address}"
+    )
+    return live
+
+
 async def activate(ctx: Context, listing: Listing) -> tuple[Listing, bool]:
     """Approved: start the item agent, then mark the listing active. Safe to repeat.
 
     The agent starts first and turns down offers until the listing is active, so a crash in
-    between leaves a proposal to approve again, never a live listing without an agent.
+    between leaves a proposal to approve again, never a live listing without an agent. With
+    hosting on, the agent is created on Agentverse; otherwise, or if that fails, here.
     """
     rt = runtime()
+    if listing.status == PROPOSED and listing.item_id not in rt.agents:
+        hosted = await _host_on_agentverse(ctx, rt, listing)
+        if hosted is not None:
+            return hosted, True
+    elif listing.status == ACTIVE and listing.host == AGENTVERSE:
+        return listing, True
     try:
         agent, registered = await start_item_agent(rt, listing.item_id)
     except Exception as ex:
@@ -256,7 +312,8 @@ async def _send_state(ctx: Context, seller: str, listing: Listing) -> None:
     if listing.status == PROPOSED:
         await ctx.send(seller, _proposed(listing))
     elif listing.status == ACTIVE:
-        await ctx.send(seller, _listed(listing, runtime().registered.get(listing.item_id, False)))
+        registered = listing.host == AGENTVERSE or runtime().registered.get(listing.item_id, False)
+        await ctx.send(seller, _listed(listing, registered))
     else:
         await ctx.send(
             seller,
@@ -382,19 +439,36 @@ async def on_service_error(ctx: Context, sender: str, msg: ServiceError) -> None
 
 
 # Item agents answering offers the Market made for chat buyers.
-@market_proto.on_message(Counter)
+@market_buyer.on_message(Counter)
 async def on_counter(ctx: Context, sender: str, msg: Counter) -> None:
     _resolve(ctx, sender, msg.request_id, msg)
 
 
-@market_proto.on_message(Deal)
+@market_buyer.on_message(Deal)
 async def on_deal(ctx: Context, sender: str, msg: Deal) -> None:
     _resolve(ctx, sender, msg.request_id, msg)
 
 
-@market_proto.on_message(OfferRejected)
+@market_buyer.on_message(OfferRejected)
 async def on_offer_rejected(ctx: Context, sender: str, msg: OfferRejected) -> None:
     _resolve(ctx, sender, msg.request_id, msg)
+
+
+@market_proto.on_message(HaggleResult)
+async def on_haggle_result(ctx: Context, sender: str, msg: HaggleResult) -> None:
+    _resolve(ctx, sender, msg.request_id, msg)
+
+
+def _item_address(rt: Runtime, listing: Listing) -> str | None:
+    if listing.host == AGENTVERSE:
+        return listing.address
+    agent = rt.agents.get(listing.item_id)
+    return agent.address if agent is not None else None
+
+
+def record_hosted_deal(rt: Runtime, listing: Listing, buyer: str, deal: Deal) -> DealRecord | None:
+    """A hosted item agent sold its item: record the deal here, once."""
+    return rt.store.close_deal(listing.item_id, buyer, deal.price_cents, deal.deal_id)
 
 
 async def negotiate(
@@ -402,13 +476,67 @@ async def negotiate(
 ) -> Counter | Deal | OfferRejected:
     """Pass a chat buyer's offer or acceptance to the item agent and return its answer."""
     rt = runtime()
-    agent = rt.agents.get(item_id)
-    if agent is None:
+    listing = rt.store.get(item_id)
+    address = _item_address(rt, listing) if listing and listing.status == ACTIVE else None
+    if listing is None or address is None:
         return OfferRejected(item_id=item_id, reason="not for sale", code="unavailable")
     request = request.copy(update={"request_id": uuid4().hex})
-    reply = await request_reply(ctx, agent.address, request, request.request_id, NEGOTIATE_TIMEOUT)
+    wait = HOSTED_NEGOTIATE_TIMEOUT if listing.host == AGENTVERSE else NEGOTIATE_TIMEOUT
+    reply = await request_reply(ctx, address, request, request.request_id, wait)
     if not isinstance(reply, Counter | Deal | OfferRejected):
         raise PipelineError(f"The item agent sent {type(reply).__name__}.")
+    if isinstance(reply, Deal) and listing.host == AGENTVERSE:
+        buyer = buyer_key(rt.market, request.buyer_ref, rt.market)
+        if record_hosted_deal(rt, listing, buyer, reply) is None:
+            ctx.logger.warning(f"Hosted item {item_id} sold, but the store had it as unavailable")
+    return reply
+
+
+@market_proto.on_message(ItemSold)
+async def handle_item_sold(ctx: Context, sender: str, msg: ItemSold) -> None:
+    """A hosted item agent reports a sale: record it and start checkout."""
+    rt = runtime()
+    listing = rt.store.get(msg.item_id)
+    if listing is None or listing.host != AGENTVERSE or listing.address != sender:
+        ctx.logger.warning(f"Ignoring a sale report for {msg.item_id} from {sender[:16]}")
+        return
+    if not valid_cents(msg.price_cents) or not msg.buyer.startswith(("agent:", "chat:")):
+        ctx.logger.warning(f"Ignoring a malformed sale report for {msg.item_id}")
+        return
+    deal = Deal(item_id=msg.item_id, price_cents=msg.price_cents, deal_id=msg.deal_id)
+    record = record_hosted_deal(rt, listing, msg.buyer, deal)
+    if record is None:
+        ctx.logger.warning(f"Hosted item {msg.item_id} reported a sale it can't record")
+        return
+    ctx.logger.info(f"Hosted item '{listing.title}' sold for {dollars(record.price_cents)}")
+    await rt.checkout.start(record.deal_id)
+
+
+async def haggle_for(
+    ctx: Context, buyer_ref: str, max_cents: int, listings: list[Listing]
+) -> HaggleResult:
+    """Ask the buyer agent to haggle with these items at once for a chat buyer."""
+    rt = runtime()
+    request = HaggleRequest(
+        request_id=uuid4().hex,
+        buyer_ref=buyer_ref,
+        max_cents=max_cents,
+        items=[
+            {
+                "item_id": listing.item_id,
+                "address": address,
+                "title": listing.title,
+                "asking_cents": listing.asking_cents,
+            }
+            for listing in listings
+            if (address := _item_address(rt, listing)) is not None
+        ],
+    )
+    reply = await request_reply(
+        ctx, rt.shopper, request, request.request_id, haggle_timeout(rt.round_timeout)
+    )
+    if not isinstance(reply, HaggleResult):
+        raise PipelineError(f"The buyer agent sent {type(reply).__name__}.")
     return reply
 
 
@@ -421,6 +549,7 @@ async def price_photo(
     """Identifier -> Researcher -> Appraiser. Raises PipelineError if any of them fails."""
     rt = runtime()
     run = uuid4().hex[:12]
+    started = time.monotonic()
     await progress("identify", "Looking at the photo.")
     identified = await call_service(
         ctx,
@@ -435,6 +564,7 @@ async def price_photo(
         IDENTIFY_TIMEOUT,
     )
     item = identified.item
+    identified_at = time.monotonic()
 
     await progress(
         "research",
@@ -452,6 +582,7 @@ async def price_photo(
         ResearchResult,
         RESEARCH_TIMEOUT,
     )
+    researched_at = time.monotonic()
 
     await progress("appraise", f"Found {len(research.comps)} sales. Comparing them with the photo.")
     appraisal = await call_service(
@@ -466,6 +597,11 @@ async def price_photo(
         ),
         Appraisal,
         APPRAISE_TIMEOUT,
+    )
+    done = time.monotonic()
+    ctx.logger.info(
+        f"Priced photo {run} in {done - started:.1f}s: identify {identified_at - started:.1f}s, "
+        f"eBay research {researched_at - identified_at:.1f}s, appraise {done - researched_at:.1f}s"
     )
     return item, appraisal
 
@@ -651,9 +787,22 @@ class MarketBackend:
     ) -> Counter | Deal | OfferRejected:
         return await negotiate(ctx, item_id, request)
 
+    async def haggle(
+        self, ctx: Context, buyer_ref: str, max_cents: int, listings: list[Listing]
+    ) -> HaggleResult:
+        return await haggle_for(ctx, buyer_ref, max_cents, listings)
+
     def available(self) -> list[Listing]:
-        """Active listings whose agent is running here."""
-        return [listing for listing in self.store.active() if listing.item_id in self.rt.agents]
+        """Active listings whose agent is running, here or on Agentverse."""
+        return [
+            listing
+            for listing in self.store.active()
+            if listing.host == AGENTVERSE or listing.item_id in self.rt.agents
+        ]
+
+    @property
+    def checkout(self) -> Checkout:
+        return self.rt.checkout
 
 
 # --- Haggling ------------------------------------------------------------------------------------
@@ -662,18 +811,24 @@ class MarketBackend:
 def _log_answer(ctx: Context, reply: Counter | Deal | OfferRejected) -> None:
     # Floors stay out of the logs; a counter is already something the buyer sees.
     if isinstance(reply, Deal):
-        ctx.logger.info(f"SOLD '{reply.title}' for {dollars(reply.price_cents)} (no payment)")
+        ctx.logger.info(f"SOLD '{reply.title}' for {dollars(reply.price_cents)}")
+    elif isinstance(reply, Counter) and reply.agreed:
+        ctx.logger.info(f"Agreed to an offer of {dollars(reply.counter_cents)}")
     elif isinstance(reply, Counter):
         ctx.logger.info(f"Countered an offer at {dollars(reply.counter_cents)}")
     else:
         ctx.logger.info(f"Turned down a request: {reply.code or reply.reason}")
 
 
-@item_proto.on_message(Offer, replies={Counter, Deal, OfferRejected})
+def _speaks_for_chats(rt: Runtime) -> set[str]:
+    return {address for address in (rt.market, rt.shopper) if address}
+
+
+@item_proto.on_message(Offer)
 async def handle_offer(ctx: Context, sender: str, msg: Offer) -> None:
     rt = runtime()
     item_id = rt.items.get(ctx.agent.address)
-    reply: Counter | Deal | OfferRejected
+    reply: Counter | OfferRejected
     if item_id != msg.item_id:
         reply = OfferRejected(
             item_id=msg.item_id,
@@ -682,13 +837,13 @@ async def handle_offer(ctx: Context, sender: str, msg: Offer) -> None:
             request_id=msg.request_id,
         )
     else:
-        buyer = buyer_key(sender, msg.buyer_ref, rt.market)
+        buyer = buyer_key(sender, msg.buyer_ref, _speaks_for_chats(rt))
         reply = answer_offer(rt.store, item_id, buyer, msg.offer_cents, msg.request_id)
     _log_answer(ctx, reply)
     await ctx.send(sender, reply)
 
 
-@item_proto.on_message(AcceptCounter, replies={Deal, OfferRejected})
+@item_proto.on_message(AcceptCounter)
 async def handle_accept(ctx: Context, sender: str, msg: AcceptCounter) -> None:
     rt = runtime()
     item_id = rt.items.get(ctx.agent.address)
@@ -701,19 +856,21 @@ async def handle_accept(ctx: Context, sender: str, msg: AcceptCounter) -> None:
             request_id=msg.request_id,
         )
     else:
-        buyer = buyer_key(sender, msg.buyer_ref, rt.market)
+        buyer = buyer_key(sender, msg.buyer_ref, _speaks_for_chats(rt))
         reply = answer_accept(rt.store, item_id, buyer, msg.counter_cents, msg.request_id)
     _log_answer(ctx, reply)
     await ctx.send(sender, reply)
+    if isinstance(reply, Deal):
+        await rt.checkout.start(reply.deal_id)  # payment link; RequestPayment for agent buyers
 
 
 # --- Startup -------------------------------------------------------------------------------------
 
 
 MARKET_DESCRIPTION = (  # Agentverse shows up to 300 characters
-    "Sell anything from a photo, or find something to buy. Attach a picture and Yardsale "
-    "identifies it, prices it from recent eBay sold listings, and, once you approve, starts an "
-    "agent that haggles with buyers for you. Buyers search and make offers in the same chat."
+    "Sell your used stuff from a photo, or buy secondhand for less. Send a picture: Yardsale "
+    "prices it from real eBay sales and gives it its own agent that haggles for you. Shopping? "
+    "Say what you want and your max; an agent haggles with every seller at once. Pay by link."
 )
 
 
@@ -725,9 +882,15 @@ def build(
     read: ReadMessage = read_seller_message,
     fetch: FetchPhoto = fetch_photo,
     store: Store | None = None,
+    payments: PaymentProvider | None = None,
+    hosting: HostingClient | None = None,
+    host_limit: int = 0,
+    round_timeout: float = 30.0,
 ) -> tuple[Bureau, Agent, list[Agent]]:
-    """Create the Bureau, the Market, the three service agents, and the agents of the store's
-    active listings, inside a running loop. Without a store, state lives in memory."""
+    """Create the Bureau, the Market, the buyer agent and three service agents, and the agents
+    of the store's active listings that run here, inside a running loop. Without a store, state
+    lives in memory. Without `payments`, deals get no payment link; without `hosting`, every
+    item agent runs here. The returned services include the buyer agent."""
     global RUNTIME
     registration: BatchRegistrationPolicy = (
         NoBatchRegistration() if offline else BatchAlmanacApiRegistrationPolicy(logger=log)
@@ -744,29 +907,49 @@ def build(
         build_researcher(research, offline),
         build_appraiser(judge, offline),
     ]
+    shopper: Shopper = build_shopper(offline, round_timeout)
+    store = store or Store()
     rt = RUNTIME = Runtime(
         bureau=bureau,
         registration=registration,
         offline=offline,
         endpoint=bureau_endpoint,
         services=Services(*(agent.address for agent in services)),
-        store=store or Store(),
+        store=store,
+        checkout=Checkout(store, payments),
+        shopper=shopper.address,
+        hosting=hosting if host_limit > 0 else None,
+        host_limit=host_limit,
+        round_timeout=round_timeout,
     )
     # On Agentverse in live mode, so ASI:One can reach it. Handles messages concurrently, so a
     # photo listing waiting on a service doesn't block other messages.
-    market = service_agent("market", "Yardsale", MARKET_DESCRIPTION, offline)
+    market = service_agent(
+        "market", "Yardsale Orchestrator", "ys-orchestrator", MARKET_DESCRIPTION, offline
+    )
     market.include(market_proto)
+    market.include(market_buyer)
+    market.include(build_payment_protocol(rt.checkout), publish_manifest=not offline)
     market.include(
         build_chat_protocol(MarketBackend(rt), read, fetch), publish_manifest=not offline
     )
-    rt.market = market.address
+    rt.market = shopper.market = market.address
+    rt.checkout.market = market
+
+    @market.on_interval(period=CHECK_EVERY)
+    async def check_payments(ctx: Context) -> None:
+        if rt.checkout.enabled:
+            await rt.checkout.refresh_all()
+
+    services.append(shopper.agent)
     for agent in (market, *services):
         bureau.add(agent)
         if offline:
             publish_locally(agent.address, bureau_endpoint)
     # Same seeds, same addresses. The Bureau starts and registers these with everything else.
     for listing in rt.store.active():
-        _add_item_agent(rt, listing.item_id)
+        if listing.host == BUREAU:
+            _add_item_agent(rt, listing.item_id)
     return bureau, market, services
 
 
@@ -794,14 +977,33 @@ async def main(mode: str) -> None:
         log.info(line)
 
     store = Store(config.db_path(mode))
+    try:
+        payments = provider_from_env()
+    except PaymentConfigError as error:
+        log.error(f"Payments are off: {error}")
+        payments = None
+    api_key = os.getenv("AGENTVERSE_API_KEY", "").strip()
+    hosting = HostingClient(api_key) if api_key and not offline else None
     bureau, market, services = build(
-        offline, identify_with_claude, search_ebay_sold, judge_with_claude, store=store
+        offline,
+        identify_with_claude,
+        search_ebay_sold,
+        judge_with_claude,
+        store=store,
+        payments=payments,
+        hosting=hosting,
+        host_limit=hosted_limit() if hosting else 0,
     )
     if not offline:
         await connect_to_agentverse([market, *services])
 
     write_json(MARKET_FILE, {"address": market.address, "offline": offline, "mode": mode})
     restored = len(runtime().agents)
+    rt = runtime()
+    log.info(
+        f"Payments: {payments.label if payments else 'off (no payment keys)'}. Hosting item "
+        f"agents on Agentverse: {f'up to {rt.host_limit}' if rt.hosting else 'off'}."
+    )
     if offline:
         log.info(
             f"Mode: {mode.upper()} (local directory, nothing registered). Market: "

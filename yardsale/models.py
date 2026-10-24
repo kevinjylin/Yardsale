@@ -1,11 +1,13 @@
-"""Messages exchanged by the Yardsale Bureau prototype.
+"""Messages exchanged by Yardsale's agents.
 
-Prices are integer cents. No message here moves money; a Deal is an agreed price only.
+Prices are integer cents. A Deal is an agreed price; payment is collected afterwards by the
+Market's checkout (checkout.py) through the Agent Payment Protocol.
 """
 
 from __future__ import annotations
 
 from uagents import Model
+from uagents_core.protocol import ProtocolSpecification
 
 
 class ListItem(Model):
@@ -36,13 +38,18 @@ class ListingRejected(Model):
 
 
 # --- Haggling: buyer <-> item agent ---------------------------------------------------------
-# A buyer is identified by its agent address. The Market haggles for chat buyers, so it adds
-# buyer_ref (the chat) to tell them apart; item agents ignore buyer_ref from anyone else.
-# request_id, when set, is echoed in the reply.
+# The published YardsaleHaggle protocol (HAGGLE_SPEC below): any agent can take the buyer's seat.
+# A buyer is identified by its agent address. The Market and the buyer agent haggle for chat
+# buyers, so they add buyer_ref (the chat) to tell them apart; item agents ignore buyer_ref from
+# anyone else. request_id, when set, is echoed in the reply.
+#
+# Offer -> Counter. A Counter with agreed=True means the item agent takes the offer at
+# counter_cents. Nothing is sold until the buyer sends AcceptCounter with that exact price, so a
+# buyer can haggle with several items at once and buy only one.
 
 
 class Offer(Model):
-    """Buyer -> item agent. At or above the floor closes the deal at this price."""
+    """Buyer -> item agent."""
 
     item_id: str
     offer_cents: int
@@ -51,17 +58,18 @@ class Offer(Model):
 
 
 class Counter(Model):
-    """Item agent -> buyer: the offer was below the floor. Accept with AcceptCounter."""
+    """Item agent -> buyer: the price this buyer can have now. Accept with AcceptCounter."""
 
     item_id: str
     counter_cents: int
     note: str
     expires_at: str = ""  # ISO 8601 UTC; accepting after this is refused
     request_id: str = ""
+    agreed: bool = False  # True: the item agent took the buyer's offer at this price
 
 
 class AcceptCounter(Model):
-    """Buyer -> item agent: accept the exact counter-offer this buyer received."""
+    """Buyer -> item agent: buy at the exact price of this buyer's latest Counter."""
 
     item_id: str
     counter_cents: int
@@ -70,13 +78,14 @@ class AcceptCounter(Model):
 
 
 class Deal(Model):
-    """Item agent -> buyer: an agreed price, recorded once per item. No payment is made."""
+    """Item agent -> buyer: sold, once per item. The Market's checkout then asks the buyer for
+    payment (a RequestPayment for agents, a payment link in the chat)."""
 
     item_id: str
     price_cents: int
     deal_id: str = ""
     title: str = ""
-    payment_status: str = "not_collected"  # payments aren't built; nothing has been charged
+    payment_status: str = "not_collected"  # not_collected -> pending (link sent) -> paid
     request_id: str = ""
 
 
@@ -86,6 +95,77 @@ class OfferRejected(Model):
     # unknown_item | unavailable | invalid_amount | no_counter | counter_expired | counter_changed
     code: str = ""
     request_id: str = ""
+
+
+HAGGLE_SPEC = ProtocolSpecification(
+    name="YardsaleHaggle",
+    version="1.0.0",
+    interactions={
+        Offer: {Counter, OfferRejected},
+        AcceptCounter: {Deal, OfferRejected},
+        Counter: set(),
+        Deal: set(),
+        OfferRejected: set(),
+    },
+    roles={"item": {Offer, AcceptCounter}, "buyer": {Counter, Deal, OfferRejected}},
+)
+
+
+class ItemSold(Model):
+    """Hosted item agent -> Market: a buyer bought this item, so the Market records the deal and
+    starts checkout. Item agents in the Market's own Bureau share its store and don't send it."""
+
+    item_id: str
+    deal_id: str
+    buyer: str  # agent:<address> or chat:<ref>, as the item agent keyed the buyer
+    price_cents: int
+
+
+# --- The buyer agent: Market <-> Shopper --------------------------------------------------------
+
+
+class HaggleTarget(Model):
+    item_id: str
+    address: str  # the item agent's
+    title: str
+    asking_cents: int
+
+
+class HaggleRequest(Model):
+    """Market -> buyer agent: haggle with these items at once for one chat buyer, never above
+    max_cents. The buyer agent doesn't buy anything; the shopper picks from the result."""
+
+    request_id: str
+    buyer_ref: str
+    max_cents: int  # the shopper's limit; never sent to an item agent
+    items: list[HaggleTarget]
+
+
+class HaggleRound(Model):
+    offer_cents: int
+    reply_cents: int  # the item agent's counter, or the price it agreed to
+    agreed: bool
+
+
+class HaggleOutcome(Model):
+    item_id: str
+    title: str
+    asking_cents: int
+    # agreed: the item agent took an offer. counter: its latest counter is within the max.
+    # over_max: it wouldn't come down to the max. unavailable / no_answer: no haggle.
+    status: str
+    price_cents: int | None  # what the shopper can buy it for now (agreed or counter)
+    rounds: list[HaggleRound]
+    note: str = ""
+
+
+class HaggleResult(Model):
+    """Buyer agent -> Market: every round with every item, and the best price found."""
+
+    request_id: str
+    max_cents: int
+    outcomes: list[HaggleOutcome]
+    best_item_id: str = ""
 
 
 # --- Photo listings: Market <-> seller ---------------------------------------------------------

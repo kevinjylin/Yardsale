@@ -36,11 +36,15 @@ from yardsale import bureau_server, chat
 from yardsale.appraiser import Judge
 from yardsale.asione import ReadMessage
 from yardsale.chat import FetchPhoto
+from yardsale.hosting import HostingClient
 from yardsale.identifier import Identify
+from yardsale.payments import PaymentProvider
 from yardsale.researcher import Research
 from yardsale.store import Store
 
 REPLY_TIMEOUT = 10.0
+# Messages the Market sends right after an answer, which ChatUser.exchange sets aside.
+FOLLOW_UPS = ("closest eBay sales behind that price",)
 
 
 def start(agents: list[Agent]) -> None:
@@ -89,10 +93,24 @@ async def running_market(
     judge: Judge = fakes.judge,
     read: ReadMessage = fakes.read,
     fetch: FetchPhoto = fakes.fetch,
+    payments: PaymentProvider | None = None,
+    hosting: HostingClient | None = None,
+    host_limit: int = 0,
+    round_timeout: float = 5.0,
 ) -> AsyncIterator[Market]:
     """The Market and friends in offline mode, with the store's active listings restored."""
     _, market, services = bureau_server.build(
-        True, identify, research, judge, read=read, fetch=fetch, store=store
+        True,
+        identify,
+        research,
+        judge,
+        read=read,
+        fetch=fetch,
+        store=store,
+        payments=payments,
+        hosting=hosting,
+        host_limit=host_limit,
+        round_timeout=round_timeout,
     )
     rt = bureau_server.runtime()
     start([market, *services, *rt.agents.values()])
@@ -127,6 +145,7 @@ class ChatUser:
         self.market = market
         self.session: UUID = session or uuid4()  # the same session continues a conversation
         self.replies: asyncio.Queue[ChatMessage] = asyncio.Queue()
+        self.follow_ups: list[ChatMessage] = []  # sent after an answer, like the sales carousel
         self.acks = 0
         self.agent = Agent(
             name=name,
@@ -175,5 +194,7 @@ class ChatUser:
         await self.send(msg)
         while True:
             reply = await self.next_reply()
-            if reply.text() not in (chat.STILL_WORKING, chat.WORKING):
+            if any(marker in reply.text() for marker in FOLLOW_UPS):
+                self.follow_ups.append(reply)
+            elif reply.text() not in (chat.STILL_WORKING, chat.WORKING):
                 return reply

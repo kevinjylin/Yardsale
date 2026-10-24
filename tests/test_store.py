@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -9,7 +10,20 @@ import pytest
 
 from yardsale.models import Appraisal, ItemDetails
 from yardsale.pricing import PriceError
-from yardsale.store import ACTIVE, CANCELED, COUNTER_TTL, PROPOSED, SOLD, Listing, Store
+from yardsale.store import (
+    ACTIVE,
+    BUREAU,
+    CANCELED,
+    COUNTER_TTL,
+    EXPIRED,
+    NOT_COLLECTED,
+    PAID,
+    PENDING,
+    PROPOSED,
+    SOLD,
+    Listing,
+    Store,
+)
 
 ITEM = ItemDetails(
     title="Trek FX 2",
@@ -180,3 +194,97 @@ def test_owned_is_newest_first(store: Store) -> None:
     db.add_listing(proposal("new", ref="b"))
     assert [listing.item_id for listing in db.owned("alice")] == ["new", "old"]
     assert db.owned("bob") == []
+
+
+# The schema before hosting, multi-round haggling, and payments were added.
+OLD_SCHEMA = """
+CREATE TABLE listings (
+    item_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    seller_id TEXT NOT NULL,
+    listing_ref TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('proposed', 'active', 'sold', 'canceled')),
+    title TEXT NOT NULL,
+    asking_cents INTEGER NOT NULL CHECK (asking_cents > 0),
+    floor_cents INTEGER NOT NULL CHECK (floor_cents > 0 AND floor_cents <= asking_cents),
+    seller_asking_cents INTEGER,
+    seller_floor_cents INTEGER,
+    suggested_asking_cents INTEGER,
+    suggested_floor_cents INTEGER,
+    item_json TEXT,
+    appraisal_json TEXT,
+    address TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE (owner, listing_ref)
+);
+CREATE TABLE counters (
+    item_id TEXT NOT NULL REFERENCES listings (item_id),
+    buyer TEXT NOT NULL,
+    offer_cents INTEGER NOT NULL,
+    counter_cents INTEGER NOT NULL,
+    expires_at REAL NOT NULL,
+    PRIMARY KEY (item_id, buyer)
+);
+CREATE TABLE deals (
+    deal_id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL UNIQUE REFERENCES listings (item_id),
+    buyer TEXT NOT NULL,
+    price_cents INTEGER NOT NULL CHECK (price_cents > 0),
+    payment_status TEXT NOT NULL DEFAULT 'not_collected',
+    created_at REAL NOT NULL
+);
+CREATE TABLE conversations (key TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at REAL NOT NULL);
+INSERT INTO listings VALUES ('old', 'o', 's', 'r', 'sold', 'Old lamp', 4000, 3000,
+    NULL, NULL, NULL, NULL, NULL, NULL, 'agent1qold', 1, 1);
+INSERT INTO listings VALUES ('live', 'o', 's', 'r2', 'active', 'Old chair', 5000, 4000,
+    NULL, NULL, NULL, NULL, NULL, NULL, 'agent1qlive', 1, 1);
+INSERT INTO counters VALUES ('live', 'agent:bob', 3000, 4500, 99999999999);
+INSERT INTO deals VALUES ('deal-old', 'old', 'agent:bob', 3500, 'not_collected', 2);
+"""
+
+
+def test_an_old_database_is_upgraded_in_place(tmp_path: Path) -> None:
+    path = tmp_path / "old.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(OLD_SCHEMA)
+    store = Store(path)
+    live = store.get("live")
+    assert live is not None and live.host == BUREAU
+    counter = store.counter("live", "agent:bob")
+    assert counter is not None and (counter.rounds, counter.agreed) == (0, False)
+    deal = store.deal("deal-old")
+    assert deal is not None and deal.payment_status == NOT_COLLECTED
+    assert deal.payment_url is None and deal.commission_cents is None
+    started = store.start_payment("deal-old", "fake", "ref", "https://pay.example.test/x")
+    assert started is not None and started.payment_status == PENDING
+    store.close()
+    Store(path).close()  # opening it again changes nothing
+
+
+def test_payment_states_only_move_forward(store: Store) -> None:
+    store.add_listing(
+        Listing(
+            item_id="lamp",
+            owner="o",
+            seller_id="s",
+            listing_ref="r",
+            status=PROPOSED,
+            title="Lamp",
+            asking_cents=4000,
+            floor_cents=3000,
+        )
+    )
+    store.activate("lamp", "o", "agent1qlamp")
+    deal = store.close_deal("lamp", "chat:abc", 3500, "deal-1")
+    assert deal is not None and deal.deal_id == "deal-1"
+    assert store.close_deal("lamp", "chat:abc", 3500, "deal-1") == deal  # recorded once
+    assert store.close_deal("lamp", "chat:xyz", 3600, "deal-2") is None
+    assert store.mark_paid("deal-1", 175, 3325) is None  # no link yet
+    assert store.start_payment("deal-1", "fake", "ref", "https://pay.example.test/1") is not None
+    assert store.start_payment("deal-1", "fake", "ref2", "https://pay.example.test/2") is None
+    paid = store.mark_paid("deal-1", 175, 3325)
+    assert paid is not None and paid.payment_status == PAID and paid.paid_at is not None
+    assert store.end_payment("deal-1", EXPIRED) is None  # paid stays paid
+    assert [d.deal_id for d in store.deals(buyer="chat:abc")] == ["deal-1"]
+    assert store.deals(payment_status=PENDING) == []

@@ -45,3 +45,21 @@ def test_readiness_names_keys_but_never_shows_them(monkeypatch: pytest.MonkeyPat
     assert not ok
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SECRET")
     assert config.report("live")[1]
+
+
+def test_readiness_covers_payments_and_hosting(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("STRIPE_SECRET_KEY", "YARDSALE_PAYMENTS", "YARDSALE_HOST_ITEMS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    monkeypatch.setenv("APIFY_TOKEN", "b")
+    text, ok = config.report("live")
+    assert ok and "[warn] payments" in text and "[warn] YARDSALE_HOST_ITEMS" in text
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_HIDDENVALUE")
+    text, ok = config.report("live")
+    assert not ok and "[MISSING] payments" in text and "HIDDENVALUE" not in text
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_HIDDENVALUE")
+    monkeypatch.setenv("YARDSALE_HOST_ITEMS", "4")
+    monkeypatch.setenv("AGENTVERSE_API_KEY", "c")
+    text, ok = config.report("live")
+    assert ok and "[ok  ] payments: buyers get a Stripe (test mode) link" in text
+    assert "up to 4 item agents are hosted on Agentverse" in text and "HIDDENVALUE" not in text

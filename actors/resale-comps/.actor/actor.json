@@ -1,0 +1,13 @@
+{
+  "actorSpecification": 1,
+  "name": "resale-comps",
+  "title": "Resale Comps: eBay sold prices for one item",
+  "description": "Recent eBay sold prices for a product, with lots, bundles, parts, and empty boxes screened out, plus the price spread (median and quartiles) a reseller would quote. A drop-in for ebay-sold-listings inputs and outputs.",
+  "version": "0.1",
+  "buildTag": "latest",
+  "input": "./input_schema.json",
+  "storages": {
+    "dataset": "./dataset_schema.json"
+  },
+  "dockerfile": "../Dockerfile"
+}

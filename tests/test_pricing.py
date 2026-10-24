@@ -8,7 +8,6 @@ from yardsale.pricing import (
     MAX_CENTS,
     NoSuggestedPrice,
     PriceError,
-    counter_price,
     default_floor,
     listing_prices,
     median,
@@ -112,14 +111,6 @@ class TestListingPrices:
 def test_default_floor() -> None:
     assert default_floor(36000) == 25000  # $252 in $10 steps
     assert default_floor(50) == 50  # never above the asking price
-
-
-@pytest.mark.parametrize(
-    ("offer", "counter"),
-    [(25000, 30500), (22000, 30000), (1, 30000), (29999, 32999)],
-)
-def test_counter_is_halfway_but_never_below_the_floor(offer: int, counter: int) -> None:
-    assert counter_price(offer, asking_cents=36000, floor_cents=30000) == counter
 
 
 @pytest.mark.parametrize(

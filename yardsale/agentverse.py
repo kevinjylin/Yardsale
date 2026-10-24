@@ -28,14 +28,18 @@ INSPECTOR = "https://agentverse.ai/inspect/"
 log = logging.getLogger("yardsale.agentverse")
 
 
-def service_agent(key: str, name: str, description: str, offline: bool) -> Agent:
+def service_agent(key: str, name: str, handle: str, description: str, offline: bool) -> Agent:
     """A long-lived agent with a stable address and an Agentverse profile (README + description).
+
+    `name` and `handle` must match what's set on Agentverse: connecting sends both, so a different
+    value here would overwrite the one there.
 
     Offline, it finds other processes' agents (the test buyer, the sell command) through the
     local directory instead of the Almanac.
     """
     return Agent(
         name=name,
+        handle=handle,
         seed=derive_seed(key),
         mailbox=not offline,
         resolve=LocalDirectoryResolver() if offline else None,
@@ -61,7 +65,7 @@ async def connect_mailbox(agent: Agent, api_key: str) -> tuple[bool, str]:
     details = RegistrationRequest(
         address=agent.address,
         name=agent.name,
-        handle=None,
+        handle=agent._handle,
         url=None,
         profile=agent._build_registration_profile(),
         endpoints=agent._endpoints,

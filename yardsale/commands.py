@@ -1,5 +1,5 @@
 """Chat commands read without a model: approve, change prices, cancel, pick a result, offer,
-accept.
+haggle, accept, and check a payment.
 
 The chat matches these before asking ASI:One anything, so selling and buying work the same with
 or without ASI_ONE_API_KEY, and no model's misreading can approve a listing or close a deal.
@@ -16,7 +16,11 @@ from yardsale.pricing import PriceError, parse_usd
 Kind = Literal[
     "offer",
     "edit",
+    "haggle",
     "accept",
+    "paid",
+    "orders",
+    "rules",
     "approve",
     "cancel",
     "unlist",
@@ -64,6 +68,24 @@ _OFFER = re.compile(
 _ACCEPT = re.compile(
     r"^(?:i\s+)?(?:accept(?:ed)?|deal|it'?s\s+a\s+deal|i'?ll\s+take\s+it|take\s+it|agreed?)\b"
 )
+_ACCEPT_PICK = re.compile(
+    r"^(?:i\s+)?(?:accept|buy|take)\s+(?:the\s+)?(?:#|item\s*|number\s*|no\.?\s*|option\s*)?"
+    r"(\d{1,2})$"
+)
+HAGGLE = re.compile(
+    r"\b(?:haggle|haggling|negotiate|negotiating|bargain|best\s+(?:deal|price)|"
+    r"get\s+me\s+a\s+(?:good\s+)?deal|deal\s+for\s+me|talk\s+(?:them|it)\s+down)\b"
+)
+_PAID = re.compile(
+    r"^(?:i\s+)?(?:(?:have\s+|just\s+|already\s+)?paid|done\s+paying|pay|payment|"
+    r"payment\s+(?:link|status)|check\s+(?:my\s+)?payment|did\s+(?:my\s+)?payment\s+go\s+through|"
+    r"how\s+do\s+i\s+pay)\b"
+)
+_ORDERS = re.compile(r"\bmy\s+(?:orders?|purchases?|deals?)\b|\bwhat\s+did\s+i\s+buy\b")
+_RULES = re.compile(
+    r"^(?:rules|my\s+rules|set\s+(?:my\s+)?(?:rules|prices)|change\s+(?:the\s+)?prices|"
+    r"edit(?:\s+(?:it|prices|the\s+listing))?|prices?\s+form)$"
+)
 _APPROVE = re.compile(
     r"^(?:yes|yep|yeah|y|ok(?:ay)?|sure|approve[ds]?|confirm(?:ed)?|list\s+it|publish(?:\s+it)?|"
     r"go\s+ahead|looks\s+good|sounds\s+good|do\s+it|lgtm|go\s+live)\b|\bapprove\b"
@@ -84,6 +106,18 @@ _SELECT = re.compile(
 )
 _HELP = re.compile(r"^(?:help|\?|what\s+can\s+you\s+do|commands|how\s+does\s+this\s+work)\b")
 _BARE_AMOUNT = re.compile(r"^" + AMOUNT + r"$", re.IGNORECASE)
+# ASI:One's planner doesn't pass a buyer's "accept" (or a tapped Buy button) on word for word. It
+# writes prose, like "The buyer accepts the negotiated deal ... Please proceed to complete the
+# purchase". These read such prose; the chat only uses them while a price is waiting to be taken.
+_ACCEPTS = re.compile(
+    r"\b(?:accept(?:s|ed|ing)?|buy\s+it|purchase\s+it|take\s+(?:it|the\s+deal)|"
+    r"complete\s+the\s+(?:purchase|deal|order)|"
+    r"proceed\s+(?:with\s+)?(?:the\s+)?(?:purchase|deal|order|checkout))\b"
+)
+_NOT_ACCEPTING = re.compile(
+    r"\b(?:not|don'?t|doesn'?t|won'?t|never|decline[sd]?|reject(?:s|ed)?|cancel(?:s|led)?|"
+    r"find|search|look(?:ing)?\s+for|show\s+me|another|instead|other)\b|n't\b"
+)
 
 
 @dataclass
@@ -95,6 +129,7 @@ class Command:
     pick: int | None = None  # 1-based number from a list the chat showed
     approve: bool = False  # "approve at $350": change the price, then approve
     error: str = ""  # a price that couldn't be used
+    text: str = ""  # the message, for commands that also search ("haggle for a road bike")
 
 
 def _cents(match: re.Match[str] | None) -> tuple[int | None, str]:
@@ -120,6 +155,14 @@ def budget(text: str) -> tuple[int | None, str]:
     return _cents(BUDGET.search(text))
 
 
+def accepts_deal(text: str) -> bool:
+    """True for a buyer taking the price on offer, written as prose ("The buyer accepts the deal,
+    please proceed to complete the purchase"). False if it also says no, or asks for something
+    else, so "don't accept" or "find me another one I'd accept" never buys."""
+    lowered = " ".join(text.lower().split())
+    return bool(_ACCEPTS.search(lowered)) and not _NOT_ACCEPTING.search(lowered)
+
+
 def parse(text: str) -> Command | None:
     """The command in a chat message, or None for anything else (ASI:One reads that)."""
     lowered = " ".join(text.lower().split()).rstrip(".!?")
@@ -134,6 +177,15 @@ def parse(text: str) -> Command | None:
     if asking is not None or floor is not None or error:
         approve = bool(_APPROVE_TOO.search(lowered))
         return Command("edit", asking_cents=asking, floor_cents=floor, approve=approve, error=error)
+    if HAGGLE.search(lowered):
+        limit, error = budget(lowered)
+        if limit is None and not error:
+            bare = _BARE_AMOUNT.search(HAGGLE.sub("", lowered).strip(" ,.:"))
+            limit, error = _cents(bare)
+        return Command("haggle", amount_cents=limit, error=error, text=text)
+    accept_pick = _ACCEPT_PICK.search(lowered)
+    if accept_pick is not None:
+        return Command("accept", pick=int(accept_pick.group(1)))
     unlist = _UNLIST.search(lowered)
     if unlist is not None:
         return Command("unlist", pick=int(unlist.group(1)) if unlist.group(1) else None)
@@ -145,6 +197,12 @@ def parse(text: str) -> Command | None:
         return Command("cancel")
     if _LISTINGS.search(lowered):
         return Command("listings")
+    if _ORDERS.search(lowered):
+        return Command("orders")
+    if _PAID.search(lowered):
+        return Command("paid")
+    if _RULES.search(lowered):
+        return Command("rules")
     select = _SELECT.search(lowered)
     if select is not None:
         return Command("select", pick=int(select.group(1)))

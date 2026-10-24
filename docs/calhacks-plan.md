@@ -54,20 +54,20 @@ links a [submission document](https://docs.google.com/document/d/1UDW-X1C24hxZvi
 
 | Requirement | Yardsale today |
 | --- | --- |
-| At least one agent registered on Agentverse | Yes: the Market, Identifier, Researcher, and Appraiser are active mailbox agents on Agentverse (checked October 23). |
+| At least one agent registered on Agentverse | Yes: the Market, Identifier, Researcher, and Appraiser are active mailbox agents on Agentverse (checked October 23). The Shopper (buyer agent) joins them on the next live start, and item agents can be hosted there. |
 | Implements the Agent Chat Protocol | Yes, the Market. |
-| Discoverable and directly usable through ASI:One | Usable by @mention. Unknown whether ASI:One picks Yardsale without one. |
-| Meaningful tool use or multi-agent orchestration | Yes: three pricing agents, Apify, Claude, an agent per item. |
-| The main workflow happens entirely inside an ASI:One conversation, with no custom frontend | Selling and buying happen in the chat. Payment doesn't exist yet. |
+| Discoverable and directly usable through ASI:One | Buying: yes, without an @mention (ASI:One's planner picked the Market on October 24). Selling: by @mention; the planner tried to price items itself. |
+| Meaningful tool use or multi-agent orchestration | Yes: three pricing agents, Apify, Claude, an agent per item, and a buyer agent haggling with several item agents at once. |
+| The main workflow happens entirely inside an ASI:One conversation, with no custom frontend | Selling, haggling, and buying happen in the chat; payment is a link from the chat. |
 | Public GitHub repo with instructions to run or test it | The repo is public and the README has run instructions. |
 
 **Bonus points:**
 
 | Bonus | How Yardsale gets it |
 | --- | --- |
-| Effective multi-agent collaboration | The pricing agents; a buyer agent haggling with several item agents at once (to build). |
-| Payment Protocol with a credible monetization model | Item agents request payment through the Payment Protocol; Yardsale keeps a commission on each sale (to build). |
-| Interactive Cards | Approve card today; sales carousel, seller rules form, haggling summary, and payment card (to build). |
+| Effective multi-agent collaboration | The pricing agents; a buyer agent haggling with several item agents at once over a published protocol (code done October 24). |
+| Payment Protocol with a credible monetization model | The Market sends agent buyers a Payment Protocol `RequestPayment` with the payment link; Yardsale keeps a 5% commission on each sale (code done October 24, test mode, not yet run against Visa or Stripe). |
+| Interactive Cards | Approve card (seen in ASI:One); sales carousel, seller prices form, haggling card, and payment card (code done October 24, not yet seen in ASI:One). |
 | Reliability and recovery from failed tool calls | Failed pricing steps return a reason, a resent message gets the same answer, and restarts bring every active item agent back. |
 | Creative use of real-time data and external services | Live eBay sold listings through Apify. |
 | Could keep running after the hackathon | Saved state in SQLite; needs a hosted server. |
@@ -127,7 +127,8 @@ and [video](https://drive.google.com/file/d/1EDfKrM7l8soO-40eKkPYDAEkRUTwQKyf):
   will not show" its embedded checkout card. A payment link in the chat doesn't depend on that,
   and Visa's Pay By Link is exactly that.
 - **Fetch Business isn't in the rules.** The required pieces (Agentverse, Chat Protocol, ASI:One)
-  come first. Fetch Business is the extra that sets the pitch apart.
+  come first. Fetch Business is the extra that sets the pitch apart. Few projects use it, so a
+  working `@yardsale` stands out, but nothing else in the pitch should depend on it.
 
 ## The pitch
 
@@ -165,6 +166,41 @@ but faked payment. DIAL haggled with humans by phone. Yardsale makes the invento
 with real payment. The demo seeds inventory and uses judges as buyers. Posting to eBay or
 Facebook is future work.
 
+**How to frame it:**
+
+- **Two layers.** `@yardsale` on Fetch Business is the front door: the verified agent ASI:One
+  finds, and the only one buyers and sellers talk to. The uAgents are the specialists behind it:
+  the Identifier, Researcher, and Appraiser price items, item agents hold floors and haggle, and
+  the payment step settles. The business agent is the product, and the uAgents are the power
+  behind it. The Cal Hacks event agent is itself a Fetch Business agent, so this is the setup
+  Fetch is pushing.
+- **Fetch Business is the reveal, not the premise.** Open with the seller's problem and the
+  haggling. The `@yardsale` Orders page with a real sale on it comes near the end, as the
+  surprise.
+- **The long tail of Fetch Business.** Suggested line: "Fetch Business gives brands a verified
+  agent. Yardsale gives everyone else one, for each thing they own."
+- **Used next to new.** When someone asks ASI:One for a standing desk, brand agents offer new
+  ones and Yardsale adds used ones to the same search. That makes ASI:One a better place to shop
+  without competing with the brands Fetch is signing up.
+- **Trust.** Fetch Business launched to stop knock-off agents. Secondhand selling has the same
+  problem, worse. Every item agent sits under one verified `@yardsale`, with its photo and the
+  sales behind its price attached.
+- **A funnel into Fetch Business.** Anyone who keeps listing (a reseller, a thrift shop, a club
+  doing a move-out sale) outgrows per-item agents and claims their own Fetch Business agent.
+  Yardsale brings Fetch Business new customers.
+- **One handle, not one per seller.** Fetch Business is built around one agent per business, not
+  per item. Making every casual seller set up and verify a business would kill the snap-a-photo
+  moment, and if Fetch Business did the selling, Yardsale would add nothing.
+- **Be exact about models.** Claude reads photos, `asi1-mini` reads typed text, and ASI:One finds
+  and routes to the agents. ASI:One's models don't take images, Fetch judges know it, and they
+  check the repo and Devpost against what the pitch claims. Never imply ASI:One reads the photos.
+- **Don't dwell on outside services.** Relying on Apify and Claude is fine, as long as the whole
+  flow works inside ASI:One and can be demoed there. Show the flow; explain the services when
+  asked.
+- **The agent count.** The submission asks how many agents there are, and a typical entry has
+  about ten plus an orchestrator. Ours is four service agents plus one per listed item, each live
+  on Agentverse with its own profile. Don't add agents just to raise the number.
+
 ## What Fetch Business offers
 
 From [business.fetch.ai](https://business.fetch.ai/), checked October 23:
@@ -190,8 +226,24 @@ From other sources:
   behalf with temporary Visa credentials, within spending limits the user sets
   ([Fetch blog](https://www.fetch.ai/blog/world-s-first-ai-to-ai-payment-for-real-world-transactions)).
 
-Unknown, so ask the Fetch team: whether `@yardsale` can connect to our own Market agent, and
-whether its "custom inventory" connection could read our listings.
+From the workbench at `business.fetch.ai/workbench`:
+
+- Anyone can sign in with a personal email and create a personal agent. Claiming a verified brand
+  handle is a separate step.
+- The sidebar has Home, Claim Your Agent, Profile & Instructions, Business Information, Socials
+  Library, Workflows & Tasks, Agent Messages, Agent Network, Orders, and Integrations.
+- The Orders page lists each order with a status (Pending, Confirmed, Cancelled, Completed,
+  Rejected) and can be searched by notes. Its URL names the agent:
+  `business.fetch.ai/workbench/orders?agentId=...`.
+- A bubble tea shop's ordering agent, connected through Square, has put real orders on that page,
+  each with the drink, its options, the customer, and the time. How an outside agent adds orders
+  isn't documented. The Integrations tab is the first place to look.
+- A used-item sale maps onto those statuses: Pending when a price is agreed, Confirmed when the
+  seller approves, Completed when it's paid.
+
+Unknown, so ask the Fetch team: whether `@yardsale` can connect to our own Market agent (likely
+through Integrations), whether its "custom inventory" connection could read our listings, and how
+an outside agent adds orders.
 
 ## The demo, step by step
 
@@ -200,30 +252,32 @@ Every step happens inside one ASI:One conversation, and every sponsor is one ste
 | Step | What happens | Sponsor | Built? |
 | --- | --- | --- | --- |
 | 1. Snap | A seller attaches a photo in ASI:One. Claude identifies it. | Claude | Yes |
-| 2. Price | Our own "resale comps" Actor finds recent eBay sales. Code sets the price. | Apify | Uses a third-party Actor today |
-| 3. Approve | Cards show the sales behind the price and a form for the seller's rules. The seller approves. | Fetch (Interactive Cards) | Approve card yes; sales carousel and rules form no |
-| 4. Live | The item's agent goes live under `@yardsale`. | Fetch Business | Agent yes; `@yardsale` no |
-| 5. Found | A buyer asks ASI:One, which finds Yardsale. | Fetch (ASI:One) | Search yes; not reachable from ASI:One without the server running live |
-| 6. Haggle | The buyer says their max. A buyer agent haggles with the matching item agents over several rounds, neither side revealing its limit, and a card shows every round and the best deal. | Fetch (uAgents) | One counter-offer only; no buyer agent |
-| 7. Pay | The buyer accepts. The item agent sends a Payment Protocol request, and the chat shows a Visa Pay By Link. Once it's paid, the item is sold and Yardsale's commission is recorded. | Visa, Fetch (Payment Protocol) | No |
+| 2. Price | Our own "resale comps" Actor finds recent eBay sales. Code sets the price. | Apify | Actor pushed but blocked by eBay (403); the Researcher still calls a third-party Actor. Apify credit is nearly used up |
+| 3. Approve | Cards show the sales behind the price and a form for the seller's rules. The seller approves. | Fetch (Interactive Cards) | Yes (carousel and form not yet seen in ASI:One) |
+| 4. Live | The item's agent goes live on Agentverse under `@yardsale`, with its own profile page. | Fetch Business, Agentverse | Hosting yes, run live October 24; `@yardsale` no |
+| 5. Found | A buyer asks ASI:One, which finds Yardsale. | Fetch (ASI:One) | Yes, without an @mention, through ASI:One's planner (October 24) |
+| 6. Haggle | The buyer says their max. A buyer agent haggles with the matching item agents over several rounds, neither side revealing its limit, and a card shows every round and the best deal. | Fetch (uAgents) | Yes, live with hosted item agents, ending in a recorded deal |
+| 7. Pay | The buyer accepts. The chat shows a Visa Pay By Link, and an agent buyer gets a Payment Protocol request. Once it's paid, the item is sold and Yardsale's commission is recorded. | Visa, Fetch (Payment Protocol) | Code yes; needs Visa sandbox or Stripe test keys |
+| 8. Order | The sale shows up on `@yardsale`'s Fetch Business Orders page. | Fetch Business | Orders webhook yes; the Fetch Business side is unknown |
 
 ## How close the code is
 
-State of main after PR #1 merged on Friday, October 23 at 11:23 PM PT:
+State of the code on Saturday, October 24, morning (not yet committed; live runs noted):
 
 | Piece | Status |
 | --- | --- |
-| Photo → price from sold listings | Built. With real keys, a photo of Air Jordan 4s was priced from 20 matching eBay sales on October 23. |
-| One agent per item, with its own address | Built. Registered on the Almanac, not Agentverse. |
-| Seller approval, cards | Built. The Approve card showed in the real ASI:One app; whether a tap reaches the Market is unverified. |
-| Buyer search and offers in the chat | Built, and tested only with fake services. |
-| Haggling within the seller's limits | One counter per offer, and lowballs reveal the floor (below). |
-| Buyer agent holding the shopper's max | Not built. |
-| `@yardsale` on Fetch Business | Not set up. |
-| Payment Protocol, Visa, commission | Not built. The protocol is installed (`uagents_core` 0.4.12, `uagents_core.contrib.protocols.payment`). |
-| Our own Apify Actor | Not built. The Researcher calls `caffein.dev/ebay-sold-listings`. |
+| Photo → price from sold listings | Built. With real keys, a photo of Air Jordan 4s was priced from 20 matching eBay sales on October 23. Each step's time is logged. |
+| One agent per item, with its own address | Built. Registered on the Almanac by default. |
+| Item agents hosted on Agentverse | Built: `YARDSALE_HOST_ITEMS=N` hosts up to N through the Hosting API, falling back to the server. Run live October 24: two hosted test bikes got public profiles, haggled, and sold. |
+| Seller approval, cards | Built: Approve card, sales carousel, prices form. The Approve card showed in the real ASI:One app. |
+| Buyer search and offers in the chat | Built. Live October 24: haggled and bought from a second ASI:One chat, and through ASI:One's planner with no @mention. |
+| Haggling within the seller's limits | Rebuilt: several rounds, agree-then-accept, counters stop a private gap above the floor. |
+| Buyer agent holding the shopper's max | Built (the Shopper), with a haggling card. |
+| `@yardsale` on Fetch Business | Not set up. Every order status change can go to `YARDSALE_ORDERS_WEBHOOK`. |
+| Payment Protocol, Visa, commission | Built for test mode: Visa Pay By Link sandbox or Stripe test checkout, Payment Protocol for agent buyers, 5% commission. Not yet run against Visa or Stripe. |
+| Our own Apify Actor | Written in `actors/resale-comps/` and pushed to Apify (private). eBay answers 403 through Apify's default proxy, so it finds no sales yet. Switching is `YARDSALE_APIFY_ACTOR`. |
 | Innovation Lab badges, agent addresses in the README | Done in the repo. Agentverse shows the badges after each agent reconnects. |
-| Public URL | `YARDSALE_PUBLIC_URL` exists but hasn't been used. ASI:One reaches the Market through its Agentverse mailbox, and item agents run in the same server, so the chat flow may not need it; outside agents do. |
+| Public URL | `YARDSALE_PUBLIC_URL` exists but hasn't been used. ASI:One reaches the Market through its Agentverse mailbox, and item agents run in the same server or on Agentverse, so the chat flow may not need it; outside agents do. |
 
 The installed cards module has carousel, detail, form, review, and custom cards, so the sales
 carousel, rules form, and haggling card need no new library. A tapped button comes back as JSON
@@ -232,23 +286,26 @@ read.
 
 ## Known problems
 
-- **Lowballs reveal the floor.** A counter is the higher of the floor and the halfway point
-  between the offer and the asking price
-  ([pricing.py](../yardsale/pricing.py), `counter_price`). With appraised prices the floor is at
-  least 70% of the asking price, so any offer under about 40% of asking is countered at exactly
-  the floor. Example: asking $300, floor $210. An offer of $1 gets a $210 counter, which the
-  buyer can accept. The haggling rebuild in the build order should open well above the floor
-  and move toward it over several rounds.
-- **"20 seconds" is unproven.** The eBay search alone can take a minute. Measure it before
-  promising a number on stage.
-- **"Agentverse address".** Item agents register on the Almanac, not Agentverse. On stage, say
-  "its own agent address" unless that changes.
+- **Lowballs revealed the floor** until the October 24 rebuild: a $1 offer used to get a
+  counter at exactly the floor. Now counters stop a private gap above it, and lowballs get no
+  concession. A buyer making many identities could still narrow a floor down.
+- **"20 seconds" is wrong.** A photo took 36 seconds on October 24 (identify 11 s, eBay 12 s,
+  appraise 14 s). Say "under a minute" on stage.
+- **"Agentverse address".** Only hosted item agents have an Agentverse profile. Hosting worked
+  live on October 24, so run the demo with `YARDSALE_HOST_ITEMS` set.
+- **Apify credit is nearly gone.** The free plan's $5 for October 14 – November 13 was $4.70
+  used by October 24, which is 3 or 4 more photos. Ask the Apify team for credit before the
+  demo, and don't price test photos.
+- **Accepting through ASI:One's planner** failed until October 24: the planner rewrites
+  "accept" as a sentence. Fixed; see [background.md](background.md).
 
 ## Build order
 
 **Friday night**
 
-1. Ask the Fetch and Visa teams the questions below.
+1. Ask the Fetch and Visa teams the questions below. Ask about the mechanics (agent slots,
+   connecting `@yardsale`, orders) rather than walking them through the whole idea; it lands
+   better as a surprise at judging.
 2. Go live: restart the server so the four Agentverse profiles pick up the badges, list one real
    photo from the ASI:One app, and make one offer from a second ASI:One account. Then ask
    ASI:One "I want to sell my bike" without an @mention and see whether it picks Yardsale.
@@ -256,29 +313,55 @@ read.
 
 **Saturday**
 
-3. Tune the Market's Agentverse profile so ASI:One finds it without an @mention. (The badges and
-   the README's agent list are done.)
-4. Set up `@yardsale` on Fetch Business, following the Fetch team's answers.
-5. Rebuild haggling: a buyer agent holding the shopper's max, haggling with several item agents
+3. Host item agents on Agentverse. When a seller approves, create the item agent through
+   Agentverse's [Hosting API](https://fetch.ai/docs/apis/agentverse/hosting) (create the agent,
+   upload its code, start it), give it its floor as a secret or in its storage, and reply with
+   its Agentverse profile link. An agent that spins itself up with a live Agentverse address is
+   the strongest single moment in the demo. This reverses decision 3 in
+   [background.md](background.md). The free plan allows 8 agents and Premium allows 25, so ask
+   the Fetch team for Premium. Without it, host only the demo items on Agentverse and keep the
+   rest Almanac-only. Check which Python packages hosted agents can import; the item agent only
+   needs the negotiation code. *Done and run live October 24 (`hosting.py`).*
+4. Set up `@yardsale` on Fetch Business as the front door, following the Fetch team's answers.
+   Check the Integrations tab first, since it's the likeliest way to connect `@yardsale` to the
+   Market. Time-box this to a few hours. Fallback: keep the Market as the entry point on
+   Agentverse and pitch Fetch Business as the next step.
+5. Tune the Market's Agentverse profile so ASI:One finds it without an @mention. ASI:One picks
+   agents by their Agentverse descriptions, so write for what buyers and sellers actually type.
+   Rehearse the exact demo query, and keep the @mention as a fallback. (The badges and the
+   README's agent list are done.) *Profile text and description rewritten October 24; they
+   upload on the next live start.*
+6. Rebuild haggling: a buyer agent holding the shopper's max, haggling with several item agents
    at once over several rounds, with neither side revealing its limit. The result comes back as
    one card showing each round and the best deal. Publish the protocol so any agent can take the
-   buyer's seat.
-6. Add payment: on a deal, the item agent sends a Payment Protocol request, and the chat shows a
+   buyer's seat. This is what makes one agent per item worth having, and it fixes lowballs
+   revealing the floor. *Done October 24 (`haggle.py`, `shopper.py`), tested with fakes.*
+7. Add payment: on a deal, the buyer gets a Payment Protocol request, and the chat shows a
    Visa Pay By Link (Visa Acceptance sandbox). Once it's paid, mark the item sold and record the
-   commission. Fallback: a Stripe test checkout link, which loses the Visa track.
-7. Publish our own "resale comps" Actor on the Apify Store, and have the Researcher call it.
-8. Add the sales carousel and the seller rules form.
-9. Measure photo-to-proposal time and cut it down.
+   commission. Fallback: a Stripe test checkout link, which loses the Visa track. *Code done
+   October 24 (`payments.py`, `checkout.py`); the Market sends the request, since Yardsale is
+   the merchant. Needs sandbox keys to try.*
+8. Put closed deals on `@yardsale`'s Orders page: Pending when a price is agreed, Confirmed when
+   the seller approves, Completed when it's paid. This depends on what step 4 finds, and it's the
+   demo's closing moment. *October 24: every status change (pending when agreed, confirmed when
+   the payment link goes out, completed when paid) is POSTed to `YARDSALE_ORDERS_WEBHOOK`;
+   connecting it to Fetch Business is still unknown.*
+9. Publish our own "resale comps" Actor on the Apify Store, and have the Researcher call it.
+   *Written October 24 in `actors/resale-comps/`; publish with `apify push`, run it once, then
+   set `YARDSALE_APIFY_ACTOR`.*
+10. Add the sales carousel and the seller rules form. *Done October 24.*
+11. Measure photo-to-proposal time and cut it down. *Each step's time is logged since October
+    24; measure it on real photos.*
 
 **Sunday**
 
-10. Freeze code around 2 AM. Record the 3 to 5 minute video and share the demo chats. Finish the
+12. Freeze code around 2 AM. Record the 3 to 5 minute video and share the demo chats. Finish the
     Devpost entry (text, image, video), then register through the ASI:One Submission Agent,
     which needs the Devpost and video URLs, and have every teammate join with the Team ID.
     Rehearse. Submit before 9 AM.
 
-If time runs short, cut step 8, then step 7. Steps 2, 3, 5, and 6 are the demo and the required
-pieces; keep them.
+If time runs short, cut step 10, then step 9, then step 8. Steps 2, 3, 5, 6, and 7 are the demo
+and the required pieces; keep them.
 
 ## Pitch outline (draft, 3 minutes)
 
@@ -289,10 +372,12 @@ The big screen shows two ASI:One chats: the seller's and the buyer's.
    tedious.
 3. **0:45** The gap: Fetch Business makes a business shoppable by AIs, but only if it has a
    catalog. Secondhand goods have none.
-4. **1:15** The proposal arrives: the sales behind the price, approve, and the agent's address.
+4. **1:15** The proposal arrives with the sales behind the price. The seller approves, and the
+   item's own agent goes live: open its Agentverse profile.
 5. **1:45** A second judge asks ASI:One for it with a max price. The haggling card shows each
    round, the judge accepts, the Visa link goes out, and the payment clears.
-6. **2:30** What's real today, how Yardsale makes money, and what's next: power sellers move to
+6. **2:15** Open `@yardsale`'s Fetch Business workbench: the sale is there as an order.
+7. **2:35** What's real today, how Yardsale makes money, and what's next: power sellers move to
    their own Fetch Business agent; eBay and Facebook listings later.
 
 ## Questions judges will ask
@@ -303,21 +388,37 @@ The big screen shows two ASI:One chats: the seller's and the buyer's.
   credentials. Don't call it real money.
 - **"How does Yardsale make money?"** A commission on each sale, taken before the seller's
   payout. Pricing a photo is free.
-- **"Why one agent per item instead of a database?"** Each item can be found and dealt with
-  directly, keeps its own private limit, and can move to the seller's own Fetch Business later.
-  Item agents don't count against Agentverse's agent limit, and 40 of them ran in one server in
-  an offline test.
+- **"Why one agent per item instead of a database?"** The item agent holds the seller's floor
+  itself and haggles with several buyer agents at once, so the floor never leaves it. Each one
+  is a live Agentverse agent that can be found and dealt with directly, and it can move to the
+  seller's own Fetch Business later. Items beyond our Agentverse slots run Almanac-only in our
+  server, which handled 40 in an offline test. Without real haggling, an item agent would be a
+  database row with an address, which is why the haggling rebuild matters.
+- **"Does ASI:One read the photos?"** No. Claude reads photos, `asi1-mini` reads typed text, and
+  ASI:One finds and routes to the agents. The README and Devpost say the same.
+- **"What if ASI:One doesn't pick Yardsale?"** Use the rehearsed query. If routing misses on
+  stage, @mention the Market directly.
+- **"Which part is the Payment Protocol, and which is Visa?"** The Payment Protocol is the
+  messages between agents: the item agent requests payment and gets the confirmation. Visa Pay By
+  Link is the page where the buyer pays.
+- **"Why not give each seller their own Fetch Business agent?"** Fetch Business is one agent per
+  business, and casual sellers shouldn't have to set up and verify a business to sell a lamp.
+  Sellers who keep listing graduate to their own.
 
 ## Questions to ask tonight
 
 **Fetch team**
 
-1. Can we claim `@yardsale` this weekend and connect it to our existing Market agent?
+1. Can we claim `@yardsale` this weekend and connect it to our existing Market agent? Is the
+   Integrations tab the way to do that?
 2. If not, can its "custom inventory" connection point at our listings?
-3. Does using Fetch Business count toward the Fetch track, or only Agentverse and ASI:One?
-4. Does a payment link opened from the chat still count as completing the workflow inside
+3. Can deals closed by our agents show up as orders in `@yardsale`'s Fetch Business workbench?
+   How do agents like the bubble tea shop's (connected through Square) get orders there?
+4. Can we get Agentverse Premium (25 agents) for the weekend, so each item agent can be hosted on
+   Agentverse?
+5. Does using Fetch Business count toward the Fetch track, or only Agentverse and ASI:One?
+6. Does a payment link opened from the chat still count as completing the workflow inside
    ASI:One? Does ASI:One show any Payment Protocol request itself?
-5. Can deals closed by our agents show up as orders in `@yardsale`'s Fetch Business workbench?
 
 **Visa team**
 
@@ -339,3 +440,5 @@ The big screen shows two ASI:One chats: the seller's and the buyer's.
 - [VentureBeat on the Fetch Business launch](https://venturebeat.com/ai/the-google-search-of-ai-agents-fetch-launches-asi-one-and-business-tier-for)
 - [Fetch's AI-to-AI payment](https://www.fetch.ai/blog/world-s-first-ai-to-ai-payment-for-real-world-transactions)
 - [Visa Acceptance Agent Toolkit](https://developer.visaacceptance.com/resources/Agent-Toolkit.html)
+- [Agentverse Hosting API](https://fetch.ai/docs/apis/agentverse/hosting) and
+  [hosted agents guide](https://docs.agentverse.ai/documentation/launch-agents/hosted-agents)

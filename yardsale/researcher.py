@@ -113,6 +113,7 @@ def build_researcher(research: Research, offline: bool) -> Agent:
     agent = service_agent(
         "researcher",
         "yardsale-researcher",
+        "ys-researcher",
         "Finds recent eBay sold listings for a product search, with sold prices and photos.",
         offline,
     )

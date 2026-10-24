@@ -1,0 +1,62 @@
+{
+  "title": "Resale Comps input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "keywords": {
+      "title": "Searches",
+      "type": "array",
+      "description": "What to look up, as you'd type it into eBay, such as \"Trek FX 2 Disc hybrid bike medium\". One search per line.",
+      "editor": "stringList",
+      "prefill": ["Breville Bambino Plus espresso machine"]
+    },
+    "count": {
+      "title": "Sales per search",
+      "type": "integer",
+      "description": "How many kept sales to return for each search.",
+      "default": 20,
+      "minimum": 1,
+      "maximum": 200
+    },
+    "daysToScrape": {
+      "title": "Days back",
+      "type": "integer",
+      "description": "Only sales that ended in this many days. eBay keeps about 90 days of sold listings.",
+      "default": 90,
+      "minimum": 1,
+      "maximum": 90
+    },
+    "itemCondition": {
+      "title": "Condition",
+      "type": "string",
+      "description": "Only new, only used, or any condition.",
+      "editor": "select",
+      "enum": ["any", "new", "used"],
+      "enumTitles": ["Any", "New", "Used"],
+      "default": "any"
+    },
+    "ebaySite": {
+      "title": "eBay site",
+      "type": "string",
+      "description": "Which eBay to search. Prices are read in US dollars, so ebay.com works best.",
+      "editor": "select",
+      "enum": ["ebay.com"],
+      "default": "ebay.com"
+    },
+    "includeExcluded": {
+      "title": "Also return screened-out sales",
+      "type": "boolean",
+      "description": "Return lots, bundles, parts, and empty-box sales too, each with its excludedReason. They never count toward the price spread.",
+      "default": false
+    },
+    "proxyConfiguration": {
+      "title": "Proxy",
+      "type": "object",
+      "description": "eBay blocks some datacenter addresses. Residential proxies are the most reliable.",
+      "editor": "proxy",
+      "prefill": {"useApifyProxy": true},
+      "default": {"useApifyProxy": true}
+    }
+  },
+  "required": ["keywords"]
+}

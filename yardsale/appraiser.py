@@ -181,6 +181,7 @@ def build_appraiser(judge: Judge, offline: bool) -> Agent:
     agent = service_agent(
         "appraiser",
         "yardsale-appraiser",
+        "ys-appraiser",
         "Compares an item's photo with eBay sold listings and sets an asking price and a floor.",
         offline,
     )

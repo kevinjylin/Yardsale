@@ -1,0 +1,20 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Sales",
+      "transformation": {
+        "fields": ["keyword", "title", "soldPrice", "shippingPrice", "condition", "endedAt", "isBestOfferAccepted", "excludedReason", "url"]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "url": {"label": "Listing", "format": "link"},
+          "soldPrice": {"label": "Sold for ($)", "format": "text"},
+          "isBestOfferAccepted": {"label": "Best Offer", "format": "boolean"}
+        }
+      }
+    }
+  }
+}

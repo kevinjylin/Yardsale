@@ -1,6 +1,13 @@
 import pytest
 
-from yardsale.commands import Command, budget, parse, seller_prices
+from yardsale.commands import Command, accepts_deal, budget, parse, seller_prices
+
+# What ASI:One's planner sent on October 24 when the buyer said "accept that deal and buy it".
+RELAYED_ACCEPT = (
+    "The buyer accepts the negotiated deal for the used Specialized hybrid bike at the agreed "
+    "price (within the $320 max budget). Please proceed to complete the purchase — send the "
+    "payment link / next steps so we can finalize the transaction."
+)
 
 
 @pytest.mark.parametrize(
@@ -50,6 +57,34 @@ def test_bad_amounts_are_errors_not_guesses() -> None:
     command = parse("offer $2,000,000")
     assert command is not None and command.amount_cents is None
     assert "between" in command.error
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        RELAYED_ACCEPT,
+        "Great, accept that deal and buy it for me.",
+        "The user would like to take the deal.",
+        "Please proceed with the purchase.",
+    ],
+)
+def test_relayed_acceptances(text: str) -> None:
+    assert accepts_deal(text)
+    assert parse(text) is None  # these reach the chat as plain text, not as a command
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The buyer does not accept the deal.",
+        "I don't want to buy it",
+        "Find me another bike I'd accept",
+        "The buyer rejected the offer and won't proceed with the purchase.",
+        "show me what else is for sale",
+    ],
+)
+def test_not_acceptances(text: str) -> None:
+    assert not accepts_deal(text)
 
 
 def test_prices_in_a_sentence() -> None:

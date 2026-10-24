@@ -1,11 +1,15 @@
-"""A test agent that sends any message and collects the replies."""
+"""Test helpers: an agent that sends any message and collects the replies, and a local web
+server standing in for an outside service."""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TypeVar
 from uuid import uuid4
 
+from aiohttp import web
 from uagents import Agent, Context, Model, Protocol
 
 M = TypeVar("M", bound=Model)
@@ -49,3 +53,17 @@ class Peer:
     async def ask(self, to: str, msg: Model, kind: type[M]) -> M:
         await self.send(to, msg)
         return await self.receive(kind)
+
+
+@asynccontextmanager
+async def local_server(app: web.Application) -> AsyncIterator[str]:
+    """Serve `app` on this machine and yield its base URL."""
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        await runner.cleanup()

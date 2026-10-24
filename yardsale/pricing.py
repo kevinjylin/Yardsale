@@ -145,9 +145,3 @@ def listing_prices(
     if suggested_asking is None or suggested_floor is None:
         raise NoSuggestedPrice("No recent sales were close enough to suggest a price.")
     return suggested_asking, suggested_floor
-
-
-def counter_price(offer_cents: int, asking_cents: int, floor_cents: int) -> int:
-    """The counter to an offer below the floor: halfway to the asking price, never below the
-    floor. Half cents round down, toward the buyer."""
-    return max(floor_cents, (offer_cents + asking_cents) // 2)

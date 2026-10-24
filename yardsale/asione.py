@@ -20,7 +20,7 @@ from typing import Literal
 import aiohttp
 from pydantic import BaseModel, ValidationError
 
-from yardsale.commands import AMOUNT, BUDGET, FLOOR, budget, seller_prices
+from yardsale.commands import AMOUNT, BUDGET, FLOOR, HAGGLE, budget, seller_prices
 
 API_URL = "https://api.asi1.ai/v1/chat/completions"
 MODEL = os.getenv("YARDSALE_ASI_MODEL", "asi1-mini")
@@ -37,6 +37,7 @@ class SellerMessage(BaseModel):
     note: str
     query: str = ""  # buyers: what they're looking for
     budget_usd: float | None = None  # buyers: the most they want to pay
+    haggle: bool = False  # buyers: they want Yardsale to negotiate for them
 
 
 # (text, has_photo) -> what the message asks for
@@ -60,12 +61,15 @@ asking_usd, not floor_usd.
 model number), in a few words. Empty if none. Leave out prices and requests.
 - query: for "buy", the item they want in a few words, like "road bike" or "espresso machine". \
 Keep words like "cheap". Empty otherwise.
-- budget_usd: for "buy", the most they want to pay, if they said ("under $300"). Otherwise null."""
+- budget_usd: for "buy", the most they want to pay, if they said ("under $300", "my max is \
+250"). Otherwise null.
+- haggle: true if a buyer wants Yardsale to negotiate, haggle, or get them the best deal or price. \
+Otherwise false."""
 
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["intent", "asking_usd", "floor_usd", "note", "query", "budget_usd"],
+    "required": ["intent", "asking_usd", "floor_usd", "note", "query", "budget_usd", "haggle"],
     "properties": {
         "intent": {"type": "string", "enum": ["sell", "buy", "other"]},
         "asking_usd": {"type": ["number", "null"]},
@@ -73,6 +77,7 @@ SCHEMA = {
         "note": {"type": "string"},
         "query": {"type": "string"},
         "budget_usd": {"type": ["number", "null"]},
+        "haggle": {"type": "boolean"},
     },
 }
 
@@ -130,9 +135,10 @@ def read_locally(text: str, has_photo: bool) -> SellerMessage:
             floor_usd=_dollars(floor),
             note=note[:200],
         )
-    if _BUY.search(text):
+    wants_haggle = bool(HAGGLE.search(text.lower()))
+    if _BUY.search(text) or wants_haggle:
         limit, _ = budget(text)
-        query = _BUY_WORDS.sub(" ", BUDGET.sub(" ", text))
+        query = _BUY_WORDS.sub(" ", BUDGET.sub(" ", HAGGLE.sub(" ", text.lower())))
         return SellerMessage(
             intent="buy",
             asking_usd=None,
@@ -140,6 +146,7 @@ def read_locally(text: str, has_photo: bool) -> SellerMessage:
             note="",
             query=" ".join(re.sub(r"[^\w\s'-]", " ", query).split())[:100],
             budget_usd=_dollars(limit),
+            haggle=wants_haggle,
         )
     return SellerMessage(intent="other", asking_usd=None, floor_usd=None, note="")
 
