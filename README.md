@@ -3,25 +3,45 @@
 ![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)
 ![tag:hackathon](https://img.shields.io/badge/hackathon-5F43F1)
 
-Snap a photo of something you want to sell. Yardsale identifies it, prices it from recent eBay
-sales, and suggests a listing. Once you approve, the item becomes a live Fetch.ai agent with its
-own address. The agent knows your lowest price and haggles with buyers for you. Buyers say what
-they want and the most they'll pay ("find me a hybrid bike, haggle for me, max $320"), and
-Yardsale's buyer agent haggles with every matching item agent at once, over several rounds,
-without either side revealing its limit. The buyer accepts the best price and gets a payment
-link. Yardsale keeps a commission; the seller gets the rest.
+Yardsale is two products built on Fetch.ai agents.
 
-**Status:** prototype. Selling with approval, multi-round haggling (yours or the buyer agent's),
-payment links, saved state, and restarts work and are tested with fake Claude, Apify, ASI:One,
-and payment answers (the fakes are test-only; the server always uses the real services). On
-October 23, photos sent from the real ASI:One app were priced with real Claude and Apify keys.
-On October 24, buyers haggled and bought from the ASI:One app and through ASI:One's planner
-(which found Yardsale without an @mention), item agents were hosted on Agentverse, a Stripe
-test payment went through end to end, and `@yardsale` on Fetch Business haggled and bought
-through Yardsale's HTTP API. Not yet tried: Visa's sandbox (see [Going live](#going-live)).
-Payments are test mode only: live keys are refused.
-[docs/background.md](docs/background.md) has the decisions made so far and what's still open, and
-[docs/calhacks-plan.md](docs/calhacks-plan.md) has the Cal Hacks plan.
+**For sellers.** Built for a student moving out right before finals, who can't answer 200 DMs
+while selling everything in their dorm. Take a photo of each thing and say your minimum ("sell
+this, at least $40"). Yardsale identifies it, prices it from recent eBay sales, and suggests a
+listing. Once you approve, the item gets its own agent that knows your minimum. The listing is
+on ASI:One and `@yardsale`, and Yardsale writes a Craigslist post for you to paste. The item's
+agent haggles with every buyer, in ASI:One or by email from the Craigslist post, and never goes
+below your minimum or shows it.
+
+**For buyers.** Say what you want and the most you'll pay, in ASI:One or to `@yardsale` on Fetch
+Business ("find me a hybrid bike, haggle for me, max $320"). Yardsale's buyer agent haggles with
+every matching item agent at once, over several rounds, without either side revealing its limit,
+and you pay through a link. When nothing on Yardsale matches, the deal finder searches eBay,
+Craigslist, and OfferUp for the best deals under your max, and can email a Craigslist seller for
+you and negotiate the price.
+
+Yardsale keeps a commission on the sales it collects payment for; the seller gets the rest.
+
+**Status:** prototype, built at Cal Hacks 13.0.
+
+- **Built and run live** (October 23–24): photos from the real ASI:One app priced with real
+  Claude and Apify keys; seller approval; item agents, some hosted on Agentverse; haggling and
+  buying from the ASI:One app, through ASI:One's planner (which found Yardsale without an
+  @mention), and through `@yardsale` on Fetch Business; and a Stripe test payment end to end.
+- **Built, tested only with fakes:** the item agent answering Craigslist buyers by email
+  ([Craigslist by email](#craigslist-by-email)).
+- **In progress:** several photos in one message; the deal finder in the chat and `@yardsale`
+  (the eBay and Craigslist searches through Apify are written, OfferUp isn't); and emailing
+  Craigslist sellers for a buyer.
+- **Also built, not on the main path:** listing on the seller's own eBay, waiting on eBay
+  developer keys ([Selling on the seller's own eBay](#selling-on-the-sellers-own-ebay)).
+
+Claude reads the photos and `asi1-mini` reads typed text; ASI:One finds and routes to the agents.
+Payments are test mode only (Stripe test keys, or Visa's sandbox, which hasn't been run): live
+keys are refused. Tests use fake Claude, Apify, ASI:One, and payment answers; the server always
+uses the real services. [docs/background.md](docs/background.md) has the decisions made so far
+and what's still open, and [docs/calhacks-plan.md](docs/calhacks-plan.md) has the Cal Hacks plan
+and the pitch.
 
 ## Agents
 
