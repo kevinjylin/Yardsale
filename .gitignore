@@ -1,0 +1,11 @@
+# Agent seeds and local runtime state. Never commit.
+.agent-data/
+.env
+
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+*.log
+.DS_Store
