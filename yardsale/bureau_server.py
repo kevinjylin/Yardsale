@@ -53,7 +53,7 @@ from uagents.registration import BatchAlmanacApiRegistrationPolicy
 from uagents_core.registration import BatchRegistrationPolicy
 from uagents_core.types import DeliveryStatus
 
-from yardsale import business_api, config
+from yardsale import business_api, config, watches
 from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
@@ -69,6 +69,8 @@ from yardsale.common import (
     dollars,
     write_json,
 )
+from yardsale.craigslist import search_craigslist
+from yardsale.ebay import search_ebay
 from yardsale.hosting import HostingClient, HostingError, claim_handle, host_item, hosted_limit
 from yardsale.identifier import Identify, build_identifier, identify_with_claude
 from yardsale.models import (
@@ -111,6 +113,7 @@ from yardsale.photos import PhotoError, check_prepared_photo
 from yardsale.pricing import NoSuggestedPrice, PriceError, listing_prices, valid_cents
 from yardsale.researcher import Research, build_researcher, search_ebay_sold
 from yardsale.shopper import Shopper, build_shopper, haggle_timeout
+from yardsale.sources import Source
 from yardsale.store import ACTIVE, AGENTVERSE, BUREAU, PROPOSED, DealRecord, Listing, Store
 
 log = logging.getLogger("yardsale.bureau")
@@ -125,6 +128,9 @@ APPRAISE_TIMEOUT = 240.0
 NEGOTIATE_TIMEOUT = 15.0  # item agents in this Bureau answer in milliseconds
 HOSTED_NEGOTIATE_TIMEOUT = 60.0  # hosted ones answer through Agentverse mailboxes
 RETRY_DELETES_EVERY = 60.0  # seconds between tries to delete closed listings' hosted agents
+# How often to look for a standing search that's due. Far more often than watches.WATCH_EVERY,
+# so a watch is polled near its due time; finding none due is two cheap queries.
+WATCH_CHECK_EVERY = 900.0
 
 
 @dataclass
@@ -159,6 +165,9 @@ class Runtime:
     background: set[asyncio.Task[None]] = field(default_factory=set)  # kept until they finish
     deleting: asyncio.Lock = field(default_factory=asyncio.Lock)  # one delete sweep at a time
     round_timeout: float = 30.0  # the buyer agent's wait for one item agent's answer
+    # Other sites a standing search looks on, by name. Empty means watches find nothing, which
+    # is what tests and --fakes want: every poll is a paid scrape.
+    sources: dict[str, Source] = field(default_factory=dict)
     boot_id: str = field(default_factory=lambda: uuid4().hex)
     started: bool = False  # the Bureau is running, so new agents start themselves
     agents: dict[str, Agent] = field(default_factory=dict)  # item_id -> its agent
@@ -956,6 +965,7 @@ def build(
     host_limit: int = 0,
     round_timeout: float = 30.0,
     pictures: ItemPictures | None = None,
+    sources: dict[str, Source] | None = None,
 ) -> tuple[Bureau, Agent, list[Agent]]:
     """Create the Bureau, the Market, the buyer agent and three service agents, and the agents
     of the store's active listings that run here, inside a running loop. Without a store, state
@@ -993,6 +1003,7 @@ def build(
         host_limit=host_limit,
         round_timeout=round_timeout,
         pictures=pictures,
+        sources=sources or {},
     )
     # On Agentverse in live mode, so ASI:One can reach it. Handles messages concurrently, so a
     # photo listing waiting on a service doesn't block other messages.
@@ -1017,6 +1028,14 @@ def build(
     @market.on_interval(period=RETRY_DELETES_EVERY)
     async def delete_closed_hosted_agents(ctx: Context) -> None:
         await delete_closed_hosted(rt)
+
+    @market.on_interval(period=WATCH_CHECK_EVERY)
+    async def poll_standing_searches(ctx: Context) -> None:
+        if not rt.sources:
+            return  # no sources configured, so a watch would cost nothing and find nothing
+        found = await watches.run_due(rt.store, rt.sources)
+        if found:
+            ctx.logger.info(f"standing searches turned up {found} new listing(s)")
 
     services.append(shopper.agent)
     for agent in (market, *services):
@@ -1092,6 +1111,9 @@ async def main(mode: str) -> None:
         hosting=hosting,
         host_limit=hosted_limit() if hosting else 0,
         pictures=item_pictures_from_env() if hosting else None,
+        # Standing searches scrape other sites, which costs money per poll, so they're off in
+        # demo mode. --offline still has them: it only skips Fetch's servers.
+        sources=None if mode == "demo" else {"craigslist": search_craigslist, "ebay": search_ebay},
     )
     if not offline:
         await connect_to_agentverse([market, *services])
