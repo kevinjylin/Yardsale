@@ -1,5 +1,7 @@
 """Durable state: listings, counter-offers, deals and their payments, and chat conversations, in
-one SQLite file.
+one SQLite file. Also each listing's photo, and for sellers who connected eBay (ebay_seller.py),
+their eBay tokens, their listings' eBay copies, and the eBay offers already answered. Tables added
+since the first version are created in older files on open (CREATE TABLE IF NOT EXISTS).
 
 The Market, the item agents, and the chat share one connection in one event loop. Every status
 change is a conditional UPDATE inside a transaction, so a listing is approved, canceled, or sold
@@ -28,7 +30,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,7 @@ NOT_COLLECTED, PENDING, PAID, EXPIRED, REJECTED = (
     "expired",
     "rejected",
 )
+EBAY_ACTIVE, EBAY_SOLD, EBAY_ENDED = "active", "sold", "ended"  # an eBay listing's state
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS listings (
@@ -102,6 +105,41 @@ CREATE TABLE IF NOT EXISTS conversations (
     key TEXT PRIMARY KEY,
     state TEXT NOT NULL,
     updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS photos (
+    key TEXT PRIMARY KEY,
+    media_type TEXT NOT NULL,
+    data BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ebay_grants (
+    state_hash TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ebay_accounts (
+    owner TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    access_expires_at REAL NOT NULL,
+    refresh_token TEXT NOT NULL,
+    refresh_expires_at REAL NOT NULL,
+    connected_at REAL NOT NULL,
+    announced INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ebay_listings (
+    item_id TEXT PRIMARY KEY REFERENCES listings (item_id),
+    owner TEXT NOT NULL,
+    ebay_item_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'sold', 'ended')),
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ebay_offers (
+    offer_id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    answered_at REAL NOT NULL,
+    buyer TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -200,6 +238,31 @@ class DealRecord:
     paid_at: float | None = None
 
 
+@dataclass
+class EbayAccount:
+    """A seller's eBay grant (ebay_seller.py). The tokens never go in logs or replies."""
+
+    owner: str
+    access_token: str = field(repr=False)
+    access_expires_at: float
+    refresh_token: str = field(repr=False)
+    refresh_expires_at: float
+    connected_at: float
+    announced: bool
+
+
+@dataclass
+class EbayListing:
+    item_id: str
+    owner: str
+    ebay_item_id: str
+    url: str
+    status: str  # active | sold | ended
+    created_at: float
+    updated_at: float
+
+
+_EBAY_LISTING_COLUMNS = "item_id, owner, ebay_item_id, url, status, created_at, updated_at"
 _LISTING_COLUMNS = (
     "item_id, owner, seller_id, listing_ref, status, title, asking_cents, floor_cents, "
     "seller_asking_cents, seller_floor_cents, suggested_asking_cents, suggested_floor_cents, "
@@ -579,3 +642,157 @@ class Store:
             "INSERT OR REPLACE INTO conversations VALUES (?, ?, ?)",
             (key, json.dumps(state), self.clock()),
         )
+
+    # --- Photos -----------------------------------------------------------------------------
+
+    def save_photo(self, key: str, media_type: str, data: bytes) -> None:
+        """A listing's prepared photo (key: its item ID), kept for listing it on eBay."""
+        self._db.execute("INSERT OR REPLACE INTO photos VALUES (?, ?, ?)", (key, media_type, data))
+
+    def photo(self, key: str) -> tuple[str, bytes] | None:
+        """(media type, bytes), or None."""
+        row = self._db.execute(
+            "SELECT media_type, data FROM photos WHERE key = ?", (key,)
+        ).fetchone()
+        return (row["media_type"], bytes(row["data"])) if row else None
+
+    def move_photo(self, old_key: str, new_key: str) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO photos SELECT ?, media_type, data FROM photos WHERE key = ?",
+            (new_key, old_key),
+        )
+        self._db.execute("DELETE FROM photos WHERE key = ?", (old_key,))
+
+    # --- eBay (ebay_seller.py) --------------------------------------------------------------
+
+    def add_ebay_grant(self, state_hash: str, owner: str) -> None:
+        """A consent link sent to this owner, waiting for eBay's redirect."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO ebay_grants VALUES (?, ?, ?)",
+            (state_hash, owner, self.clock()),
+        )
+
+    def take_ebay_grant(self, state_hash: str, newer_than: float) -> str | None:
+        """The owner a consent link was made for, used once. None if unknown or too old."""
+        with self._transaction() as db:
+            row = db.execute(
+                "SELECT owner, created_at FROM ebay_grants WHERE state_hash = ?", (state_hash,)
+            ).fetchone()
+            db.execute(
+                "DELETE FROM ebay_grants WHERE state_hash = ? OR created_at <= ?",
+                (state_hash, newer_than),
+            )
+        if row is None or row["created_at"] <= newer_than:
+            return None
+        return str(row["owner"])
+
+    def save_ebay_account(
+        self,
+        owner: str,
+        access_token: str,
+        access_expires_at: float,
+        refresh_token: str,
+        refresh_expires_at: float,
+    ) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO ebay_accounts VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (
+                owner,
+                access_token,
+                access_expires_at,
+                refresh_token,
+                refresh_expires_at,
+                self.clock(),
+            ),
+        )
+
+    def ebay_account(self, owner: str) -> EbayAccount | None:
+        row = self._db.execute(
+            "SELECT owner, access_token, access_expires_at, refresh_token, refresh_expires_at, "
+            "connected_at, announced FROM ebay_accounts WHERE owner = ?",
+            (owner,),
+        ).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        data["announced"] = bool(data["announced"])
+        return EbayAccount(**data)
+
+    def update_ebay_access(self, owner: str, access_token: str, expires_at: float) -> None:
+        self._db.execute(
+            "UPDATE ebay_accounts SET access_token = ?, access_expires_at = ? WHERE owner = ?",
+            (access_token, expires_at, owner),
+        )
+
+    def announce_ebay(self, owner: str) -> bool:
+        """True once, the first time it's called after the owner connected eBay."""
+        return bool(
+            self._db.execute(
+                "UPDATE ebay_accounts SET announced = 1 WHERE owner = ? AND announced = 0",
+                (owner,),
+            ).rowcount
+        )
+
+    def delete_ebay_account(self, owner: str) -> bool:
+        return bool(
+            self._db.execute("DELETE FROM ebay_accounts WHERE owner = ?", (owner,)).rowcount
+        )
+
+    def add_ebay_listing(
+        self, item_id: str, owner: str, ebay_item_id: str, url: str
+    ) -> EbayListing:
+        now = self.clock()
+        record = EbayListing(item_id, owner, ebay_item_id, url, EBAY_ACTIVE, now, now)
+        self._db.execute(
+            f"INSERT OR REPLACE INTO ebay_listings ({_EBAY_LISTING_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (item_id, owner, ebay_item_id, url, EBAY_ACTIVE, now, now),
+        )
+        return record
+
+    def ebay_listing(self, item_id: str) -> EbayListing | None:
+        row = self._db.execute(
+            f"SELECT {_EBAY_LISTING_COLUMNS} FROM ebay_listings WHERE item_id = ?", (item_id,)
+        ).fetchone()
+        return EbayListing(**dict(row)) if row else None
+
+    def ebay_listings(
+        self, *, owner: str | None = None, status: str | None = None
+    ) -> list[EbayListing]:
+        query, args = f"SELECT {_EBAY_LISTING_COLUMNS} FROM ebay_listings WHERE 1 = 1", []
+        if owner is not None:
+            query += " AND owner = ?"
+            args.append(owner)
+        if status is not None:
+            query += " AND status = ?"
+            args.append(status)
+        query += " ORDER BY created_at"
+        return [EbayListing(**dict(row)) for row in self._db.execute(query, args)]
+
+    def set_ebay_status(self, item_id: str, status: str) -> None:
+        self._db.execute(
+            "UPDATE ebay_listings SET status = ?, updated_at = ? WHERE item_id = ?",
+            (status, self.clock(), item_id),
+        )
+
+    def ebay_offer_answered(self, offer_id: str) -> bool:
+        row = self._db.execute(
+            "SELECT 1 FROM ebay_offers WHERE offer_id = ?", (offer_id,)
+        ).fetchone()
+        return row is not None
+
+    def record_ebay_answer(self, offer_id: str, item_id: str, action: str, buyer: str) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO ebay_offers (offer_id, item_id, action, answered_at, buyer) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (offer_id, item_id, action, self.clock(), buyer),
+        )
+
+    def ebay_counters_sent(self, item_id: str, buyer: str) -> int:
+        """How many counter-offers this eBay buyer got for the item (eBay allows 5)."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM ebay_offers WHERE item_id = ? AND buyer = ? "
+            "AND action = 'counter'",
+            (item_id, buyer),
+        ).fetchone()
+        return int(row["n"])

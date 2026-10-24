@@ -6,7 +6,7 @@ The check says which keys are set, never what they are.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -55,6 +55,53 @@ def db_path(mode: str) -> Path:
     return Path(override) if override else DATA_DIR / f"listings-{mode}.sqlite3"
 
 
+EBAY_ENVIRONMENTS = ("sandbox", "production")
+
+
+@dataclass(frozen=True)
+class EbaySettings:
+    """Yardsale's one eBay developer keyset. Sellers connect their own accounts to it."""
+
+    client_id: str
+    client_secret: str = field(repr=False)
+    runame: str  # eBay's name for the redirect URL; its accept URL is <API URL>/ebay/callback
+    env: str = "sandbox"
+
+
+def ebay_settings() -> EbaySettings | None:
+    """EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, and EBAY_RUNAME, or None when none are set.
+
+    The sandbox is the default. Production is used only when YARDSALE_EBAY_ENV=production, and a
+    keyset made for one (eBay puts -SBX- or -PRD- in the App ID) is refused for the other.
+    """
+    client_id = os.getenv("EBAY_CLIENT_ID", "").strip()
+    secret = os.getenv("EBAY_CLIENT_SECRET", "").strip()
+    runame = os.getenv("EBAY_RUNAME", "").strip()
+    env = os.getenv("YARDSALE_EBAY_ENV", "").strip().lower() or "sandbox"
+    if env not in EBAY_ENVIRONMENTS:
+        raise ConfigError("YARDSALE_EBAY_ENV must be sandbox or production")
+    if not (client_id or secret or runame):
+        return None
+    missing = [
+        name
+        for name, value in (
+            ("EBAY_CLIENT_ID", client_id),
+            ("EBAY_CLIENT_SECRET", secret),
+            ("EBAY_RUNAME", runame),
+        )
+        if not value
+    ]
+    if missing:
+        raise ConfigError(f"eBay selling also needs {', '.join(missing)}")
+    if env == "sandbox" and "-PRD-" in client_id:
+        raise ConfigError(
+            "EBAY_CLIENT_ID is a production keyset; set YARDSALE_EBAY_ENV=production to use it"
+        )
+    if env == "production" and "-SBX-" in client_id:
+        raise ConfigError("EBAY_CLIENT_ID is a sandbox keyset, but YARDSALE_EBAY_ENV=production")
+    return EbaySettings(client_id, secret, runame, env)
+
+
 @dataclass
 class Check:
     name: str
@@ -85,6 +132,7 @@ def readiness(mode: str) -> list[Check]:
     ]
     checks.append(_payments_check())
     checks.append(_business_api_check())
+    checks.append(_ebay_check())
     checks.append(
         Check(
             "YARDSALE_ORDERS_WEBHOOK",
@@ -159,6 +207,32 @@ def _business_api_check() -> Check:
         "YARDSALE_API_KEY",
         True,
         f"@yardsale's HTTP API listens on 127.0.0.1:{port}; tunnel it to make it public",
+        False,
+    )
+
+
+def _ebay_check() -> Check:
+    try:
+        settings = ebay_settings()
+    except ConfigError as ex:
+        return Check("EBAY_CLIENT_ID", False, str(ex), True)
+    if settings is None:
+        return Check(
+            "EBAY_CLIENT_ID", False, "not set: sellers can't also list on their own eBay", False
+        )
+    if not _is_set("YARDSALE_API_KEY"):
+        return Check(
+            "EBAY_CLIENT_ID",
+            False,
+            "set, but eBay's sign-in returns to /ebay/callback on the HTTP API, which needs "
+            "YARDSALE_API_KEY",
+            False,
+        )
+    return Check(
+        "EBAY_CLIENT_ID",
+        True,
+        f"sellers can connect eBay ({settings.env}); the RuName's accept URL must be "
+        "<public API URL>/ebay/callback",
         False,
     )
 
