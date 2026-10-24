@@ -37,7 +37,7 @@ from uagents_core.types import DeliveryStatus
 from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
-from yardsale.chat import FetchPhoto, Sold, build_chat_protocol
+from yardsale.chat import FetchPhoto, Sold, build_chat_protocol, fetch_photo
 from yardsale.common import (
     BUREAU_PORT,
     MARKET_FILE,
@@ -74,7 +74,6 @@ from yardsale.offline import (
     NoBatchRegistration,
     publish_locally,
 )
-from yardsale.photos import download_photo
 from yardsale.researcher import Research, build_researcher, search_ebay_sold
 
 log = logging.getLogger("yardsale.bureau")
@@ -494,7 +493,7 @@ def build(
     research: Research,
     judge: Judge,
     read: ReadMessage = read_seller_message,
-    fetch: FetchPhoto = download_photo,
+    fetch: FetchPhoto = fetch_photo,
 ) -> tuple[Bureau, Agent, list[Agent]]:
     """Create the Bureau, the Market, and the three service agents, inside a running loop."""
     global RUNTIME

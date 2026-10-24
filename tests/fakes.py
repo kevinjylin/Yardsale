@@ -7,10 +7,11 @@ import io
 from uuid import uuid4
 
 from PIL import Image
-from uagents import Agent
+from uagents import Agent, Context
 
 from yardsale.appraiser import Judgement
 from yardsale.asione import SellerMessage
+from yardsale.chat import Photo
 from yardsale.models import Comp, ItemDetails
 from yardsale.photos import PhotoError
 from yardsale.researcher import ResearchError
@@ -97,8 +98,8 @@ async def fake_read(text: str, has_photo: bool) -> SellerMessage:
     return SellerMessage(intent=intent, asking_usd=None, floor_usd=floor, note="")
 
 
-async def fake_fetch(url: str) -> bytes:
-    if "broken" in url:
+async def fake_fetch(ctx: Context, photo: Photo) -> bytes:
+    if "broken" in photo.url:
         raise PhotoError("I couldn't download the photo (the link returned 404).")
     return jpeg_bytes()
 

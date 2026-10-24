@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from uagents_core.contrib.protocols.chat import (
     MetadataContent,
     Resource,
     ResourceContent,
+    StartSessionContent,
     TextContent,
     chat_protocol_spec,
 )
@@ -27,17 +29,27 @@ from tests.fakes import (
     fake_judge,
     fake_read,
     fake_research,
+    jpeg_bytes,
     run_agents,
     slow_research,
 )
 from yardsale import bureau_server, chat
+from yardsale.photos import PhotoError
 from yardsale.researcher import Research
 
 PHOTO_URL = "https://res.cloudinary.com/asi1/image/upload/v1/bike.heic"
+STORAGE_URI = "agent-storage://agentverse.ai/v1/storage/3f2a"
 
 
-def message(text: str = "", photo: str | None = None, mime_type: str = "image/heic") -> ChatMessage:
-    content: list[Any] = [TextContent(type="text", text=text)] if text else []
+def message(
+    text: str = "",
+    photo: str | None = None,
+    mime_type: str = "image/heic",
+    start_session: bool = False,
+) -> ChatMessage:
+    content: list[Any] = [StartSessionContent(type="start-session")] if start_session else []
+    if text:
+        content.append(TextContent(type="text", text=text))
     if photo:
         resource = Resource(uri=photo, metadata={"mime_type": mime_type})
         content.append(ResourceContent(type="resource", resource_id=uuid4(), resource=resource))
@@ -69,7 +81,7 @@ async def converse(
         )
         if len(replies) >= replies_expected:
             done.set()
-        elif to_send and reply_text(msg) != chat.STILL_WORKING:
+        elif to_send and reply_text(msg):
             await ctx.send(sender, to_send.pop(0))  # same conversation (session) as before
 
     @proto.on_message(ChatAcknowledgement)
@@ -123,13 +135,41 @@ async def test_slow_pricing_answers_first_then_sends_the_result(
 
 
 async def test_a_repeated_photo_link_is_not_listed_twice() -> None:
-    # ASI:One's planner repeats earlier links when it relays the next message.
+    # ASI:One's planner repeats earlier links when it relays the next message, so the answer
+    # is what happened to that photo, not a fresh listing or "attach a photo".
     replies, _ = await converse(
-        [message("Sell this", PHOTO_URL), message(f"thanks! [bike]({PHOTO_URL})")], 2
+        [message("Sell this", PHOTO_URL), message(f"did you list it? [bike]({PHOTO_URL})")], 2
     )
     assert "is for sale" in reply_text(replies[0])
-    assert reply_text(replies[1]) == chat.HELP
+    assert reply_text(replies[1]) == reply_text(replies[0])
     assert len(bureau_server.runtime().listings) == 1
+
+
+async def test_a_repeated_photo_still_being_priced_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chat, "REPLY_WITHIN", 0.2)
+    replies, _ = await converse(
+        [message("sell", PHOTO_URL), message("is it done?", PHOTO_URL)], 3, research=slow_research
+    )
+    texts = [reply_text(r) for r in replies]
+    assert texts[0] == chat.STILL_WORKING
+    assert chat.ALREADY_WORKING in texts
+    assert sum("is for sale" in t for t in texts) == 1
+    assert len(bureau_server.runtime().listings) == 1
+
+
+async def test_a_session_start_gets_the_uploads_welcome_and_no_text() -> None:
+    # ASI:One opens a session with a StartSessionContent-only message. Fetch's examples answer
+    # it with the attachments metadata and nothing else.
+    replies, _ = await converse([message(start_session=True)], 1)
+    assert [type(c) for c in replies[0].content] == [MetadataContent]
+    assert replies[0].content[0].metadata == {"attachments": "true"}  # type: ignore[union-attr]
+    assert not bureau_server.runtime().listings
+
+
+async def test_an_upload_in_agentverse_storage_is_listed() -> None:
+    replies, _ = await converse([message("sell this", STORAGE_URI, start_session=True)], 2)
+    assert [type(c) for c in replies[0].content] == [MetadataContent]
+    assert "is for sale" in reply_text(replies[1])
 
 
 async def test_photo_link_in_the_text_is_used() -> None:
@@ -176,6 +216,39 @@ def test_photos_are_found_in_resources_and_text() -> None:
     assert chat.clean_text(msg) == (
         "sell these Listing like https://www.ebay.com/itm/123 isn't a photo"
     )
+
+
+def test_storage_uploads_are_photos_with_an_asset_id() -> None:
+    msg = message("sell", STORAGE_URI, mime_type="image/jpeg")
+    (photo,) = chat.photos_in(msg)
+    assert photo.url == STORAGE_URI
+    assert photo.resource_id == str(msg.content[1].resource_id)  # type: ignore[union-attr]
+    assert chat.clean_text(msg) == "sell"
+
+
+async def test_fetch_photo_uses_storage_for_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
+    downloaded: list[tuple[str, str]] = []
+
+    def fake_storage(identity: object, asset_id: str) -> bytes:
+        downloaded.append((str(identity), asset_id))
+        return jpeg_bytes()
+
+    async def link_is_dead(url: str) -> bytes:
+        raise PhotoError("I couldn't download the photo (the link returned 403).")
+
+    monkeypatch.setattr(chat, "download_from_storage", fake_storage)
+    monkeypatch.setattr(chat, "download_photo", link_is_dead)
+    ctx: Any = SimpleNamespace(
+        agent=SimpleNamespace(identity="market-identity"), logger=SimpleNamespace(info=print)
+    )
+    storage_photo = chat.Photo(url=STORAGE_URI, mime_type="image/jpeg", resource_id="3f2a")
+    assert await chat.fetch_photo(ctx, storage_photo) == jpeg_bytes()
+    # A web link that doesn't open falls back to storage when the upload has an asset id.
+    linked = chat.Photo(url=PHOTO_URL, mime_type="image/jpeg", resource_id="9c1d")
+    assert await chat.fetch_photo(ctx, linked) == jpeg_bytes()
+    assert downloaded == [("market-identity", "3f2a"), ("market-identity", "9c1d")]
+    with pytest.raises(PhotoError):
+        await chat.fetch_photo(ctx, chat.Photo(url=PHOTO_URL, mime_type="image/jpeg"))
 
 
 def test_resource_link_can_be_in_metadata() -> None:

@@ -66,9 +66,12 @@ Market → new item agent → reply in the chat. The next sections cover it.
 Code: [yardsale/chat.py](../yardsale/chat.py) and [yardsale/asione.py](../yardsale/asione.py).
 
 1. The seller attaches a photo and types anything, like "sell this, at least $40, small dent".
-2. ASI:One uploads the photo and sends the Market a web link to it, in a `ResourceContent` or as
-   a link in the text when its planner relays the message. The Market downloads it, fixes the
-   rotation, and shrinks it to a 1280 px JPEG. HEIC works.
+2. ASI:One uploads the photo to Agentverse storage and sends the Market a `ResourceContent`
+   whose `resource_id` is the stored asset. Only the agent the file was sent to can read it, so
+   the Market signs the download with its own identity (`photos.download_from_storage`), the
+   way Fetch's PDF summariser example does. When the planner relays a message, the photo can
+   arrive as a plain web link instead, in the resource or in the text; those are downloaded
+   directly. The Market fixes the rotation and shrinks the photo to a 1280 px JPEG. HEIC works.
 3. `asi1-mini` reads the text into an intent (sell, buy, other), an asking price, a lowest
    price, and a note such as "size M". It uses a strict JSON schema. If ASI:One is down or
    `ASI_ONE_API_KEY` isn't set, the photo still lists at the appraised price.
