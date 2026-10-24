@@ -5,15 +5,28 @@ description = "Snap a photo, get a live Fetch.ai agent that haggles for your ite
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-  # The Bureau code uses uagents internals (Bureau.add, agent._identity), tested on 0.25.5.
+  "aiohttp>=3.14.5",
+  "anthropic>=2.1.0,<3",
+  "pillow>=13.0.0",
+  "pillow-heif>=1.8.1",  # iPhone photos are HEIC
+  "python-dotenv>=1.2.4",
+  # Uses uagents internals (Bureau.add, agent._identity, Agentverse connect), tested on 0.25.5.
   "uagents>=0.25.5,<0.26",
 ]
 
 [dependency-groups]
 dev = [
   "mypy>=1.15.0,<2",
+  "pytest>=9.1.1",
+  "pytest-asyncio>=1.4.0",
   "ruff>=0.11.0,<1",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
 
 [tool.ruff]
 line-length = 100

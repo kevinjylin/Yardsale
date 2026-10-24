@@ -1,16 +1,24 @@
-"""Shared paths, ports, and identity helpers for the Yardsale Bureau prototype."""
+"""Shared paths, ports, settings, and identity helpers."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import os
 import secrets
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+from uagents.resolver import AlmanacApiResolver
+
 ROOT = Path(__file__).resolve().parents[1]
+# API keys and settings come from .env (gitignored); see .env.example.
+load_dotenv(ROOT / ".env")
+
 # .agent-data/ is gitignored, so the master seed and local state never get committed.
 DATA_DIR = ROOT / ".agent-data" / "yardsale-bureau"
 MASTER_SEED_FILE = DATA_DIR / "master_seed"
@@ -18,6 +26,7 @@ MARKET_FILE = DATA_DIR / "market.json"
 
 BUREAU_PORT = int(os.getenv("YARDSALE_BUREAU_PORT", "8100"))
 BUYER_PORT = int(os.getenv("YARDSALE_BUYER_PORT", "8101"))
+SELLER_PORT = int(os.getenv("YARDSALE_SELLER_PORT", "8102"))
 
 
 def endpoint(port: int) -> str:
@@ -59,3 +68,20 @@ def read_json(path: Path) -> Any:
 
 def dollars(cents: int) -> str:
     return f"${cents / 100:,.2f}"
+
+
+async def wait_until(check: Callable[[], Awaitable[bool]], what: str) -> None:
+    for _ in range(60):
+        if await check():
+            return
+        await asyncio.sleep(1)
+    raise TimeoutError(f"timed out after 60s waiting for {what}")
+
+
+async def almanac_endpoints(address: str) -> list[str]:
+    _, endpoints = await AlmanacApiResolver().resolve(address)
+    return endpoints
+
+
+class PipelineError(RuntimeError):
+    """A photo listing failed; the message is shown to the seller."""
