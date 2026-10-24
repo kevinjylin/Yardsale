@@ -292,7 +292,7 @@ Every step happens inside one ASI:One conversation, and every sponsor is one ste
 | Step | What happens | Sponsor | Built? |
 | --- | --- | --- | --- |
 | 1. Snap | A seller attaches a photo in ASI:One. Claude identifies it. | Claude | Yes |
-| 2. Price | Our own "resale comps" Actor finds recent eBay sales. Code sets the price. | Apify | Actor pushed but blocked by eBay (403); the Researcher still calls a third-party Actor. Apify credit is nearly used up |
+| 2. Price | Our own "resale comps" Actor finds recent eBay sales. Code sets the price. | Apify | Actor pushed but blocked by eBay (403); the Researcher still calls a third-party Actor |
 | 3. Approve | Cards show the sales behind the price and a form for the seller's rules. The seller approves. | Fetch (Interactive Cards) | Yes (carousel and form not yet seen in ASI:One) |
 | 4. Live | The item's agent goes live on Agentverse under `@yardsale`, with its own profile page. | Fetch Business, Agentverse | Hosting yes, run live October 24. `@yardsale` haggles and buys through Yardsale's API (Plus trial, October 24); sellers still go to `@ys-orchestrator` |
 | 5. Found | A buyer asks ASI:One, which finds Yardsale. | Fetch (ASI:One) | Yes, without an @mention, through ASI:One's planner (October 24) |
@@ -333,9 +333,8 @@ read.
   appraise 14 s). Say "under a minute" on stage.
 - **"Agentverse address".** Only hosted item agents have an Agentverse profile. Hosting worked
   live on October 24, so run the demo with `YARDSALE_HOST_ITEMS` set.
-- **Apify credit is nearly gone.** The free plan's $5 for October 14 – November 13 was $4.70
-  used by October 24, which is 3 or 4 more photos. Ask the Apify team for credit before the
-  demo, and don't price test photos.
+- **Apify credit.** The team has $200 of Apify credit (October 24), about 2,500 photos at
+  $0.08 each, so rehearsing with real photos is fine.
 - **Accepting through ASI:One's planner** failed until October 24: the planner rewrites
   "accept" as a sentence. Fixed; see [background.md](background.md).
 - **Wi-Fi that intercepts HTTPS cuts the server off.** On the morning of October 24, every

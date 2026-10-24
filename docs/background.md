@@ -351,8 +351,8 @@ per agent, because agent addresses come from the master seed and don't change.
 - **A seller's lowest price far under the appraisal.** On October 24 a seller set "at least
   $40" on shoes appraised at $190 (lowest $180), and the buyer agent's opening offer of $123 was
   agreed at once. That follows the rules, but nothing warned the seller.
-- **Apify credit.** The account is on Apify's free plan ($5 a month), and $4.70 of the
-  October 14 – November 13 cycle was used by October 24, enough for 3 or 4 more photos.
+- **Apify credit.** The team has $200 of Apify credit (October 24), about 2,500 photos at
+  $0.08 each.
 - **Probing the floor with new identities.** One buyer can't find a floor from counters or
   agreements, but someone making many identities could still narrow it down by offering just
   above and below, as on any marketplace with automatic offers.
