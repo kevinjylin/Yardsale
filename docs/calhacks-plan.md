@@ -331,18 +331,31 @@ can point at a URL that changes (each quick tunnel gets a new one).
 
 ## The demo, step by step
 
-Every step happens inside one ASI:One conversation, and every sponsor is one step:
+Two phones on the big screen: a friend's (the seller) and the presenter's (the buyer). Steps 1–7
+are the seller product, and 8–10 are the buyer's deal finder. Selling and asking for things
+happen in ASI:One; the Craigslist email is a second channel the same item agent answers.
 
-| Step | What happens | Sponsor | Built? |
-| --- | --- | --- | --- |
-| 1. Snap | A seller attaches a photo in ASI:One. Claude identifies it. | Claude | Yes |
-| 2. Price | Our own "resale comps" Actor finds recent eBay sales. Code sets the price. | Apify | Actor pushed but blocked by eBay (403); the Researcher still calls a third-party Actor |
-| 3. Approve | Cards show the sales behind the price and a form for the seller's rules. The seller approves. | Fetch (Interactive Cards) | Yes (carousel and form not yet seen in ASI:One) |
-| 4. Live | The item's agent goes live on Agentverse under `@yardsale`, with its own profile page. | Fetch Business, Agentverse | Hosting yes, run live October 24. `@yardsale` haggles and buys through Yardsale's API (Plus trial, October 24); sellers still go to `@ys-orchestrator` |
-| 5. Found | A buyer asks ASI:One, which finds Yardsale. | Fetch (ASI:One) | Yes, without an @mention, through ASI:One's planner (October 24) |
-| 6. Haggle | The buyer says their max. A buyer agent haggles with the matching item agents over several rounds, neither side revealing its limit, and a card shows every round and the best deal. | Fetch (uAgents) | Yes, live with hosted item agents, ending in a recorded deal |
-| 7. Pay | The buyer accepts. The chat shows a Visa Pay By Link, and an agent buyer gets a Payment Protocol request. Once it's paid, the item is sold and Yardsale's commission is recorded. | Visa, Fetch (Payment Protocol) | Stripe test mode run live October 24, from deal to paid; Visa needs sandbox keys |
-| 8. Order | The sale shows up on `@yardsale`'s Fetch Business Orders page. | Fetch Business | Orders webhook yes. Fetch Business's Orders page only takes orders from Square or SumUp POS, so no |
+| Step | Phone | What happens | Sponsor | Built? |
+| --- | --- | --- | --- | --- |
+| 1. Snap | Seller | The friend attaches a photo in ASI:One (`@ys-orchestrator`) and types "sell this, at least $40". Claude identifies the item; `asi1-mini` reads the minimum. | Claude, Fetch (ASI:One) | Yes, one photo per message. Several photos per message is in progress. |
+| 2. Price | Seller | The Researcher finds eBay sold listings through Apify, and code sets the asking price and floor. | Apify | Yes (`caffein.dev/ebay-sold-listings`; our own Actor is blocked by eBay) |
+| 3. Approve | Seller | The proposal card shows the sales behind the price. The friend approves, and the item's agent goes live with its address and, when hosted, an Agentverse profile. | Fetch (Interactive Cards, Agentverse) | Yes. Approve card seen in ASI:One; hosting run live October 24. |
+| 4. Post | Seller | `craigslist` gives the post text. The friend has already pasted it on Craigslist with Yardsale's inbox as the email; show the live post. | | Yes; posted by hand. Not yet tried on real Craigslist. |
+| 5. Email | Buyer | From the presenter's phone, reply to the Craigslist post with a low offer. | | Yes; relay unverified |
+| 6. Haggle back | Buyer | The item agent answers in the email thread with a counter that doesn't show the floor. The presenter replies "deal" and gets a payment link. | Fetch (uAgents) | Yes; tested with a fake inbox only |
+| 7. Paid | Both | Pay with Stripe's test card. The friend's `my listings` shows the item sold and the payout after 5%. | Stripe (test mode) | Yes; Stripe run live October 24 |
+| 8. Ask | Buyer | Ask `@yardsale` (or ASI:One) "find me a mini fridge, max $60". Nothing on Yardsale matches. | Fetch Business, ASI:One | Search yes |
+| 9. Find | Buyer | The deal finder lists the best eBay, Craigslist, and OfferUp results under $60. | Apify | eBay and Craigslist searches written, wiring in progress; OfferUp has no source yet |
+| 10. Negotiate | Buyer | The presenter picks a Craigslist post, and the agent emails its seller an offer and negotiates. | | In progress |
+
+Before the pitch:
+
+- Make the Craigslist post at least an hour early. Craigslist emails a confirmation link first,
+  and how long the relay takes to deliver a buyer's email is unknown.
+- Rehearse steps 5–6 on real Craigslist and time them. If the relay is slow, keep a recording of
+  them as the fallback.
+- The Devpost video can run longer than 3 minutes, so it also shows Buyers 1: a buyer agent
+  haggling with item agents in ASI:One and buying, which is proven live.
 
 ## How close the code is
 
