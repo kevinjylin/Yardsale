@@ -11,6 +11,9 @@ and makes offers ("offer $250"). The Market passes each offer to the item agent,
 counters, or refuses. "accept" takes the latest counter. Buyers never see a floor price.
 
 commands.py reads commands without a model. Anything else goes to ASI:One (asione.py).
+Proposals, search results, and counter-offers also carry Interactive Cards (Approve, Details,
+Accept buttons) from uagents_core's chat cards module. Tapping one does exactly what typing the
+command does, with the same checks; the text works on its own wherever cards don't show.
 
 ASI:One sends an upload as a web link, either in a ResourceContent or as a link in the text when
 its planner relays the message. The planner also repeats earlier links in later messages, so each
@@ -31,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import json
 import logging
 import os
 import re
@@ -51,6 +55,16 @@ from uagents_core.contrib.protocols.chat import (
     ResourceContent,
     TextContent,
     chat_protocol_spec,
+)
+from uagents_core.contrib.protocols.chat.cards import (
+    CarouselCardPayload,
+    CarouselItem,
+    CtaAction,
+    ReviewCardPayload,
+    ReviewSummaryRow,
+    SelectionValue,
+    create_card_content,
+    extract_card_response,
 )
 
 from yardsale import commands
@@ -258,6 +272,28 @@ def text_message(
     return ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=content)
 
 
+def card_choice(msg: ChatMessage) -> dict[str, SelectionValue] | None:
+    """What a tapped card button chose, or None if this message isn't a card response.
+
+    The cards module's README says some clients still send the selection as JSON text, so that
+    works too. A dismissed card is an empty choice.
+    """
+    for block in msg.content:
+        if isinstance(block, MetadataContent):
+            response = extract_card_response(block)
+            if response is not None:
+                return {} if response.cancelled else dict(response.selection or {})
+    text = msg.text().strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return None
+        if isinstance(data, dict) and isinstance(data.get("action"), str):
+            return {k: v for k, v in data.items() if isinstance(v, str | int | float | bool)}
+    return None
+
+
 # --- Replies -------------------------------------------------------------------------------------
 
 
@@ -291,6 +327,74 @@ def proposal_text(listing: Listing) -> str:
         ]
     lines.append(APPROVE_PROMPT)
     return "\n".join(lines)
+
+
+def proposal_card(listing: Listing) -> MetadataContent:
+    rows = [
+        ReviewSummaryRow(label="Asking price", value=usd(listing.asking_cents)),
+        ReviewSummaryRow(
+            label="Lowest price (buyers never see it)", value=usd(listing.floor_cents)
+        ),
+    ]
+    appraisal = listing.appraisal
+    if appraisal is not None and appraisal.asking_cents is not None:
+        used = f"{len(appraisal.matches)} ({appraisal.confidence} confidence)"
+        rows.append(ReviewSummaryRow(label="eBay sales used", value=used))
+    choice: dict[str, Any] = {"item_id": listing.item_id}
+    return create_card_content(
+        ReviewCardPayload(
+            title=f"List your {listing.title}?",
+            summary_rows=rows,
+            approve_cta=CtaAction(
+                label="Approve", selection={"action": "approve", **choice}, primary=True
+            ),
+            reject_cta=CtaAction(label="Cancel", selection={"action": "cancel", **choice}),
+        ),
+        card_id=uuid4(),
+    )
+
+
+def results_card(found: list[Listing]) -> MetadataContent:
+    return create_card_content(
+        CarouselCardPayload(
+            title="For sale",
+            items=[
+                CarouselItem(
+                    id=listing.item_id,
+                    title=listing.title,
+                    subtitle=usd(listing.asking_cents),
+                    secondary_text=listing.item.condition if listing.item else None,
+                    primary_cta=CtaAction(
+                        label="Details", selection={"action": "pick", "item_id": listing.item_id}
+                    ),
+                )
+                for listing in found
+            ],
+        ),
+        card_id=uuid4(),
+    )
+
+
+def counter_card(listing: Listing, counter_cents: int) -> MetadataContent:
+    return create_card_content(
+        ReviewCardPayload(
+            title=f"Buy the {listing.title} for {usd(counter_cents)}?",
+            summary_rows=[
+                ReviewSummaryRow(label="Asking price", value=usd(listing.asking_cents)),
+                ReviewSummaryRow(label="Counter-offer", value=usd(counter_cents)),
+                ReviewSummaryRow(label="Good for", value="24 hours"),
+            ],
+            approve_cta=CtaAction(
+                label=f"Accept {usd(counter_cents)}",
+                selection={"action": "accept", "item_id": listing.item_id, "cents": counter_cents},
+                primary=True,
+            ),
+            reject_cta=CtaAction(
+                label="No thanks", selection={"action": "decline", "item_id": listing.item_id}
+            ),
+        ),
+        card_id=uuid4(),
+    )
 
 
 def listed_text(listing: Listing, registered: bool, offline: bool) -> str:
@@ -400,7 +504,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                     floor_cents=floor,
                 ),
             )
-            reply = Reply(proposal_text(listing))
+            reply = Reply(proposal_text(listing), proposal_card(listing))
         except UnpricedError as ex:
             unpriced = ex
             reply = Reply(
@@ -463,7 +567,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         conv.awaiting = "proposal"
         if approve_after:
             return await approve(ctx, conv, listing)
-        return Reply(proposal_text(listing))
+        return Reply(proposal_text(listing), proposal_card(listing))
 
     async def approve(ctx: Context, conv: Conversation, proposal: Listing) -> str:
         try:
@@ -532,7 +636,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 f"Nothing is for sale{about}{under} right now. Try other words, or ask "
                 '"what\'s for sale?"'
             )
-        return Reply(results_text(found, query, conv.owner))
+        return Reply(results_text(found, query, conv.owner), results_card(found))
 
     def pick(conv: Conversation, number: int) -> str:
         if not 1 <= number <= len(conv.results):
@@ -561,7 +665,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return Reply(
                 f"The seller's agent countered with {usd(reply.counter_cents)} for the "
                 f'{listing.title}. Reply "accept" to buy it at {usd(reply.counter_cents)}, or '
-                "make another offer. The counter-offer is good for 24 hours."
+                "make another offer. The counter-offer is good for 24 hours.",
+                counter_card(listing, reply.counter_cents),
             )
         conv.counter = None
         conv.awaiting = None
@@ -612,6 +717,38 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         return answer(conv, listing, reply)
 
     # --- Routing ---------------------------------------------------------------------------
+
+    async def handle_choice(
+        ctx: Context, conv: Conversation, choice: dict[str, SelectionValue]
+    ) -> str | Reply:
+        """A tapped card button. Checked exactly like the typed command it stands for."""
+        action, item_id = str(choice.get("action", "")), str(choice.get("item_id", ""))
+        if not choice:
+            return "OK."
+        if action in ("approve", "cancel"):
+            listing = store.get(item_id)
+            if listing is None or listing.owner != conv.owner or listing.status != PROPOSED:
+                return "That listing isn't waiting for approval anymore."
+            if action == "approve":
+                return await approve(ctx, conv, listing)
+            return cancel_proposal(conv, listing)
+        if action == "accept":
+            counter = conv.counter
+            if counter is None or (counter["item_id"], counter["cents"]) != (
+                item_id,
+                choice.get("cents"),
+            ):
+                return "That counter-offer isn't open anymore. Make a new offer."
+            return await accept(ctx, conv)
+        if action == "decline":
+            conv.counter = None
+            conv.awaiting = None
+            return "OK. Make another offer any time."
+        if action == "pick" and item_id in conv.results:
+            return pick(conv, conv.results.index(item_id) + 1)
+        if action == "pick":
+            return "That list is out of date. Search again to see what's for sale."
+        return HELP
 
     async def handle_text(ctx: Context, conv: Conversation, text: str) -> str | Reply:
         command = commands.parse(text)
@@ -691,6 +828,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     async def handle(ctx: Context, key: str, msg: ChatMessage) -> Reply:
         text = clean_text(msg)
+        choice = card_choice(msg)
         async with locks[key]:
             conv = load(key)
             notice = ""
@@ -706,7 +844,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             ]
             if not photos:
                 try:
-                    reply = as_reply(await handle_text(ctx, conv, text))
+                    if choice is not None:
+                        reply = as_reply(await handle_choice(ctx, conv, choice))
+                    else:
+                        reply = as_reply(await handle_text(ctx, conv, text))
                 except PriceError as ex:
                     reply = Reply(str(ex))
                 except PipelineError as ex:

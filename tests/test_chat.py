@@ -10,9 +10,16 @@ from uuid import uuid4
 
 import pytest
 from uagents_core.contrib.protocols.chat import (
+    ChatMessage,
     MetadataContent,
     Resource,
     ResourceContent,
+)
+from uagents_core.contrib.protocols.chat.cards import (
+    Card,
+    CarouselCardPayload,
+    ReviewCardPayload,
+    extract_card,
 )
 
 from yardsale import bureau_server, chat, fakes, sim
@@ -312,3 +319,61 @@ def test_resource_link_can_be_in_metadata() -> None:
 
 async def test_photo_link_in_the_text_is_used(market: sim.Market) -> None:
     assert "suggested listing" in await market.user("seller").say(f"sell this ![photo]({BIKE})")
+
+
+def card_in(msg: ChatMessage) -> Card | None:
+    for block in msg.content:
+        if isinstance(block, MetadataContent) and (card := extract_card(block)) is not None:
+            return card
+    return None
+
+
+async def test_proposals_come_with_an_approve_card(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    reply = await seller.exchange(sim.chat_message("sell this, at least $300", BIKE))
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, ReviewCardPayload)
+    (proposal,) = store.owned(proposal_owner(store))
+    approve = card.payload.approve_cta.selection
+    assert approve == {"action": "approve", "item_id": proposal.item_id}
+    rows = {row.label: row.value for row in card.payload.summary_rows}
+    assert rows["Asking price"] == "$340"
+
+    # Another conversation tapping the same button gets nowhere.
+    assert "isn't waiting" in await market.user("mallory").tap(approve)
+    assert store.active() == []
+    assert "is for sale at $340" in await seller.tap(approve)
+    assert store.active()[0].item_id == proposal.item_id
+    assert "isn't waiting" in await seller.tap(approve)
+
+
+async def test_search_and_counter_cards(market: sim.Market, store: Store) -> None:
+    await listed_bike(market)
+    buyer = market.user("buyer")
+    results = await buyer.exchange(sim.chat_message("find me a bike"))
+    carousel = card_in(results)
+    assert carousel is not None and isinstance(carousel.payload, CarouselCardPayload)
+    (item,) = carousel.payload.items
+    assert "$300" not in item.model_dump_json()  # no floor in cards either
+    assert "Its agent:" in await buyer.tap(item.primary_cta.selection)
+
+    countered = await buyer.exchange(sim.chat_message("offer $250"))
+    counter = card_in(countered)
+    assert counter is not None and isinstance(counter.payload, ReviewCardPayload)
+    accept = counter.payload.approve_cta.selection
+    assert accept["cents"] == 30500
+    assert "isn't open anymore" in await buyer.tap({**accept, "cents": 30000})  # tampered
+    assert "isn't open anymore" in await market.user("mallory").tap(accept)
+    assert "Deal!" in await buyer.tap(accept)
+    deal = store.deal_for(item.id)
+    assert deal is not None and deal.price_cents == 30500
+
+
+async def test_dismissed_cards_and_json_taps(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    await seller.say("sell this", BIKE)
+    assert await seller.tap(None) == "OK."
+    (proposal,) = store.owned(proposal_owner(store))
+    # Some clients send the selection as JSON text instead (cards README).
+    tapped = f'{{"action": "cancel", "item_id": "{proposal.item_id}"}}'
+    assert "Nothing was listed" in await seller.say(tapped)

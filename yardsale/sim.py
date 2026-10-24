@@ -25,6 +25,10 @@ from uagents_core.contrib.protocols.chat import (
     TextContent,
     chat_protocol_spec,
 )
+from uagents_core.contrib.protocols.chat.cards import (
+    SelectionValue,
+    create_card_response_content,
+)
 
 from yardsale import bureau_server, chat, fakes
 from yardsale.appraiser import Judge
@@ -150,6 +154,12 @@ class ChatUser:
     async def say(self, text: str = "", photo: str | None = None) -> str:
         """Send a message and return the Market's answer, skipping "still working" replies."""
         return (await self.exchange(chat_message(text, photo))).text()
+
+    async def tap(self, selection: dict[str, SelectionValue] | None) -> str:
+        """Tap a card button with this selection (None dismisses the card)."""
+        response = create_card_response_content(selection=selection, cancelled=selection is None)
+        msg = ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=[response])
+        return (await self.exchange(msg)).text()
 
     async def exchange(self, msg: ChatMessage) -> ChatMessage:
         """Send a message and return the Market's answer, skipping "still working" replies."""
