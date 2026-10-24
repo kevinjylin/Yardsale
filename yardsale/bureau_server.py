@@ -19,15 +19,19 @@ listings, and the Appraiser which of those match and what to charge. It saves th
 Item agents hold a private floor price and haggle with buyers over the published YardsaleHaggle
 protocol (haggle.py, negotiation.py). Most run in this Bureau and register on the Almanac API
 with its endpoint. With hosting on (hosting.py), approved items get an agent hosted on
-Agentverse instead, up to YARDSALE_HOST_ITEMS of them. The Market, the buyer agent (shopper.py),
-the Identifier, Researcher, and Appraiser use Agentverse mailboxes in live mode.
+Agentverse instead, up to YARDSALE_HOST_ITEMS of them, each with a handle made from its title
+and, with YARDSALE_ITEM_AVATARS=1, a picture ASI:One draws (avatars.py). The Market, the buyer
+agent (shopper.py), the Identifier, Researcher, and Appraiser use Agentverse mailboxes in live
+mode.
 
 When a buyer accepts, the deal is recorded and the Market's checkout (checkout.py) sends a payment
 link through the Agent Payment Protocol, or in the chat for chat buyers.
 
 Listings, proposals, counter-offers, deals, and payments are saved in SQLite. On start the
 Bureau re-creates the agent of every active listing it runs. Seeds come from the master seed and
-the item ID, so the addresses are the same as before. Hosted agents keep running on Agentverse.
+the item ID, so the addresses are the same as before. Hosted agents keep running on Agentverse
+until their listing is sold or canceled. Then the Market deletes them, and tries again every
+minute (and on start) if Agentverse can't be reached.
 """
 
 from __future__ import annotations
@@ -38,9 +42,9 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Any, TypeVar
 from uuid import uuid4
 
 from aiohttp import web
@@ -53,6 +57,7 @@ from yardsale import business_api, config
 from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
+from yardsale.avatars import ItemPictures, item_pictures_from_env, picture_item_quietly
 from yardsale.chat import FetchPhoto, build_chat_protocol, fetch_photo
 from yardsale.checkout import CHECK_EVERY, Checkout, build_payment_protocol
 from yardsale.common import (
@@ -64,7 +69,7 @@ from yardsale.common import (
     dollars,
     write_json,
 )
-from yardsale.hosting import HostingClient, HostingError, host_item, hosted_limit
+from yardsale.hosting import HostingClient, HostingError, claim_handle, host_item, hosted_limit
 from yardsale.identifier import Identify, build_identifier, identify_with_claude
 from yardsale.models import (
     HAGGLE_SPEC,
@@ -119,6 +124,7 @@ RESEARCH_TIMEOUT = 240.0
 APPRAISE_TIMEOUT = 240.0
 NEGOTIATE_TIMEOUT = 15.0  # item agents in this Bureau answer in milliseconds
 HOSTED_NEGOTIATE_TIMEOUT = 60.0  # hosted ones answer through Agentverse mailboxes
+RETRY_DELETES_EVERY = 60.0  # seconds between tries to delete closed listings' hosted agents
 
 
 @dataclass
@@ -145,8 +151,13 @@ class Runtime:
     checkout: Checkout
     market: str = ""
     shopper: str = ""  # the buyer agent
-    hosting: HostingClient | None = None  # set when item agents may be hosted on Agentverse
-    host_limit: int = 0  # how many active listings may be hosted at once
+    # Agentverse's Hosting API, with an API key in live mode: hosts up to host_limit item agents
+    # and deletes the agents of sold or canceled listings.
+    hosting: HostingClient | None = None
+    host_limit: int = 0  # how many item agents may be on Agentverse at once (0 = host none)
+    pictures: ItemPictures | None = None  # draws and publishes hosted item agents' pictures
+    background: set[asyncio.Task[None]] = field(default_factory=set)  # kept until they finish
+    deleting: asyncio.Lock = field(default_factory=asyncio.Lock)  # one delete sweep at a time
     round_timeout: float = 30.0  # the buyer agent's wait for one item agent's answer
     boot_id: str = field(default_factory=lambda: uuid4().hex)
     started: bool = False  # the Bureau is running, so new agents start themselves
@@ -229,7 +240,52 @@ async def start_item_agent(rt: Runtime, item_id: str) -> tuple[Agent, bool]:
 
 
 def _hosted_count(rt: Runtime) -> int:
-    return sum(listing.host == AGENTVERSE for listing in rt.store.active())
+    """Item agents on Agentverse, counting closed listings' agents that aren't deleted yet."""
+    return len(rt.store.on_agentverse())
+
+
+def _in_background(rt: Runtime, work: Coroutine[Any, Any, None]) -> None:
+    """Run `work` without making anyone wait for it."""
+    task = asyncio.create_task(work)
+    rt.background.add(task)
+    task.add_done_callback(rt.background.discard)
+
+
+async def delete_closed_hosted(rt: Runtime) -> None:
+    """Delete the Agentverse agents of hosted listings that were sold or canceled. A delete that
+    fails is tried again on the next sweep: right after the next sale or cancel, every
+    RETRY_DELETES_EVERY seconds, and when the server starts."""
+    if rt.hosting is None:
+        return
+    async with rt.deleting:
+        for listing in rt.store.on_agentverse():
+            if listing.status == ACTIVE or listing.address is None:
+                continue
+            try:
+                await rt.hosting.delete(listing.address)
+            except HostingError as ex:
+                log.warning(f"Couldn't delete the hosted agent of '{listing.title}' yet: {ex}")
+                if ex.status is None:
+                    break  # Agentverse can't be reached, so the others wait too
+                continue
+            rt.store.agent_deleted(listing.item_id)
+            log.info(
+                f"Deleted the hosted agent of '{listing.title}' ({listing.status}): "
+                f"{listing.address}"
+            )
+
+
+def delete_closed_hosted_soon(rt: Runtime) -> None:
+    if rt.hosting is not None:
+        _in_background(rt, delete_closed_hosted(rt))
+
+
+def cancel_listing(rt: Runtime, item_id: str, owner: str) -> Listing | None:
+    """The owner takes a proposal or listing down. A hosted agent is deleted from Agentverse."""
+    canceled = rt.store.cancel(item_id, owner)
+    if canceled is not None and canceled.host == AGENTVERSE:
+        delete_closed_hosted_soon(rt)
+    return canceled
 
 
 async def _host_on_agentverse(ctx: Context, rt: Runtime, listing: Listing) -> Listing | None:
@@ -242,7 +298,10 @@ async def _host_on_agentverse(ctx: Context, rt: Runtime, listing: Listing) -> Li
     except HostingError as ex:
         ctx.logger.warning(f"Hosting {listing.item_id} on Agentverse failed, so it runs here: {ex}")
         return None
-    live = rt.store.activate(listing.item_id, listing.owner, address, host=AGENTVERSE)
+    handle = await claim_handle(rt.hosting, address, listing.title)
+    live = rt.store.activate(
+        listing.item_id, listing.owner, address, host=AGENTVERSE, handle=handle
+    )
     if live is None:
         try:
             await rt.hosting.delete(address)
@@ -251,8 +310,11 @@ async def _host_on_agentverse(ctx: Context, rt: Runtime, listing: Listing) -> Li
         raise PipelineError("That listing was canceled or sold, so it can't go live.")
     ctx.logger.info(
         f"Item agent for '{live.title}' at {dollars(live.asking_cents)} is hosted on "
-        f"Agentverse: {address}"
+        f"Agentverse: {address}" + (f" (@{handle})" if handle else "")
     )
+    if rt.pictures is not None:
+        # Drawing takes longer than the seller should wait, so the reply doesn't wait for it.
+        _in_background(rt, picture_item_quietly(rt.hosting, live, rt.pictures))
     return live
 
 
@@ -468,8 +530,11 @@ def _item_address(rt: Runtime, listing: Listing) -> str | None:
 
 
 def record_hosted_deal(rt: Runtime, listing: Listing, buyer: str, deal: Deal) -> DealRecord | None:
-    """A hosted item agent sold its item: record the deal here, once."""
-    return rt.store.close_deal(listing.item_id, buyer, deal.price_cents, deal.deal_id)
+    """A hosted item agent sold its item: record the deal here, once, and delete the agent."""
+    record = rt.store.close_deal(listing.item_id, buyer, deal.price_cents, deal.deal_id)
+    if record is not None:
+        delete_closed_hosted_soon(rt)
+    return record
 
 
 async def negotiate(
@@ -737,7 +802,7 @@ async def handle_approve(ctx: Context, sender: str, msg: ApproveListing) -> None
 async def handle_cancel(ctx: Context, sender: str, msg: CancelListing) -> None:
     rt = runtime()
     listing = rt.store.find_ref(sender, msg.listing_ref)
-    canceled = listing and rt.store.cancel(listing.item_id, sender)
+    canceled = listing and cancel_listing(rt, listing.item_id, sender)
     reason = "Canceled by the seller." if canceled else "Nothing to cancel."
     await ctx.send(sender, ListingRejected(listing_ref=msg.listing_ref, reason=reason))
 
@@ -782,6 +847,9 @@ class MarketBackend:
 
     async def activate(self, ctx: Context, listing: Listing) -> tuple[Listing, bool]:
         return await activate(ctx, listing)
+
+    def cancel(self, item_id: str, owner: str) -> Listing | None:
+        return cancel_listing(self.rt, item_id, owner)
 
     async def negotiate(
         self, ctx: Context, item_id: str, request: Offer | AcceptCounter
@@ -887,11 +955,13 @@ def build(
     hosting: HostingClient | None = None,
     host_limit: int = 0,
     round_timeout: float = 30.0,
+    pictures: ItemPictures | None = None,
 ) -> tuple[Bureau, Agent, list[Agent]]:
     """Create the Bureau, the Market, the buyer agent and three service agents, and the agents
     of the store's active listings that run here, inside a running loop. Without a store, state
     lives in memory. Without `payments`, deals get no payment link; without `hosting`, every
-    item agent runs here. The returned services include the buyer agent."""
+    item agent runs here; without `pictures`, hosted item agents get no picture. The returned
+    services include the buyer agent."""
     global RUNTIME
     registration: BatchRegistrationPolicy = (
         NoBatchRegistration() if offline else BatchAlmanacApiRegistrationPolicy(logger=log)
@@ -919,9 +989,10 @@ def build(
         store=store,
         checkout=Checkout(store, payments),
         shopper=shopper.address,
-        hosting=hosting if host_limit > 0 else None,
+        hosting=hosting,
         host_limit=host_limit,
         round_timeout=round_timeout,
+        pictures=pictures,
     )
     # On Agentverse in live mode, so ASI:One can reach it. Handles messages concurrently, so a
     # photo listing waiting on a service doesn't block other messages.
@@ -941,6 +1012,11 @@ def build(
     async def check_payments(ctx: Context) -> None:
         if rt.checkout.enabled:
             await rt.checkout.refresh_all()
+
+    # Also runs on start, for agents whose listing closed while the server was down.
+    @market.on_interval(period=RETRY_DELETES_EVERY)
+    async def delete_closed_hosted_agents(ctx: Context) -> None:
+        await delete_closed_hosted(rt)
 
     services.append(shopper.agent)
     for agent in (market, *services):
@@ -1015,6 +1091,7 @@ async def main(mode: str) -> None:
         payments=payments,
         hosting=hosting,
         host_limit=hosted_limit() if hosting else 0,
+        pictures=item_pictures_from_env() if hosting else None,
     )
     if not offline:
         await connect_to_agentverse([market, *services])
@@ -1023,9 +1100,10 @@ async def main(mode: str) -> None:
     write_json(MARKET_FILE, {"address": market.address, "offline": offline, "mode": mode})
     restored = len(runtime().agents)
     rt = runtime()
+    pictures = ", with pictures drawn by ASI:One" if rt.pictures else ""
     log.info(
         f"Payments: {payments.label if payments else 'off (no payment keys)'}. Hosting item "
-        f"agents on Agentverse: {f'up to {rt.host_limit}' if rt.hosting else 'off'}."
+        f"agents on Agentverse: {f'up to {rt.host_limit}{pictures}' if rt.host_limit else 'off'}."
     )
     if offline:
         log.info(

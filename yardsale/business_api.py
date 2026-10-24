@@ -112,6 +112,8 @@ def _listing_json(listing: Listing) -> dict[str, Any]:
         )
     if listing.host == AGENTVERSE and listing.address:
         data["agent_profile_url"] = profile_url(listing.address)
+        if listing.handle:
+            data["agent_handle"] = f"@{listing.handle}"
     return data
 
 
@@ -524,6 +526,10 @@ _LISTING = {
         "details": {"type": "array", "items": {"type": "string"}},
         "agent_address": {"type": "string", "description": "The item's own agent"},
         "agent_profile_url": {"type": "string"},
+        "agent_handle": {
+            "type": "string",
+            "description": "The item agent's Agentverse handle, such as @trek-fx-3-hybrid",
+        },
     },
 }
 _HAGGLE = {

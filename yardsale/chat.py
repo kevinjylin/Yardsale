@@ -162,6 +162,11 @@ class Backend(Protocol):
         """Start the item agent. Returns the live listing and whether the Almanac has it."""
         ...
 
+    def cancel(self, item_id: str, owner: str) -> Listing | None:
+        """Take down the owner's proposal or listing, deleting a hosted agent. None if it
+        wasn't proposed or active."""
+        ...
+
     async def negotiate(
         self, ctx: Context, item_id: str, request: Offer | AcceptCounter
     ) -> Counter | Deal | OfferRejected: ...
@@ -596,7 +601,10 @@ def profile_link(listing: Listing) -> str:
 
 def agent_line(listing: Listing) -> str:
     if listing.host == AGENTVERSE:
-        return f"Its agent is live on Agentverse: [{listing.address}]({profile_link(listing)})"
+        named = f" as @{listing.handle}" if listing.handle else ""
+        return (
+            f"Its agent is live on Agentverse{named}: [{listing.address}]({profile_link(listing)})"
+        )
     return f"Its agent is live at {listing.address}"
 
 
@@ -973,7 +981,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     def cancel_proposal(conv: Conversation, proposal: Listing) -> str:
         conv.awaiting = None
-        if store.cancel(proposal.item_id, conv.owner) is None:
+        if backend.cancel(proposal.item_id, conv.owner) is None:
             return "That listing isn't waiting for approval anymore."
         return f"OK, I canceled the {proposal.title}. Nothing was listed." + waiting_too(conv)
 
@@ -989,7 +997,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 f"{n}. {listing.title}: {usd(listing.asking_cents)}, lowest "
                 f"{usd(listing.floor_cents)}. "
                 + (
-                    f"Agent on Agentverse: {profile_link(listing)}"
+                    f"Agent on Agentverse"
+                    f"{f' (@{listing.handle})' if listing.handle else ''}: "
+                    f"{profile_link(listing)}"
                     if listing.host == AGENTVERSE
                     else f"Agent: {listing.address}"
                 )
@@ -1031,9 +1041,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if not 0 <= index < len(active):
             return f"Pick a number from 1 to {len(active)}."
         listing = active[index]
-        if store.cancel(listing.item_id, conv.owner) is None:
+        if backend.cancel(listing.item_id, conv.owner) is None:
             return f"The {listing.title} isn't for sale anymore."
-        return f"Your {listing.title} is no longer for sale. Its agent turns down new offers."
+        gone = f"Your {listing.title} is no longer for sale."
+        if listing.host == AGENTVERSE:
+            return f"{gone} Its agent on Agentverse is being deleted."
+        return f"{gone} Its agent turns down new offers."
 
     # --- Buying ----------------------------------------------------------------------------
 

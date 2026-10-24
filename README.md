@@ -40,8 +40,8 @@ Every approved listing also gets its own **item agent**, which holds the seller'
 and haggles with buyers. By default item agents run in the Bureau and register on Fetch's Almanac
 only, so there's no limit on how many there are. With `YARDSALE_HOST_ITEMS` set, the first few are
 created on Agentverse instead, each with its own profile page
-([Hosting on Agentverse](#hosting-on-agentverse)). The chat gives each one's address when the
-seller approves.
+([Hosting on Agentverse](#hosting-on-agentverse)), and deleted from Agentverse once the item is
+sold or taken down. The chat gives each one's address when the seller approves.
 
 **Try it in ASI:One:** open [asi1.ai](https://asi1.ai), start a chat with the Yardsale
 Orchestrator (from its Agentverse profile, or by mentioning `@ys-orchestrator` or its address),
@@ -254,15 +254,55 @@ its floor and private gap as an Agentverse secret, and code built from
 and the message classes pasted in, so it haggles by exactly the same rules. When it sells, it
 tells the Market (`ItemSold`), which records the deal and handles payment.
 
+When a hosted item is sold or the seller takes it down, the Market deletes its agent from
+Agentverse, which frees the slot. If Agentverse can't be reached, the Market tries again every
+minute and when the server starts, and the agent keeps counting toward `YARDSALE_HOST_ITEMS`
+until it's gone. The listing and its deal stay in the database. Any live start with
+`AGENTVERSE_API_KEY` set does this, even with `YARDSALE_HOST_ITEMS=0`.
+
 ```bash
 uv run python -m yardsale.hosting --list      # Yardsale's hosted item agents
 uv run python -m yardsale.hosting --cleanup   # delete the ones whose listing isn't active
 ```
 
+`--cleanup` does the same deletes by hand, for when the server isn't running.
+
 Agentverse's agent limits (reportedly 8 on the free plan and 25 on Premium; not checked against
 our account) count the five mailbox agents too. Hosting was run live on October 24: a hosted
 agent starts in about 3 seconds and answers a haggle round through Agentverse in a few seconds.
 Agentverse shows only 32 characters of a name, so each hosted agent is named after its item.
+
+Each hosted agent also gets a handle made from its title, cut at a word to Agentverse's 20
+characters ("Trek FX 3 hybrid bike, medium" becomes `@trek-fx-3-hybrid`; Agentverse suggests
+another if that one is taken), and the seller's reply names it. With `YARDSALE_ITEM_AVATARS=1`
+(and `ASI_ONE_API_KEY` and `APIFY_TOKEN`), ASI:One also draws a picture of the item in the
+background (never from the seller's photo or prices). The prompt names only the kind of thing,
+such as "hybrid bike", and how it looks, because the image model writes any brand, model, or
+size it's given onto the picture. The picture is saved in a public Apify key-value store,
+`yardsale-agent-pictures`, and set as both the agent's header and profile picture. Both are
+extras: if either fails, the item is listed anyway.
+
+## Agent pictures
+
+Every agent's profile picture is drawn by ASI:One's image model (`POST /v1/image/generate`,
+model `asi1-mini`) in one shared style ([avatars.py](yardsale/avatars.py)). An Agentverse
+profile holds only a picture's URL. Agentverse's own picture upload takes a signed-in browser
+session and refuses the API key, so:
+
+- The service agents' pictures are in [yardsale/readmes/avatars/](yardsale/readmes/avatars/).
+  Each one is uploaded by hand on its agent's Agentverse profile page (hover the picture), and
+  `--sync` saves the resulting URLs in `urls.json`. Each agent sends its URL whenever it
+  connects, so a restart keeps it.
+- `yardsale.jpg` there is `@yardsale`'s, uploaded by hand in Fetch Business's Brand Studio.
+- Hosted item agents' pictures go to the Apify store above, with `YARDSALE_ITEM_AVATARS=1`.
+
+```bash
+uv run python -m yardsale.avatars --draw       # draw missing pictures (calls ASI:One)
+uv run python -m yardsale.avatars --sync       # save the pictures set on Agentverse
+uv run python -m yardsale.avatars --items      # handles (and pictures) for hosted item agents
+uv run python -m yardsale.avatars --draw --redraw shopper   # draw one again
+uv run python -m yardsale.avatars --items --redraw specialized-sirrus   # an item again
+```
 
 ## Resale Comps Actor
 

@@ -37,8 +37,9 @@ That's the visual proof judges will remember.
    plus 8 mailbox agents on the free plan, and 25 each on Premium; these figures haven't been
    checked against our account. Item agents in our own server register only on the Almanac, so
    there's no cap on them. Hosting gives an item its own Agentverse profile page, which is what
-   Fetch's track rewards, so `YARDSALE_HOST_ITEMS=N` hosts up to N active listings there (through
-   the Hosting API) and runs the rest in the server.
+   Fetch's track rewards, so `YARDSALE_HOST_ITEMS=N` hosts up to N item agents there (through
+   the Hosting API) and runs the rest in the server. A hosted agent is deleted once its item is
+   sold or canceled, which frees its slot.
 4. **Graduation pitch:** power sellers can later move to their own Fetch Business agent that they
    own.
 5. **Photo work is split across three agents on Agentverse.** The Identifier, Researcher, and
@@ -324,12 +325,31 @@ per agent, because agent addresses come from the master seed and don't change.
   profile with its README and badges, read its floor, haggled three rounds with the buyer agent
   in about 20 seconds, and reported its sale to the Market. Agentverse shows only the first 32
   characters of an agent's name, so hosted agents are named after the item, cut at a word.
+- **Agent handles and pictures.** On October 24 every service agent got a picture drawn by
+  ASI:One (`POST /v1/image/generate` with model `asi1-mini`; it answered with
+  `{"data": [{"b64_json": ...}]}`), and a hosted Specialized Sirrus got the handle
+  `@specialized-sirrus` through `PUT /v2/agents/{address}` and a drawn picture. Agentverse's
+  picture upload (`/api/agent-avatar`) refused the API key, so these pictures were uploaded by
+  hand on each profile page. The first drawing of the bike had made-up numbers and a tag on it,
+  so the item prompt now forbids labels and measurements. Later the same day, with
+  `YARDSALE_ITEM_AVATARS=1`, `--items --redraw specialized-sirrus` drew the bike, saved it in a
+  public Apify key-value store, and set it in about 8 seconds. Two things were learned. A
+  hosted agent has two picture fields: the hosting record's shows in Agentverse's header, and
+  the profile's shows on the profile page, so the server sets both. And ASI:One wrote the
+  title's words on the frame ("Specialized", "Sirrus 2.0", "M"), so item prompts now name only
+  the kind of thing ("hybrid bike") and drop details with names or numbers; the next drawing
+  had no text. `@yardsale`'s picture was uploaded in Fetch Business's Brand
+  Studio (Edit logo, then Upload; it also offers its own AI generator) and shows on
+  [asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale).
 - **Our own Apify Actor.** Pushed to Apify (private) on October 24 as `resale-comps`. eBay
   answered 403 to every request through Apify's default proxy, so it returned no sales; the
   Researcher still uses `caffein.dev/ebay-sold-listings`. Getting past eBay's blocking (for
   example with residential proxies) is an open decision.
 - **Sold or canceled items on the Almanac.** Their entries stay until they expire; the agent turns
-  down offers, and after a restart it isn't re-created.
+  down offers, and after a restart it isn't re-created. Hosted agents are deleted from
+  Agentverse instead (since October 24), retried every minute if Agentverse can't be reached.
+  This is tested with a fake Agentverse only. Whether Agentverse answers 404 for an agent that's
+  already gone, which the server counts as deleted, hasn't been checked.
 
 Fixed on October 23: "offline" mode and the tests used to call Fetch's ledger and Almanac every
 time an agent was created or started. `offline.stay_offline()` stops that, and the tests fail if
