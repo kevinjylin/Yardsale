@@ -726,7 +726,9 @@ class ImapSmtpMailbox:
             raise MailError("the inbox search failed")
         uids = data[0].split() if data and data[0] else []
         found: list[tuple[str, bytes]] = []
-        for uid in uids[:MAX_PER_POLL]:
+        # The newest, so Craigslist mail left unread on purpose (robot mail, other posts) can
+        # never fill every slot and stop new buyers' emails from being read.
+        for uid in uids[-MAX_PER_POLL:]:
             status, parts = imap.uid("FETCH", uid.decode(), "(BODY.PEEK[])")
             if status != "OK":
                 continue
