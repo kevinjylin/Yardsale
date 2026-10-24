@@ -1,3 +1,5 @@
+import pytest
+
 from yardsale.researcher import parse_comp
 
 # Shape of one result from the caffein.dev/ebay-sold-listings actor (from its README).
@@ -39,3 +41,25 @@ def test_skips_results_it_cannot_price() -> None:
     assert parse_comp({**SAMPLE, "soldPrice": "see description"}) is None
     assert parse_comp({**SAMPLE, "soldPrice": "0"}) is None
     assert parse_comp({**SAMPLE, "soldCurrency": "GBP"}) is None
+
+
+@pytest.mark.parametrize("price", ["NaN", "Infinity", "-5", "1e12", True, [], {"x": 1}])
+def test_malformed_prices_are_skipped_not_fatal(price: object) -> None:
+    assert parse_comp({**SAMPLE, "soldPrice": price}) is None
+
+
+@pytest.mark.parametrize("raw", [None, "a string", 42, ["list"]])
+def test_results_that_are_not_objects_are_skipped(raw: object) -> None:
+    assert parse_comp(raw) is None
+
+
+def test_only_web_links_are_kept() -> None:
+    comp = parse_comp({**SAMPLE, "url": "javascript:alert(1)", "thumbnailUrl": "file:///x"})
+    assert comp is not None
+    assert comp.url == ""
+    assert comp.image_url is None
+
+
+def test_half_cents_round_up() -> None:
+    comp = parse_comp({**SAMPLE, "soldPrice": "10.005"})
+    assert comp is not None and comp.price_cents == 1001
