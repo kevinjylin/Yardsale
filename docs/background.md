@@ -181,6 +181,11 @@ and the log has one line per call (the method, the route pattern, the status, an
 never a buyer's max or a whole haggle ID. A running haggle answers with a plain 200, because a
 tool runner may treat 202 as a failure.
 
+Haggle IDs are 8 lowercase characters without look-alikes (no 0, o, 1, l, or i), and capitals or
+spaces around them are ignored. On October 24, `@yardsale` sent a mistyped 24-character ID to
+`acceptDeal`, got a 404, and told the buyer the haggle "expired". The 404 now says to copy the
+ID exactly.
+
 It runs only on this machine, so a tunnel makes it public:
 `cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8110` (TCP, since
 the default QUIC connection dropped on venue Wi-Fi). A quick tunnel gets a new URL each time it

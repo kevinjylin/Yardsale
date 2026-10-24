@@ -50,8 +50,20 @@ KEY_HEADER = "X-Yardsale-Key"
 ANSWER_WITHIN = 25.0  # seconds POST /haggles waits before answering "still haggling"
 QUOTES_LAST = 24 * 3600  # seconds a haggled price can be accepted, like the item agents' counters
 BUYER_PREFIX = "api-"  # buyer_ref of an API buyer; its deals are "chat:api-..."
+# Short and lowercase, without look-alikes (0/o, 1/l/i), so a model passing it along copies it
+# right. Every call needs the API key, so the ID doesn't have to be hard to guess.
+ID_LETTERS = "abcdefghjkmnpqrstuvwxyz23456789"
+ID_LENGTH = 8
+NO_SUCH_HAGGLE = (
+    "No haggle has that haggle_id. Copy haggle_id exactly as startHaggle returned it, or start a "
+    "new haggle with startHaggle."
+)
 
 log = logging.getLogger("yardsale.api")
+
+
+def new_haggle_id() -> str:
+    return "".join(secrets.choice(ID_LETTERS) for _ in range(ID_LENGTH))
 
 
 class ApiConfigError(ValueError):
@@ -185,6 +197,14 @@ class BusinessApi:
     def _state_key(self, haggle_id: str) -> str:
         return f"api:{haggle_id}"
 
+    def _haggle_id(self, request: web.Request) -> str:
+        """The path's haggle ID, forgiving the capitals or spaces a model may add to it."""
+        given = request.match_info["haggle_id"]
+        cleaned = given.strip().lower()
+        if cleaned == given or self._load(given):  # older IDs are mixed case
+            return given
+        return cleaned
+
     def _load(self, haggle_id: str) -> dict[str, Any]:
         if not haggle_id.isascii() or len(haggle_id) > 64:
             return {}
@@ -265,7 +285,9 @@ class BusinessApi:
                     "next_step": "Try other words or a higher max.",
                 }
             )
-        haggle_id = secrets.token_urlsafe(18)
+        haggle_id = new_haggle_id()
+        while self._load(haggle_id):
+            haggle_id = new_haggle_id()
         buyer_ref = BUYER_PREFIX + haggle_id
         self._save(haggle_id, {"buyer_ref": buyer_ref, "status": "running"})
         task = asyncio.create_task(
@@ -273,7 +295,7 @@ class BusinessApi:
         )
         self.running[haggle_id] = task
         task.add_done_callback(lambda t: self._finish(haggle_id, buyer_ref, t))
-        log.info(f"API haggle {haggle_id[:6]} started with {len(targets)} item(s)")
+        log.info(f"API haggle {haggle_id[:3]} started with {len(targets)} item(s)")
         try:
             await asyncio.wait_for(asyncio.shield(task), self.answer_within)
         except TimeoutError:
@@ -296,7 +318,7 @@ class BusinessApi:
         if task.cancelled():
             state.update(status="failed", error="The haggle was stopped.")
         elif (error := task.exception()) is not None:
-            log.warning(f"API haggle {haggle_id[:6]} failed: {error}")
+            log.warning(f"API haggle {haggle_id[:3]} failed: {error}")
             reason = str(error) if isinstance(error, PipelineError) else "Something went wrong."
             state.update(status="failed", error=reason)
         else:
@@ -314,7 +336,7 @@ class BusinessApi:
     def _haggle_response(self, haggle_id: str) -> web.Response:
         state = self._load(haggle_id)
         if not state:
-            return _error(404, "No such haggle. Start a new one with startHaggle.", "not_found")
+            return _error(404, NO_SUCH_HAGGLE, "not_found")
         if state.get("status") == "running":
             if haggle_id not in self.running:
                 return _error(410, "That haggle was interrupted. Start a new one.", "interrupted")
@@ -370,7 +392,7 @@ class BusinessApi:
 
     async def get_haggle(self, request: web.Request) -> web.Response:
         """Waits up to answer_within seconds for a haggle that's still running."""
-        haggle_id = request.match_info["haggle_id"]
+        haggle_id = self._haggle_id(request)
         task = self.running.get(haggle_id)
         if task is not None:
             # A timeout leaves it running; a failure was saved by _finish.
@@ -381,10 +403,10 @@ class BusinessApi:
     # --- Buying -----------------------------------------------------------------------------
 
     async def accept(self, request: web.Request) -> web.Response:
-        haggle_id = request.match_info["haggle_id"]
+        haggle_id = self._haggle_id(request)
         state = self._load(haggle_id)
         if not state:
-            return _error(404, "No such haggle. Start a new one with startHaggle.", "not_found")
+            return _error(404, NO_SUCH_HAGGLE, "not_found")
         if state.get("status") != "done":
             return self._haggle_response(haggle_id)
         try:
@@ -419,7 +441,7 @@ class BusinessApi:
         quotes.pop(item_id, None)
         state.update(quotes=quotes, best="", deal_id=reply.deal_id)
         self._save(haggle_id, state)
-        log.info(f"API haggle {haggle_id[:6]} bought {item_id} ({reply.deal_id})")
+        log.info(f"API haggle {haggle_id[:3]} bought {item_id} ({reply.deal_id})")
         return await self._deal_response(reply)
 
     async def _deal_response(self, deal: Deal) -> web.Response:
@@ -568,7 +590,7 @@ def _haggle_id_param() -> dict[str, Any]:
         "in": "path",
         "required": True,
         "schema": {"type": "string"},
-        "description": "The haggle_id startHaggle returned",
+        "description": "The haggle_id startHaggle returned, copied exactly (8 characters)",
     }
 
 

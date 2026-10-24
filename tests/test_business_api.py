@@ -14,7 +14,7 @@ import pytest
 from tests import fakes, sim
 from tests.helpers import local_server
 from yardsale import bureau_server
-from yardsale.business_api import KEY_HEADER, BusinessApi, openapi_spec
+from yardsale.business_api import ID_LENGTH, ID_LETTERS, KEY_HEADER, BusinessApi, openapi_spec
 from yardsale.store import PAID, PENDING, Store
 
 KEY = "test-key-for-the-business-api-0123456789"
@@ -133,6 +133,32 @@ async def test_haggle_accept_and_pay(shop: Any, store: Store) -> None:
     status, checked = await client.call("GET", f"/deals/{deal['deal_id']}")
     assert checked["payment_status"] == PAID and checked["paid"] is True
     assert checked["payment_url"] is None
+
+
+async def test_haggle_ids_are_short_and_forgive_capitals_and_spaces(
+    shop: Any, store: Store
+) -> None:
+    market, _, client = shop
+    await list_bike(market, "ann", 360, 300)
+    _, haggle = await client.call("POST", "/haggles", {"looking_for": "bike", "max_usd": 320})
+    haggle_id = haggle["haggle_id"]
+    assert len(haggle_id) == ID_LENGTH and set(haggle_id) <= set(ID_LETTERS)
+
+    # A model passing the ID along may capitalize it or add a space.
+    status, again = await client.call("GET", f"/haggles/{haggle_id.upper()}")
+    assert status == 200 and again["haggle_id"] == haggle_id
+    status, deal = await client.call("POST", f"/haggles/%20{haggle_id.upper()}/accept")
+    assert status == 200 and deal["price_usd"] == haggle["best_price_usd"]
+
+    # A mistyped ID says to copy it exactly, so the caller doesn't take it for an expiry.
+    typo = haggle_id[:-1] + ("a" if haggle_id[-1] != "a" else "b")
+    status, error = await client.call("POST", f"/haggles/{typo}/accept")
+    assert status == 404 and error["code"] == "not_found"
+    assert "exactly" in error["error"]
+
+    # Haggles saved before IDs were shortened are mixed case, and still found.
+    store.save_conversation("api:OldMixedCaseId", {"buyer_ref": "api-x", "status": "failed"})
+    assert (await client.call("GET", "/haggles/OldMixedCaseId"))[1]["code"] == "haggle_failed"
 
 
 async def test_calls_are_logged_without_ids_or_the_max(
