@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Awaitable, Callable
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 import aiohttp
@@ -23,6 +23,7 @@ Research = Callable[[str, str, int], Awaitable[list[Comp]]]
 ACTOR = os.getenv("YARDSALE_APIFY_ACTOR", "caffein.dev~ebay-sold-listings")
 RUN_URL = f"https://api.apify.com/v2/acts/{ACTOR}/run-sync-get-dataset-items"
 MAX_CHARGE_USD = "0.50"  # hard cap per search, enforced by Apify
+MAX_PRICE_USD = 1_000_000  # anything above is a parsing error, not a sale
 
 
 class ResearchError(RuntimeError):
@@ -30,27 +31,40 @@ class ResearchError(RuntimeError):
 
 
 def _cents(value: Any) -> int | None:
-    if value in (None, ""):
+    if value in (None, "") or isinstance(value, bool):
         return None
     try:
-        return int(Decimal(str(value).replace(",", "").replace("$", "").strip()) * 100)
+        amount = Decimal(str(value).replace(",", "").replace("$", "").strip())
     except InvalidOperation:
         return None
+    if not amount.is_finite() or not 0 <= amount <= MAX_PRICE_USD:
+        return None
+    return int((amount * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
-def parse_comp(raw: dict[str, Any]) -> Comp | None:
+def _web_link(value: Any) -> str:
+    link = str(value or "").strip()
+    return link if link.startswith(("https://", "http://")) else ""
+
+
+def parse_comp(raw: Any) -> Comp | None:
     """One actor result -> Comp. Returns None for results we can't price in US dollars."""
+    if not isinstance(raw, dict):
+        return None
     price = _cents(raw.get("soldPrice"))
     if price is None or price <= 0 or (raw.get("soldCurrency") or "USD") != "USD":
         return None
+    title = " ".join(str(raw.get("title") or "").split())[:200]
+    if not title:
+        return None
     return Comp(
-        title=str(raw.get("title") or "").strip()[:200],
+        title=title,
         price_cents=price,
         shipping_cents=_cents(raw.get("shippingPrice")),
-        condition=str(raw.get("condition") or ""),
+        condition=str(raw.get("condition") or "")[:60],
         sold_at=str(raw.get("endedAt") or "")[:10],
-        url=str(raw.get("url") or ""),
-        image_url=raw.get("thumbnailUrl") or None,
+        url=_web_link(raw.get("url")),
+        image_url=_web_link(raw.get("thumbnailUrl")) or None,
         best_offer=bool(raw.get("isBestOfferAccepted")),
     )
 
@@ -58,7 +72,9 @@ def parse_comp(raw: dict[str, Any]) -> Comp | None:
 async def search_ebay_sold(query: str, condition: str, max_results: int) -> list[Comp]:
     token = os.getenv("APIFY_TOKEN", "").strip()
     if not token:
-        raise ResearchError("APIFY_TOKEN is not set")
+        raise ResearchError("APIFY_TOKEN is not set on the server (see .env.example)")
+    if not query.strip():
+        raise ResearchError("there's nothing to search eBay for")
     body = {
         "keywords": [query],
         "count": max_results,
@@ -77,12 +93,18 @@ async def search_ebay_sold(query: str, condition: str, max_results: int) -> list
             raise ResearchError(f"Apify returned {resp.status}: {(await resp.text())[:200]}")
         items = await resp.json()
 
+    if not isinstance(items, list):
+        raise ResearchError(f"Apify returned {type(items).__name__}, not a list of sales")
     comps: list[Comp] = []
     seen: set[str] = set()
-    for raw in items if isinstance(items, list) else []:
+    for raw in items:
         comp = parse_comp(raw)
-        if comp is not None and comp.url not in seen:
-            seen.add(comp.url)
+        if comp is None:
+            continue
+        # Same listing twice in the results. Listings without a link are told apart by content.
+        key = comp.url or f"{comp.title}|{comp.price_cents}|{comp.sold_at}"
+        if key not in seen:
+            seen.add(key)
             comps.append(comp)
     return comps
 
@@ -100,6 +122,10 @@ def build_researcher(research: Research, offline: bool) -> Agent:
     async def handle(ctx: Context, sender: str, msg: ResearchRequest) -> None:
         try:
             comps = await research(msg.query, msg.condition, max(1, min(msg.max_results, 50)))
+        except ResearchError as ex:
+            ctx.logger.warning(f"eBay research failed: {ex}")
+            await ctx.send(sender, ServiceError(request_id=msg.request_id, reason=str(ex)[:300]))
+            return
         except Exception as ex:  # report every failure to the caller instead of going silent
             ctx.logger.exception("eBay research failed")
             await ctx.send(sender, ServiceError(request_id=msg.request_id, reason=str(ex)[:300]))
