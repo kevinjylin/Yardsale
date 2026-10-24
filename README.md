@@ -151,6 +151,14 @@ money or reach Fetch's servers.
 5. **Live.** Approving starts the item agent, and the reply gives its address. `my listings` shows
    the seller's listings and sales; `unlist` takes one down.
 
+**Several items at once.** A seller can attach up to 8 photos in one message, one item each.
+Each photo becomes its own numbered proposal (`#1`, `#2`, ...), priced 4 at a time, and the
+seller answers by number: `approve all`, `approve 2`, `approve 1, 3`, `ask 3 $60`,
+`lowest 2 $40`, `cancel 2`. A price typed with several photos isn't used, because it could mean
+any of them. With several proposals waiting, a plain `approve` asks which one. Each photo is a
+separate paid pricing run (about $0.08 of Apify plus two Claude calls), so 8 photos cost 8 times
+as much.
+
 Proposals, search results, and counter-offers also carry Interactive Cards from the installed
 `uagents_core` chat cards module: Approve or Cancel, Details, Accept. A tap does exactly what the
 typed command does, with the same checks. Whether ASI:One shows the cards is unverified, so the

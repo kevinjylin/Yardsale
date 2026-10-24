@@ -450,15 +450,6 @@ async def test_a_repeated_photo_still_being_priced_says_so(
     assert len(store.owned(proposal_owner(store))) == 1
 
 
-async def test_extra_photos_are_not_priced_when_repeated(market: sim.Market, store: Store) -> None:
-    seller = market.user("seller")
-    msg = sim.chat_message(f"sell these ![espresso]({fakes.photo_url('espresso')})", BIKE)
-    reply = (await seller.exchange(msg)).text()
-    assert "Trek" in reply and "I used the first photo" in reply
-    assert "suggested listing" not in await seller.say(f"[espresso]({fakes.photo_url('espresso')})")
-    assert len(store.owned(proposal_owner(store))) == 1
-
-
 @pytest.mark.parametrize("mime_type", ["image", "jpeg", "IMAGE/JPEG", "application/octet-stream"])
 def test_image_link_is_used_whatever_its_mime_type(mime_type: str) -> None:
     # ASI:One's uploads are Cloudinary image links whose mime_type isn't always "image/...".

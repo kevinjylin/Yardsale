@@ -93,3 +93,35 @@ def test_prices_in_a_sentence() -> None:
     assert seller_prices("won't go below 90") == (None, 9000, "")
     assert budget("find me a road bike under $300") == (30000, "")
     assert budget("a road bike") == (None, "")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("approve all", Command("approve", every=True)),
+        ("list them all", Command("approve", every=True)),
+        ("yes to all", Command("approve", every=True)),
+        ("approve 2", Command("approve", picks=(2,))),
+        ("approve #1, 3 and 4", Command("approve", picks=(1, 3, 4))),
+        ("cancel 2", Command("cancel", picks=(2,))),
+        ("cancel all", Command("cancel", every=True)),
+        ("rules 2", Command("rules", pick=2)),
+        ("lowest 2 $40", Command("edit", floor_cents=4000, pick=2)),
+        ("lowest 2 40", Command("edit", floor_cents=4000, pick=2)),
+        ("ask #3 to 60", Command("edit", asking_cents=6000, pick=3)),
+        ("#2: ask $60, lowest $45", Command("edit", asking_cents=6000, floor_cents=4500, pick=2)),
+        ("item 2 lowest 40", Command("edit", floor_cents=4000, pick=2)),
+        ("lowest $40 on 2", Command("edit", floor_cents=4000, pick=2)),
+        ("approve 2 at $50", Command("edit", asking_cents=5000, pick=2, approve=True)),
+        ("list 2 on ebay", Command("ebay_list", pick=2)),  # still eBay's
+        ("ask 60 lowest 40", Command("edit", asking_cents=6000, floor_cents=4000)),  # no number
+    ],
+)
+def test_commands_by_number(text: str, expected: Command) -> None:
+    """A seller with several photos waiting names each one by number."""
+    assert parse(text) == expected
+
+
+def test_prices_for_two_numbers_at_once_are_refused() -> None:
+    command = parse("ask 2 $60, lowest 3 $40")
+    assert command is not None and "One item at a time" in command.error

@@ -6,6 +6,12 @@ suggested prices, and the eBay sales behind them. Nothing is listed until the se
 "approve". Before that they can change a price ("ask $360", "lowest $280") or reply "cancel".
 Approving starts the item agent, and the reply gives its address.
 
+Several photos in one message (up to MAX_PHOTOS, one item each) become one proposal per photo,
+numbered in the order they were sent and priced PHOTOS_AT_ONCE at a time. Each photo is its own
+paid pricing run. A price typed with several photos isn't used, since it can't say which item it
+means; the seller names items by number instead: "lowest 2 $40", "ask 3 $60", "approve 2",
+"approve all", "cancel 2". With several proposals waiting, a plain "approve" asks which.
+
 Buying: the buyer says what they want ("find me a cheap road bike"). They can say their max and
 "haggle", and Yardsale's buyer agent (shopper.py) haggles with every matching item agent at once;
 the reply shows every round and the best price. Or they pick a result by number and make offers
@@ -130,12 +136,19 @@ from yardsale.store import (
 )
 
 REPLY_WITHIN = 40.0  # seconds; ASI:One's planner gives up on a reply after about 60
+MAX_PHOTOS = 8  # photos priced from one message; each is a paid Apify search and two Claude calls
+PHOTOS_AT_ONCE = 4  # photos from one message priced at the same time
+BATCH_WAIT_SHARE = 0.9  # of REPLY_WITHIN: how long several photos wait to fill the first reply
 MAX_REMEMBERED = 200  # photo links per conversation, and message IDs overall
 
 log = logging.getLogger("yardsale.chat")
 
 # Returns the photo's bytes. Raises PhotoError with a message for the seller.
 FetchPhoto = Callable[[Context, "Photo"], Awaitable[bytes]]
+# Sends a later message in the same conversation, after the first reply.
+Deliver = Callable[["Reply"], Awaitable[None]]
+# A seller's waiting photos by number: a proposal, or None for one that needs the seller's price.
+Waiting = list[tuple[int, Listing | None]]
 
 
 class Backend(Protocol):
@@ -198,7 +211,8 @@ HELP = (
     "Hi, I'm Yardsale.\n"
     "To sell: attach a photo of the item. I'll work out what it is, price it from recent eBay "
     'sales, and suggest a listing for you to approve. You can add your own price, like "at '
-    'least $40". Say "connect ebay" to also list on your own eBay account.\n'
+    f'least $40". Moving out? Attach up to {MAX_PHOTOS} photos at once, one item each. Say '
+    '"connect ebay" to also list on your own eBay account.\n'
     "To buy: tell me what you're looking for and your max, like \"find me a road bike, haggle "
     "for me, max $250\". My buyer agent haggles with every matching seller's agent at once and "
     "shows you the best price. You can also make your own offers."
@@ -221,6 +235,10 @@ SOMETHING_BROKE = "Sorry, something went wrong on my side. Please send that agai
 APPROVE_PROMPT = (
     'Reply "approve" to put it up for sale, "ask $X" or "lowest $X" to change a price ("rules" '
     'for a form), or "cancel".'
+)
+BATCH_PROMPT = (
+    'Reply "approve all" to put them all up for sale, or name one by number: "approve 2", '
+    '"ask 2 $60", "lowest 2 $40", or "cancel 2".'
 )
 ASK_MAX = (
     "What's the most you'd pay? My buyer agent never offers more than that, and never tells the "
@@ -281,6 +299,9 @@ class Conversation:
     awaiting: str | None = None  # "proposal", "counter", or "max": what a bare reply answers
     quotes: dict[str, int] = field(default_factory=dict)  # item ID -> price on offer to this buyer
     budget: int | None = None  # the buyer's max from their last search or haggle
+    # Seller's photos by number ("approve 2"): proposal item IDs, "" for photos that aren't one.
+    numbered: list[str] = field(default_factory=list)
+    needs_price: dict[str, Any] = field(default_factory=dict)  # number -> item without a price
     ebay_zip: str | None = None  # the seller's ZIP code, for their eBay listings
 
     @property
@@ -460,6 +481,37 @@ def proposal_text(listing: Listing) -> str:
         ]
     lines.append(APPROVE_PROMPT)
     return "\n".join(lines)
+
+
+def numbered_proposal_text(listing: Listing, n: int) -> str:
+    """A proposal named by its number, for a seller with several photos."""
+    prompt = (
+        f'Reply "approve {n}" to put it up for sale, "ask {n} $X" or "lowest {n} $X" to change a '
+        f'price, or "cancel {n}".'
+    )
+    return f"#{n}: " + proposal_text(listing).removesuffix(APPROVE_PROMPT) + prompt
+
+
+def pending_photo_key(owner: str, n: int) -> str:
+    """Where photo #n's prepared image waits for the seller's price, for listing it on eBay."""
+    return f"pending:{owner}#{n}"
+
+
+def batch_notes(count: int, text: str) -> str:
+    """What the seller should know about a message with several photos."""
+    notes = ""
+    if count > MAX_PHOTOS:
+        notes += (
+            f"\n\nI price up to {MAX_PHOTOS} photos from one message, so I took the first "
+            f"{MAX_PHOTOS}. Attach the other {count - MAX_PHOTOS} in another message."
+        )
+    asking, floor, _ = commands.seller_prices(text.lower())
+    if asking is not None or floor is not None:
+        notes += (
+            "\n\nYou sent several photos, so I didn't use the price in your message: it could "
+            'mean any of them. Set each one\'s by number, like "lowest 2 $40" or "ask 2 $60".'
+        )
+    return notes
 
 
 def proposal_reply(listing: Listing) -> Reply:
@@ -882,8 +934,50 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         state["seen_photos"] = conv.seen_photos[-MAX_REMEMBERED:]
         store.save_conversation(conv.key, state)
 
+    def numbered_waiting(conv: Conversation) -> list[tuple[int, Listing | None]]:
+        """Everything this seller has waiting, by number: proposals, and photos from a batch
+        that need the seller's price (None). Proposals without a number get the next ones."""
+        pending = store.owned(conv.owner, PROPOSED)
+        known = set(conv.numbered)
+        conv.numbered += [p.item_id for p in reversed(pending) if p.item_id not in known]
+        by_id = {listing.item_id: listing for listing in pending}
+        waiting: list[tuple[int, Listing | None]] = []
+        for n, item_id in enumerate(conv.numbered, 1):
+            if item_id in by_id:
+                waiting.append((n, by_id[item_id]))
+            elif str(n) in conv.needs_price:
+                waiting.append((n, None))
+        return waiting
+
+    def waiting_line(conv: Conversation, n: int, listing: Listing | None) -> str:
+        if listing is None:
+            return f"{n}. {conv.needs_price[str(n)]['item']['title']}: needs your price"
+        return (
+            f"{n}. {listing.title}: asking {usd(listing.asking_cents)}, lowest "
+            f"{usd(listing.floor_cents)}"
+        )
+
+    def waiting_list(
+        conv: Conversation, waiting: list[tuple[int, Listing | None]], head: str
+    ) -> str:
+        conv.awaiting = "proposal"
+        lines = [head, *(waiting_line(conv, n, listing) for n, listing in waiting)]
+        return "\n".join([*lines, BATCH_PROMPT])
+
+    def not_waiting(conv: Conversation, n: int) -> str:
+        if not 1 <= n <= len(conv.numbered):
+            return f"Pick a number from 1 to {len(conv.numbered)}."
+        return f"#{n} isn't waiting for approval."
+
     def waiting_too(conv: Conversation) -> str:
         """A reminder of other proposals still waiting for this seller."""
+        waiting = numbered_waiting(conv)
+        if len(waiting) > 1:
+            return "\n\n" + waiting_list(conv, waiting, "Still waiting for you:")
+        if waiting and waiting[0][1] is None:
+            conv.awaiting = "proposal"
+            n = waiting[0][0]
+            return f'\n\n#{n} still needs your price, like "ask {n} $40".'
         pending = store.owned(conv.owner, PROPOSED)
         if not pending:
             return ""
@@ -960,6 +1054,151 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             save(conv)
         return reply
 
+    async def price_numbered(ctx: Context, key: str, n: int, photo: Photo) -> Reply:
+        """Price photo #n of several. Never raises: a failure is a reply about that photo."""
+        owner = f"asi1:{key}"
+        listing: Listing | None = None
+        unpriced: UnpricedError | None = None
+        prepared: tuple[str, str] | None = None
+        try:
+            data = await fetch(ctx, photo)
+            image_b64, media_type = prepared = await asyncio.to_thread(prepare_photo, data)
+            listing = await backend.propose(
+                ctx,
+                owner,
+                ListPhoto(
+                    listing_ref=uuid4().hex,
+                    seller_id=owner,
+                    image_b64=image_b64,
+                    media_type=media_type,
+                ),
+            )
+            reply = Reply(numbered_proposal_text(listing, n), proposal_card(listing))
+        except UnpricedError as ex:
+            unpriced = ex
+            reply = Reply(
+                f"#{n}: This looks like {ex.item.title}, but no recent eBay sales were close "
+                f'enough to suggest a price. Tell me yours, like "ask {n} $40", or say "cancel '
+                f'{n}".'
+            )
+        except (PhotoError, PipelineError, PriceError) as ex:
+            detail = f"{ex} ({ex.__cause__})" if ex.__cause__ else str(ex)
+            if isinstance(ex, PriceError):
+                detail = "prices didn't work"
+            ctx.logger.warning(f"Chat photo #{n} for {key[:8]} failed: {detail}")
+            reply = Reply(f"#{n}: I couldn't price this photo. {ex} Send it again to retry.")
+        except Exception:
+            ctx.logger.exception(f"Chat photo #{n} for {key[:8]} failed")
+            reply = Reply(f"#{n}: {SOMETHING_BROKE}")
+        if backend.ebay is not None and prepared is not None:
+            # Kept for listing on eBay, which needs the photo itself.
+            if listing is not None:
+                store.save_photo(listing.item_id, prepared[1], base64.b64decode(prepared[0]))
+            elif unpriced is not None:
+                photo_key = pending_photo_key(owner, n)
+                store.save_photo(photo_key, prepared[1], base64.b64decode(prepared[0]))
+        async with locks[key]:
+            conv = load(key)
+            conv.pricing.pop(photo.url, None)
+            conv.numbered += [""] * (n - len(conv.numbered))
+            if listing is not None or unpriced is not None:
+                conv.seen_photos.append(photo.url)  # a failed photo can be sent again
+                conv.awaiting = "proposal"
+            if listing is not None:
+                # Another message may already have numbered it; it keeps its photo's number.
+                conv.numbered = ["" if i == listing.item_id else i for i in conv.numbered]
+                conv.numbered[n - 1] = listing.item_id
+            if unpriced is not None:
+                conv.needs_price[str(n)] = {
+                    "item": unpriced.item.model_dump(),
+                    "appraisal": unpriced.appraisal.model_dump(),
+                }
+            save(conv)
+        return reply
+
+    def batch_summary(key: str, numbers: list[int]) -> str:
+        """Where each photo of a batch stands, once all of them are priced."""
+        conv = load(key)
+        lines = [f"All {len(numbers)} photos are done:"]
+        waiting = False
+        for n in numbers:
+            item_id = conv.numbered[n - 1] if n <= len(conv.numbered) else ""
+            listing = store.get(item_id) if item_id else None
+            if listing is not None and listing.status == PROPOSED:
+                waiting = True
+                lines.append(
+                    f"{n}. {listing.title}: asking {usd(listing.asking_cents)}, lowest "
+                    f"{usd(listing.floor_cents)}"
+                )
+            elif listing is not None:
+                state = "for sale" if listing.status == ACTIVE else listing.status
+                lines.append(f"{n}. {listing.title}: {state}")
+            elif str(n) in conv.needs_price:
+                waiting = True
+                title = conv.needs_price[str(n)]["item"]["title"]
+                lines.append(f'{n}. {title}: needs your price, like "ask {n} $40"')
+            else:
+                lines.append(f"{n}. Couldn't be priced. Send that photo again to retry.")
+        if waiting:
+            lines.append(BATCH_PROMPT)
+        return "\n".join(lines)
+
+    async def price_batch(
+        ctx: Context,
+        key: str,
+        numbered: list[tuple[int, Photo]],
+        notice: str,
+        notes: str,
+        deadline: float | None,
+        deliver: Deliver | None,
+    ) -> Reply:
+        """Price several photos, PHOTOS_AT_ONCE at a time. The reply carries the proposals ready
+        by the deadline; the rest are delivered one by one as they're ready, then a summary."""
+        limit = asyncio.Semaphore(PHOTOS_AT_ONCE)
+
+        async def one(n: int, photo: Photo) -> Reply:
+            async with limit:
+                return await price_numbered(ctx, key, n, photo)
+
+        tasks = [asyncio.ensure_future(one(n, photo)) for n, photo in numbered]
+        numbers = [n for n, _ in numbered]
+        timeout = None
+        if deliver is not None and deadline is not None:
+            timeout = max(0.0, deadline - asyncio.get_running_loop().time())
+        done, rest = await asyncio.wait(tasks, timeout=timeout)
+        ready = tuple((task.result().text, task.result().card) for task in tasks if task in done)
+        count = len(numbered)
+        if not rest:
+            head = f"Here are suggested listings for your {count} photos, numbered in the order "
+            head += "you sent them."
+            summary = ((batch_summary(key, numbers), None),)
+            return Reply(notice + head + notes, None, ready + summary)
+        assert deliver is not None
+        if ready:
+            head = (
+                f"Got your {count} photos. Here's what's priced so far ({len(ready)} of {count}); "
+                "I'll send the rest here as each one is ready."
+            )
+        else:
+            head = (
+                f"Got your {count} photos. I'm identifying each one and checking recent eBay "
+                f"sales, {PHOTOS_AT_ONCE} at a time, which can take a few minutes. Each suggested "
+                "listing comes here as it's ready, numbered in the order you sent them."
+            )
+
+        async def send_rest() -> None:
+            try:
+                for next_ready in asyncio.as_completed(rest):
+                    await deliver(await next_ready)
+                await deliver(Reply(batch_summary(key, numbers)))
+            except Exception:
+                ctx.logger.exception(f"Sending priced photos in {key[:8]} failed")
+
+        follow_up = asyncio.ensure_future(send_rest())
+        follow_ups.add(follow_up)
+        follow_up.add_done_callback(follow_ups.discard)
+        return Reply(notice + head + notes, None, ready)
+
     async def change_prices(
         ctx: Context,
         conv: Conversation,
@@ -992,16 +1231,185 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return await approve(ctx, conv, listing)
         return Reply(proposal_text(listing), proposal_card(listing))
 
-    async def approve(ctx: Context, conv: Conversation, proposal: Listing) -> str:
+    async def go_live(
+        ctx: Context, conv: Conversation, proposal: Listing
+    ) -> tuple[Listing, bool, str] | str:
+        """Start a proposal's item agent and its eBay copy: (listing, registered, eBay line), or
+        why it couldn't start."""
         try:
             listing, registered = await backend.activate(ctx, proposal)
         except PipelineError as ex:
             return f"I couldn't start the item agent. {ex}"
-        conv.awaiting = None
         on_ebay = ""
         if backend.ebay is not None and backend.ebay.connected(conv.owner):
             on_ebay = "\n" + await list_on_ebay(conv, listing)
+        return listing, registered, on_ebay
+
+    async def approve(ctx: Context, conv: Conversation, proposal: Listing) -> str:
+        live = await go_live(ctx, conv, proposal)
+        if isinstance(live, str):
+            return live
+        listing, registered, on_ebay = live
+        conv.awaiting = None
         return listed_text(listing, registered, backend.offline) + on_ebay + waiting_too(conv)
+
+    # --- Several proposals, by number ------------------------------------------------------
+
+    async def approve_numbers(
+        ctx: Context, conv: Conversation, numbers: list[int], waiting: Waiting
+    ) -> str:
+        entries = dict(waiting)
+        lines: list[str] = []
+        listed = unconfirmed = in_server = False
+        for n in numbers:
+            if n not in entries:
+                lines.append(not_waiting(conv, n))
+                continue
+            proposal = entries[n]
+            if proposal is None:
+                lines.append(f'#{n} needs your price first, like "ask {n} $40".')
+                continue
+            live = await go_live(ctx, conv, proposal)
+            if isinstance(live, str):
+                lines.append(f"#{n}: {live}")
+                continue
+            listing, registered, on_ebay = live
+            listed = True
+            in_server |= listing.host != AGENTVERSE
+            unconfirmed |= listing.host != AGENTVERSE and not registered
+            lines.append(
+                f"#{n} {listing.title}: for sale at {usd(listing.asking_cents)}. "
+                f"{agent_line(listing)}{on_ebay}"
+            )
+        if listed:
+            conv.awaiting = None
+            lines.append(
+                "Each agent agrees to any offer at or above your lowest price, and below it "
+                'counters without ever revealing it. Say "my listings" any time to check on them.'
+            )
+            if backend.offline and in_server:
+                lines.append(
+                    "(Offline mode: these addresses were made on this server and aren't on the "
+                    "public Almanac.)"
+                )
+            elif unconfirmed:
+                lines.append(
+                    "(The Almanac hasn't confirmed some yet. The server retries every hour.)"
+                )
+        return "\n".join(lines) + waiting_too(conv)
+
+    def cancel_numbers(conv: Conversation, numbers: list[int], waiting: Waiting) -> str:
+        entries = dict(waiting)
+        lines: list[str] = []
+        for n in numbers:
+            if n not in entries:
+                lines.append(not_waiting(conv, n))
+                continue
+            proposal = entries[n]
+            if proposal is None:
+                title = conv.needs_price.pop(str(n))["item"]["title"]
+            elif backend.cancel(proposal.item_id, conv.owner) is None:
+                lines.append(not_waiting(conv, n))
+                continue
+            else:
+                title = proposal.title
+            lines.append(f"Canceled #{n}, the {title}. Nothing was listed.")
+        conv.awaiting = None
+        return "\n".join(lines) + waiting_too(conv)
+
+    async def edit_number(
+        ctx: Context, conv: Conversation, n: int, command: commands.Command, waiting: Waiting
+    ) -> str | Reply:
+        entries = dict(waiting)
+        if n not in entries:
+            return not_waiting(conv, n)
+        proposal = entries[n]
+        if proposal is None:
+            saved = conv.needs_price[str(n)]
+            try:
+                listing = backend.save_proposal(
+                    conv.owner,
+                    conv.owner,
+                    uuid4().hex,
+                    ItemDetails.model_validate(saved["item"]),
+                    Appraisal.model_validate(saved["appraisal"]),
+                    command.asking_cents,
+                    command.floor_cents,
+                )
+            except UnpricedError:
+                return f'I need an asking price for #{n} too, like "ask {n} $40".'
+            store.move_photo(pending_photo_key(conv.owner, n), listing.item_id)
+            del conv.needs_price[str(n)]
+            conv.numbered[n - 1] = listing.item_id
+        else:
+            changed = store.reprice(
+                proposal.item_id, conv.owner, command.asking_cents, command.floor_cents
+            )
+            if changed is None:
+                return not_waiting(conv, n)
+            listing = changed
+        conv.awaiting = "proposal"
+        if command.approve:
+            return await approve(ctx, conv, listing)
+        return Reply(numbered_proposal_text(listing, n), proposal_card(listing))
+
+    def rules_number(conv: Conversation, n: int, waiting: Waiting) -> str | Reply:
+        entries = dict(waiting)
+        if n not in entries:
+            return not_waiting(conv, n)
+        proposal = entries[n]
+        if proposal is None:
+            return f'Tell me #{n}\'s price first, like "ask {n} $40".'
+        return Reply(
+            f'Set your prices for #{n}, the {proposal.title}, below, or type them, like "ask {n} '
+            f'{usd(proposal.asking_cents)}, lowest {n} {usd(proposal.floor_cents)}".',
+            rules_card(proposal),
+        )
+
+    async def numbered_command(
+        ctx: Context, conv: Conversation, command: commands.Command, waiting: Waiting
+    ) -> str | Reply | None:
+        """Approve, cancel, or price proposals by number, or ask which one when several are
+        waiting. None when the usual one-proposal handling applies."""
+        kind = command.kind
+        if kind not in ("approve", "cancel", "edit", "rules", "accept"):
+            return None
+        if conv.counter is not None and (kind == "accept" or conv.awaiting == "counter"):
+            return None  # a buyer answering a counter-offer
+        if kind == "accept" and command.pick is not None:
+            return None
+        if not waiting and not conv.numbered:
+            return None
+        numbers = list(command.picks)
+        if command.pick is not None and kind in ("edit", "rules"):
+            numbers = [command.pick]
+        if command.every:
+            if not waiting:
+                return None
+            numbers = [n for n, _ in waiting]
+        if not numbers:
+            if conv.unpriced is not None or not waiting:
+                return None
+            if len(waiting) == 1:
+                if waiting[0][1] is not None:
+                    return None  # the one proposal, as always
+                numbers = [waiting[0][0]]
+            else:
+                example = waiting[-1][0]
+                head = {
+                    "edit": f'Which one? Put its number with the price, like "lowest {example} '
+                    '$40":',
+                    "rules": f'Which one? Say "rules {example}":',
+                    "cancel": f'Which one? Say "cancel {example}", or "cancel all":',
+                }.get(kind, f'Which one? Say "approve {example}", or "approve all":')
+                return waiting_list(conv, waiting, head)
+        if kind == "edit":
+            return await edit_number(ctx, conv, numbers[0], command, waiting)
+        if kind == "rules":
+            return rules_number(conv, numbers[0], waiting)
+        if kind == "cancel":
+            return cancel_numbers(conv, numbers, waiting)
+        return await approve_numbers(ctx, conv, numbers, waiting)
 
     async def list_on_ebay(conv: Conversation, listing: Listing) -> str:
         """List one live listing on the seller's eBay too. Never raises: eBay failing doesn't
@@ -1134,10 +1542,14 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 + ebay_line(listing)
                 for n, listing in enumerate(active, 1)
             ]
+        waiting = numbered_waiting(conv)
+        numbers = {item.item_id: n for n, item in waiting if item is not None}
         for listing in listings:
             if listing.status == PROPOSED:
+                number = f" (#{numbers[listing.item_id]})" if len(waiting) > 1 else ""
                 lines.append(
-                    f"Waiting for your approval: {listing.title} at {usd(listing.asking_cents)}"
+                    f"Waiting for your approval{number}: {listing.title} at "
+                    f"{usd(listing.asking_cents)}"
                 )
             elif listing.status == SOLD:
                 lines.append(sold_line(listing, store.deal_for(listing.item_id)))
@@ -1509,7 +1921,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         kind = command.kind if command else None
         pending = store.owned(conv.owner, PROPOSED)
         proposal = pending[0] if pending else None
-        selling = proposal is not None or conv.unpriced is not None
+        waiting = numbered_waiting(conv)
+        selling = proposal is not None or conv.unpriced is not None or bool(waiting)
 
         if command is not None and kind in (
             "ebay_connect",
@@ -1521,6 +1934,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return await ebay_command(conv, command)
         if kind == "craigslist_end":
             return CRAIGSLIST_END
+        if command is not None:
+            by_number = await numbered_command(ctx, conv, command, waiting)
+            if by_number is not None:
+                return by_number
         if command is not None and kind == "edit" and selling:
             return await change_prices(
                 ctx, conv, proposal, command.asking_cents, command.floor_cents, command.approve
@@ -1608,19 +2025,33 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if wanted.intent == "sell":
             asking, floor = to_cents(wanted.asking_usd), to_cents(wanted.floor_usd)
             if selling and (asking or floor):
+                edit = commands.Command("edit", asking_cents=asking, floor_cents=floor)
+                by_number = await numbered_command(ctx, conv, edit, waiting)
+                if by_number is not None:
+                    return by_number
                 return await change_prices(ctx, conv, proposal, asking, floor, False)
             return PHOTO_MISSING if _MENTIONS_PHOTO.search(text) else NEEDS_PHOTO
         # Neither buying nor selling, as far as the reader can tell. If the words match
         # something for sale ("espresso machine?"), show it anyway.
         if text and search(backend.available(), text):
             return find(conv, text, None)
+        if len(waiting) > 1:
+            return waiting_list(conv, waiting, "Waiting for your approval:")
         if proposal is not None:
             return f"Your {proposal.title} is waiting at {usd(proposal.asking_cents)}. " + (
                 APPROVE_PROMPT
             )
         return HELP
 
-    async def handle(ctx: Context, key: str, msg: ChatMessage) -> Reply:
+    async def handle(
+        ctx: Context,
+        key: str,
+        msg: ChatMessage,
+        deadline: float | None = None,
+        deliver: Deliver | None = None,
+    ) -> Reply:
+        """The answer to one message. With several photos, the answer holds the proposals ready
+        by `deadline` (loop time), and `deliver` sends the others as they're ready."""
         text = clean_text(msg)
         choice = card_choice(msg)
         async with locks[key]:
@@ -1656,20 +2087,33 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                     reply = Reply(f"Sorry, that didn't go through. {ex}")
                 save(conv)
                 return Reply(notice + reply.text, reply.card, reply.more)
-            conv.pricing[photos[0].url] = backend.boot_id
-            # Only the first photo is priced. The others count as seen so a repeated link
-            # doesn't price them later; sending one again on its own makes a new upload.
-            conv.seen_photos += [photo.url for photo in photos[1:]]
+            numbered: list[tuple[int, Photo]] = []
+            if len(photos) > 1:
+                # Each photo gets a number for this conversation, after any earlier proposals.
+                numbered_waiting(conv)
+                numbered = list(enumerate(photos[:MAX_PHOTOS], len(conv.numbered) + 1))
+                conv.numbered += [""] * len(numbered)
+                # Photos over the limit count as seen so a repeated link doesn't price them
+                # later; attaching one again makes a new upload.
+                conv.seen_photos += [photo.url for photo in photos[MAX_PHOTOS:]]
+            for _, photo in numbered or [(1, photos[0])]:
+                conv.pricing[photo.url] = backend.boot_id
             save(conv)
+        if numbered:
+            notes = batch_notes(len(photos), text)
+            return await price_batch(ctx, key, numbered, notice, notes, deadline, deliver)
         reply = await price_photo(ctx, key, photos[0], text)
-        first_only = ""
-        if len(photos) > 1:
-            first_only = "\n\n(I used the first photo. Send other items one message at a time.)"
-        return Reply(notice + reply.text + first_only, reply.card, reply.more)
+        return Reply(notice + reply.text, reply.card, reply.more)
 
-    async def handle_safely(ctx: Context, key: str, msg: ChatMessage) -> Reply:
+    async def handle_safely(
+        ctx: Context,
+        key: str,
+        msg: ChatMessage,
+        deadline: float | None = None,
+        deliver: Deliver | None = None,
+    ) -> Reply:
         try:
-            return await handle(ctx, key, msg)
+            return await handle(ctx, key, msg, deadline, deliver)
         except Exception:
             ctx.logger.exception(f"Chat message in {key[:8]} failed")
             return Reply(SOMETHING_BROKE)
@@ -1718,7 +2162,14 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             f"attachments: {attachments_summary(msg)}"
         )
 
-        job = asyncio.ensure_future(handle_safely(ctx, key, msg))
+        answer_sent = asyncio.Event()
+
+        async def deliver(later: Reply) -> None:
+            await answer_sent.wait()  # proposals priced later never overtake the answer
+            await send_reply(ctx, sender, later)
+
+        deadline = received + REPLY_WITHIN * BATCH_WAIT_SHARE
+        job = asyncio.ensure_future(handle_safely(ctx, key, msg, deadline, deliver))
         left = REPLY_WITHIN - (asyncio.get_running_loop().time() - received)
         done, _ = await asyncio.wait({job}, timeout=max(0.0, left))
         if done:
@@ -1730,12 +2181,15 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 result = await job
                 answered[msg_id] = result
                 await send_reply(ctx, sender, result)
+                answer_sent.set()
 
             follow_up = asyncio.ensure_future(send_when_done())
             follow_ups.add(follow_up)
             follow_up.add_done_callback(follow_ups.discard)
         answered[msg_id] = reply
         await send_reply(ctx, sender, reply, first_message)
+        if done:
+            answer_sent.set()
 
     @proto.on_message(ChatAcknowledgement)
     async def on_ack(ctx: Context, sender: str, msg: ChatAcknowledgement) -> None:
