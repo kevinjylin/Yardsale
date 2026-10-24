@@ -33,7 +33,7 @@ from tests.fakes import (
     run_agents,
     slow_research,
 )
-from yardsale import bureau_server, chat
+from yardsale import bureau_server, chat, photos
 from yardsale.photos import PhotoError
 from yardsale.researcher import Research
 
@@ -218,6 +218,24 @@ def test_photos_are_found_in_resources_and_text() -> None:
     )
 
 
+@pytest.mark.parametrize("mime_type", ["image", "jpeg", "IMAGE/JPEG", "application/octet-stream"])
+def test_image_link_is_used_whatever_its_mime_type(mime_type: str) -> None:
+    # ASI:One's uploads are Cloudinary image links whose mime_type isn't always "image/...".
+    url = "https://res.cloudinary.com/fetch-ai/image/upload/v1/chat-images/kmzr0d8"
+    msg = message("i wanna sell this", url, mime_type=mime_type)
+    assert [p.url for p in chat.photos_in(msg)] == [url]
+
+
+def test_a_storage_upload_that_says_it_is_not_an_image_is_skipped() -> None:
+    assert chat.photos_in(message("sell", STORAGE_URI, mime_type="application/pdf")) == []
+
+
+def test_attachments_are_summarised_for_the_log() -> None:
+    summary = chat.attachments_summary(message("sell", STORAGE_URI, mime_type="image/jpeg"))
+    assert STORAGE_URI in summary and "mime_type='image/jpeg'" in summary
+    assert chat.attachments_summary(message("hi")) == "none"
+
+
 def test_storage_uploads_are_photos_with_an_asset_id() -> None:
     msg = message("sell", STORAGE_URI, mime_type="image/jpeg")
     (photo,) = chat.photos_in(msg)
@@ -270,3 +288,16 @@ def test_prices_in_replies_read_naturally() -> None:
     assert chat.usd(1250) == "$12.50"
     assert chat.to_cents(39.99) == 3999
     assert chat.to_cents(0) is None
+
+
+def test_storage_download_refuses_garbled_base64(monkeypatch: pytest.MonkeyPatch) -> None:
+    class GarbledStorage:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def download(self, asset_id: str) -> dict[str, str]:
+            return {"contents": "not base64!!"}
+
+    monkeypatch.setattr(photos, "ExternalStorage", GarbledStorage)
+    with pytest.raises(PhotoError):
+        photos.download_from_storage(object(), "3f2a")  # type: ignore[arg-type]

@@ -130,11 +130,16 @@ def photos_in(msg: ChatMessage) -> list[Photo]:
         if not isinstance(item, ResourceContent):
             continue
         for resource in item.resource if isinstance(item.resource, list) else [item.resource]:
+            # ASI:One's mime_type isn't always a full "image/jpeg", so an image link is trusted
+            # whatever it says. Anything that isn't a photo is refused later, when it's opened.
             mime_type = resource.metadata.get("mime_type", "")
-            if mime_type and not mime_type.startswith("image/"):
-                continue
-            # An upload's URI is usually agent-storage://..., which only the storage API can open.
-            url = _resource_url(resource.uri, resource.metadata) or resource.uri.strip()
+            image_type = not mime_type or mime_type.lower().startswith("image")
+            web_url = _resource_url(resource.uri, resource.metadata)
+            if web_url:
+                url = web_url if image_type or _is_image_link(web_url) else ""
+            else:
+                # An upload's URI is usually agent-storage://..., which only the storage API opens.
+                url = resource.uri.strip() if image_type else ""
             if url and all(url != photo.url for photo in found):
                 found.append(
                     Photo(
@@ -155,6 +160,19 @@ def clean_text(msg: ChatMessage) -> str:
     text = _MARKDOWN_LINK.sub(" ", text)
     text = _BARE_LINK.sub(lambda m: " " if _is_image_link(_trim(m.group(0))) else m.group(0), text)
     return " ".join(text.split())
+
+
+def attachments_summary(msg: ChatMessage) -> str:
+    """What each attachment looks like, for the log, so a photo that's missed can be diagnosed."""
+    parts = []
+    for item in msg.content:
+        if isinstance(item, ResourceContent):
+            for resource in item.resource if isinstance(item.resource, list) else [item.resource]:
+                mime_type = resource.metadata.get("mime_type")
+                parts.append(
+                    f"{resource.uri[:120]} mime_type={mime_type!r} keys={sorted(resource.metadata)}"
+                )
+    return "; ".join(parts) or "none"
 
 
 UPLOADS_WELCOME = MetadataContent(type="metadata", metadata={"attachments": "true"})
@@ -244,7 +262,8 @@ def build_chat_protocol(sell: Sell, read: ReadMessage, fetch: FetchPhoto) -> Pro
                 ),
             )
         except (PhotoError, PipelineError) as ex:
-            ctx.logger.warning(f"Chat listing for {conversation} failed: {ex}")
+            cause = f" ({ex.__cause__})" if ex.__cause__ else ""
+            ctx.logger.warning(f"Chat listing for {conversation} failed: {ex}{cause}")
             return f"I couldn't list this. {ex}"
         except Exception:
             ctx.logger.exception(f"Chat listing for {conversation} failed")
@@ -315,7 +334,7 @@ def build_chat_protocol(sell: Sell, read: ReadMessage, fetch: FetchPhoto) -> Pro
                 return  # ASI:One opening the session; nothing to answer yet
         ctx.logger.info(
             f"Chat from {conversation}: {len(new)} new photo(s), {len(repeated)} repeated, "
-            f"text {text[:120]!r}"
+            f"text {text[:120]!r}, attachments: {attachments_summary(msg)}"
         )
         # Start the job before anything slow so a redelivered message can't list the photo twice.
         job: asyncio.Future[str] | None = None

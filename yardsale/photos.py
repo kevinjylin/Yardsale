@@ -90,8 +90,8 @@ def download_from_storage(identity: Identity, asset_id: str) -> bytes:
     storage = ExternalStorage(identity=identity, storage_url=STORAGE_URL)
     try:
         stored = storage.download(asset_id)
-        data = base64.b64decode(stored["contents"])
-    except (RuntimeError, KeyError, TypeError, ValueError) as ex:
+        data = base64.b64decode(stored["contents"], validate=True)
+    except (OSError, RuntimeError, KeyError, TypeError, ValueError) as ex:  # ValueError: bad base64
         raise PhotoError("I couldn't open the attachment. Please send the photo again.") from ex
     if len(data) > MAX_DOWNLOAD_BYTES:
         raise PhotoError("That photo is over 25 MB. Send a smaller one.")
