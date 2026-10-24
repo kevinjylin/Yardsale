@@ -1,5 +1,8 @@
 # Yardsale Identifier
 
+![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)
+![tag:hackathon](https://img.shields.io/badge/hackathon-5F43F1)
+
 Part of **Yardsale**: snap a photo of something you want to sell, and it becomes a live agent that
 haggles for you.
 

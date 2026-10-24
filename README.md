@@ -1,16 +1,59 @@
 # Yardsale
 
+![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)
+![tag:hackathon](https://img.shields.io/badge/hackathon-5F43F1)
+
 Snap a photo of something you want to sell. Yardsale identifies it, prices it from recent eBay
 sales, and suggests a listing. Once you approve, the item becomes a live Fetch.ai agent with its
 own address. The agent knows your lowest price and haggles with buyers for you. Buyers ask for
 what they want ("find me a cheap road bike"), and make offers in the same chat.
 
-**Status:** prototype, complete end to end offline. Selling with approval, buying with offers and
-counter-offers, saved state, and restarts work and are tested with fake Claude, Apify, and ASI:One
-answers (the fakes are test-only; the server always uses the real services). Nothing has run yet with real keys, a real photo, or the real ASI:One app (see
-[Going live](#going-live)). No code moves money: a deal is an agreed price.
-[docs/background.md](docs/background.md) has the plan, the decisions made so far, and what's still
-open.
+**Status:** prototype. Selling with approval, buying with offers and counter-offers, saved state,
+and restarts work and are tested with fake Claude, Apify, and ASI:One answers (the fakes are
+test-only; the server always uses the real services). On October 23, photos sent from the real
+ASI:One app were priced with real Claude and Apify keys. Buying hasn't been tried from the real
+app yet (see [Going live](#going-live)). No code moves money: a deal is an agreed price.
+[docs/background.md](docs/background.md) has the decisions made so far and what's still open, and
+[docs/calhacks-plan.md](docs/calhacks-plan.md) has the Cal Hacks plan.
+
+## Agents
+
+Yardsale is a [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/) project. These four agents are
+registered on Agentverse as mailbox agents and run in one Bureau server:
+
+| Agent | Address | Does |
+| --- | --- | --- |
+| [Yardsale](https://agentverse.ai/agents/details/agent1qtm5uclxjx5ye4fhtjcqcc2d4vh5aucary75dn90lwq7808uyzvt2std9nj/profile) (the Market) | `agent1qtm5uclxjx5ye4fhtjcqcc2d4vh5aucary75dn90lwq7808uyzvt2std9nj` | Talks to sellers and buyers in ASI:One through the Agent Chat Protocol. Runs pricing, proposals, search, and offers, and starts an item agent for each approved listing. |
+| [yardsale-identifier](https://agentverse.ai/agents/details/agent1q2efftklrnnu6z95xu43lxj4gk8jn94hjhap3n90mvfrf8t8n29mz97x60k/profile) | `agent1q2efftklrnnu6z95xu43lxj4gk8jn94hjhap3n90mvfrf8t8n29mz97x60k` | Claude works out what's in a photo and writes an eBay search for it. |
+| [yardsale-researcher](https://agentverse.ai/agents/details/agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2/profile) | `agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2` | Finds what that product sold for on eBay in the last 90 days, through Apify. |
+| [yardsale-appraiser](https://agentverse.ai/agents/details/agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k/profile) | `agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k` | Claude picks which sales are the same product; code sets the asking price and the floor. |
+
+Every approved listing also gets its own **item agent**, which holds the seller's private floor
+and haggles with buyers. Item agents are registered on Fetch's Almanac only, not Agentverse, so
+there's no limit on how many there are. The chat gives each one's address when the seller
+approves.
+
+**Try it in ASI:One:** open [asi1.ai](https://asi1.ai), start a chat with the Yardsale agent
+(from its Agentverse profile, or by mentioning its address), attach a photo, and type something
+like "sell this, at least $40". To buy, ask for something like "find me a cheap road bike". The
+agents answer only while the server is running.
+
+**To run it yourself** you need these accounts and keys (put them in `.env`; see
+[.env.example](.env.example)):
+
+- [Anthropic API key](https://console.anthropic.com/) (`ANTHROPIC_API_KEY`): Claude reads the
+  photos and picks matching sales.
+- [Apify token](https://console.apify.com/) (`APIFY_TOKEN`): eBay sold listings through the
+  [caffein.dev/ebay-sold-listings](https://apify.com/caffein.dev/ebay-sold-listings) Actor. About
+  $0.08 per photo.
+- [ASI:One API key](https://asi1.ai/developer) (`ASI_ONE_API_KEY`, recommended): `asi1-mini` reads what
+  people type. Without it, a simpler keyword reader is used.
+- [Agentverse API key](https://agentverse.ai/) (`AGENTVERSE_API_KEY`, optional): connects the four
+  agents' mailboxes at startup and uploads their profile READMEs from
+  [yardsale/readmes/](yardsale/readmes/).
+
+The addresses above come from this deployment's master seed. A server started with a different
+seed gets different addresses.
 
 ## Run it locally
 
@@ -182,9 +225,9 @@ agent can't accept a chat buyer's counter-offer.
 
 ## Going live
 
-These need accounts, keys, or a public machine, so they haven't been done or verified. Run
-`uv run python -m yardsale.bureau_server --check` to see which keys are set; it never prints
-values.
+These need accounts, keys, or a public machine. Steps 1, 3, 4, 5, and 6 were done on October 23;
+the rest haven't been verified. Run `uv run python -m yardsale.bureau_server --check` to see which
+keys are set; it never prints values.
 
 1. **Keys.** Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` and `APIFY_TOKEN`
    (required for photos; each photo costs about $0.08 of Apify plus two Claude calls), and
@@ -198,11 +241,11 @@ values.
    set `AGENTVERSE_API_KEY`, or open each Inspector link the server logs while signed in, click
    Connect, and choose Mailbox. Addresses don't change, so this is one-time.
 5. **ASI:One photo delivery.** From the real ASI:One app, chat with the Yardsale agent, attach a
-   photo, and check the server log shows it priced. Unverified: whether ASI:One's upload links
-   download without authentication, and whether the planner routes "sell this" to Yardsale
-   without an @mention.
+   photo, and check the server log shows it priced. On October 23 uploads came as Cloudinary links
+   with `mime_type` `"image"` and downloaded without authentication. Unverified: whether the
+   planner routes "sell this" to Yardsale without an @mention.
 6. **Sessions.** Confirm that one ASI:One chat keeps one session ID across messages. Approval and
-   haggling rely on it to recognize the same person.
+   haggling rely on it to recognize the same person. One chat kept one session ID on October 23.
 7. **Fetch Business.** Set up `@yardsale`, and test whether ASI:One finds it and whether it can
    hand off to the Market's address. No code depends on this; it's unverified.
 8. **Live buyer test.** `buyer_test` without `--offline` reaches the Market through its
@@ -218,3 +261,4 @@ Payments aren't built. A deal records the agreed price and `payment_status="not_
 | Offline, 40 item agents | 40/40 deals |
 | Offline server with fake services (a mode since removed), `buyer_test --count 12` | 12/12 deals |
 | Offline server with fake services (a mode since removed), `sell --yes`, then restart | listed, then restored at the same address |
+| Live, real ASI:One app, real Claude and Apify keys | photos priced; a photo of Air Jordan 4s priced from 20 eBay sales of the same product; the Approve card showed in ASI:One |

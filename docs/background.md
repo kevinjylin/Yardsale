@@ -3,6 +3,9 @@
 This page records Yardsale's product decisions and prototype behavior during Cal Hacks 13.0,
 including seller approval, buying in the chat, and saved state.
 
+The Cal Hacks 13.0 plan (the pitch, what Fetch Business offers, what's missing, and the build
+order) is in [calhacks-plan.md](calhacks-plan.md).
+
 ## The idea
 
 1. A seller snaps a photo of an item.
@@ -199,12 +202,21 @@ per agent, because agent addresses come from the master seed and don't change.
 - **Public address.** `YARDSALE_PUBLIC_URL` sets the URL item agents advertise. It's untested:
   the server needs a hosted machine or a tunnel such as ngrok.
 - **ASI:One end to end.** The Market speaks the Chat Protocol, publishes it to Agentverse, and
-  has a mailbox, and tests cover selling and buying with fakes. Nobody has sent it a photo from
-  the real ASI:One app yet. Unknown: whether upload links download without authentication,
-  whether one chat keeps one session ID, and whether the planner routes "sell this" to it without
-  an @mention.
-- **Real keys.** The pipeline hasn't run with real Claude and Apify keys or a real photo, so
-  matching quality and Apify's response time are unproven.
+  has a mailbox, and tests cover selling and buying with fakes. On October 23 photos sent from
+  the real ASI:One app were priced: one was listed before seller approval was added, and one
+  became a proposal whose Approve card showed in ASI:One. Uploads came as Cloudinary links with
+  `mime_type` `"image"` and downloaded without authentication, and one chat kept one session ID
+  across messages. ASI:One's chat page sometimes shows a slow reply only after a reload.
+  Unknown: whether tapping a card reaches the Market, and whether the planner routes "sell this"
+  to it without an @mention. Buying hasn't been tried from the real app.
+- **Real keys.** On October 23, with real Claude and Apify keys, a photo of Air Jordan 4s was
+  identified and priced from 20 eBay sales of the same product. Matching quality for other kinds
+  of items, and how long pricing takes, are unproven.
+- **Lowballs reveal the floor.** A counter is the higher of the floor and the halfway point
+  between the offer and the asking price (`counter_price` in [pricing.py](../yardsale/pricing.py)).
+  With appraised prices the floor is at least 70% of the asking price, so any offer under about
+  40% of asking is countered at exactly the floor. [calhacks-plan.md](calhacks-plan.md) has the
+  fix in its build order.
 - **Live buyer test needs the Market connected.** In live mode the Market's Almanac entry points
   at its Agentverse mailbox, so `buyer_test` without `--offline` only reaches it once it's
   connected to Agentverse.

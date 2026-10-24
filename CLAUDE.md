@@ -4,6 +4,11 @@ Product idea, decisions already made, and open questions:
 
 @docs/background.md
 
+Cal Hacks 13.0 plan (the pitch, what's missing, and the build order; submissions close Sunday,
+October 25 at 9 AM PT):
+
+@docs/calhacks-plan.md
+
 ## Commands
 
 ```bash
