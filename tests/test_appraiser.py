@@ -1,4 +1,6 @@
-from yardsale.appraiser import Judgement, appraise, round_price
+import math
+
+from yardsale.appraiser import Judgement, appraise
 from yardsale.models import Comp
 
 
@@ -30,7 +32,7 @@ def test_same_product_sales_set_the_price() -> None:
     assert appraisal.asking_cents == 12000  # median
     assert appraisal.low_cents == 10500
     assert appraisal.high_cents == 13500
-    assert appraisal.floor_cents == 10000  # lower quartile, rounded
+    assert appraisal.floor_cents == 11000  # lower quartile ($105), rounded half up
     assert len(appraisal.matches) == 5
     assert appraisal.comps_considered == 6
 
@@ -38,8 +40,38 @@ def test_same_product_sales_set_the_price() -> None:
 def test_best_offer_prices_are_left_out_when_possible() -> None:
     comps = [comp(100), comp(120), comp(500, best_offer=True)]
     appraisal = appraise("r", comps, [same(0), same(1), same(2)])
-    assert appraisal.confidence == "medium"
-    assert appraisal.asking_cents == 11000
+    assert appraisal.confidence == "medium"  # 3 same-product sales
+    assert appraisal.asking_cents == 11000  # from the 2 that show what was paid
+    assert "left out 1 Best Offer sale)" in appraisal.basis
+
+
+def test_best_offer_prices_are_used_when_they_are_all_there_is() -> None:
+    comps = [comp(100, best_offer=True), comp(120, best_offer=True), comp(140, best_offer=True)]
+    appraisal = appraise("r", comps, [same(0), same(1), same(2)])
+    assert appraisal.asking_cents == 12000
+    assert "Best Offer" not in appraisal.basis
+
+
+def test_similarity_of_exactly_0_6_counts() -> None:
+    comps = [comp(100), comp(140, "Giant Escape 3")]
+    appraisal = appraise("r", comps, [same(0), other(1, 0.6)])
+    assert len(appraisal.matches) == 2
+    appraisal = appraise("r", comps, [same(0), other(1, 0.59)])
+    assert len(appraisal.matches) == 1
+
+
+def test_a_bad_similarity_from_claude_counts_as_none() -> None:
+    comps = [comp(100), comp(140, "Giant Escape 3")]
+    appraisal = appraise("r", comps, [other(0, math.nan), other(1, 7.0)])
+    assert [m.similarity for m in appraisal.matches] == [1.0]  # 7.0 is clamped; nan dropped
+
+
+def test_prices_are_whole_cents() -> None:
+    # An even count of odd prices has a half-cent median; nothing comes back fractional.
+    comps = [comp(d) for d in (99, 101, 103, 106)]
+    appraisal = appraise("r", comps, [same(i) for i in range(4)])
+    for cents in (appraisal.asking_cents, appraisal.floor_cents, appraisal.low_cents):
+        assert isinstance(cents, int)
 
 
 def test_few_matches_fall_back_to_similar_items() -> None:
@@ -71,10 +103,3 @@ def test_ignores_bad_and_repeated_indexes() -> None:
     appraisal = appraise("r", comps, judgements)
     assert len(appraisal.matches) == 3
     assert all(m.same_product for m in appraisal.matches)
-
-
-def test_round_price() -> None:
-    assert round_price(1249) == 1200  # $1 steps under $20
-    assert round_price(4730) == 4500  # $5 steps under $100
-    assert round_price(23800) == 24000  # $10 steps above
-    assert round_price(30) == 100  # never below one step
