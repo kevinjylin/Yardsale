@@ -152,6 +152,10 @@ def test_post_commands() -> None:
     assert post_command("post 3 on craigslist") == craigslist_mail.PostCommand(3)
     assert post_command("post it to Craigslist!") == craigslist_mail.PostCommand(None)
     assert post_command("find me a bike on craigslist") is None
+    assert post_command("list it on craigslist") == craigslist_mail.PostCommand(None)
+    assert post_command("ok, post it on craigslist") == craigslist_mail.PostCommand(None)
+    assert post_command("yes, craigslist too") == craigslist_mail.PostCommand(None)
+    assert post_command("put 2 on craigslist") == craigslist_mail.PostCommand(2)
 
 
 async def test_the_seller_gets_a_post_to_paste(

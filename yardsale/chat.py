@@ -232,6 +232,10 @@ EBAY_CONNECTED = (
     "Your eBay account is connected. Listings you approve also go up on eBay, and my agent "
     "answers their Best Offers with your lowest price, which eBay never sees.\n\n"
 )
+CRAIGSLIST_END = (
+    "Craigslist posts are yours to delete: open the post from Craigslist's email and delete it. "
+    'Your Yardsale listing stays up; say "unlist" to take it down everywhere.'
+)
 EBAY_OFF = "eBay isn't set up on this Yardsale server, so listings stay on Yardsale."
 RESTARTED = (
     "A photo you sent earlier didn't finish pricing because Yardsale restarted. Please send it "
@@ -1056,6 +1060,32 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if ebay.connected(conv.owner):
                 return f"Got it: eBay listings use ZIP code {conv.ebay_zip}."
             return f'Got it: ZIP code {conv.ebay_zip}. Say "connect ebay" to connect your account.'
+        if command.kind == "ebay_end":
+            on_ebay = [
+                listing
+                for listing in store.owned(conv.owner, ACTIVE)
+                if (record := store.ebay_listing(listing.item_id)) is not None
+                and record.status == "active"
+            ]
+            if command.pick is not None:
+                active = store.owned(conv.owner, ACTIVE)
+                if not 1 <= command.pick <= len(active):
+                    return (
+                        f"Pick a number from 1 to {len(active)}." if active else "Nothing's live."
+                    )
+                on_ebay = [active[command.pick - 1]] if active[command.pick - 1] in on_ebay else []
+            elif len(on_ebay) > 1:
+                return 'Which one? Say "take 2 off ebay", using the numbers from "my listings".'
+            if not on_ebay:
+                return "That isn't on eBay."
+            try:
+                await ebay.end_listing(on_ebay[0].item_id)
+            except EbayError as ex:
+                return f"eBay wouldn't end the listing: {ex}. End it on eBay yourself."
+            return (
+                f"Took the {on_ebay[0].title} off eBay. It's still for sale on Yardsale; "
+                'say "unlist" to take it down everywhere.'
+            )
         # ebay_list: put live listings that aren't on eBay yet on it
         if not ebay.connected(conv.owner):
             return 'Connect your eBay account first: say "connect ebay".'
@@ -1113,14 +1143,17 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 lines.append(sold_line(listing, store.deal_for(listing.item_id)))
         lines += craigslist_mail.seller_lines(store, listings)
         if active:
-            lines.append('Say "unlist 1" to take one down, or "craigslist 1" to post it there.')
+            lines.append(
+                'Say "unlist 1" to take one down, "craigslist 1" to post it on Craigslist'
+                + (', or "list 1 on ebay".' if backend.ebay is not None else ".")
+            )
         return "\n".join(lines)
 
     def ebay_line(listing: Listing) -> str:
         record = store.ebay_listing(listing.item_id)
         if record is None or record.status != "active":
             return ""
-        return f" On eBay: {record.url}"
+        return f". On eBay: {record.url}"
 
     def sold_line(listing: Listing, deal: DealRecord | None) -> str:
         if deal is None:
@@ -1476,8 +1509,11 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             "ebay_disconnect",
             "ebay_zip",
             "ebay_list",
+            "ebay_end",
         ):
             return await ebay_command(conv, command)
+        if kind == "craigslist_end":
+            return CRAIGSLIST_END
         if command is not None and kind == "edit" and selling:
             return await change_prices(
                 ctx, conv, proposal, command.asking_cents, command.floor_cents, command.approve

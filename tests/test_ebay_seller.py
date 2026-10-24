@@ -118,12 +118,31 @@ def test_settings_default_to_the_sandbox(monkeypatch: pytest.MonkeyPatch) -> Non
         ("list on ebay", "ebay_list", "", None),
         ("list it on ebay too", "ebay_list", "", None),
         ("list on ebay 2", "ebay_list", "", 2),
+        ("list 2 on ebay", "ebay_list", "", 2),
+        ("ebay 2", "ebay_list", "", 2),
+        ("add to ebay", "ebay_list", "", None),
+        ("take it off ebay", "ebay_end", "", None),
+        ("take 2 off ebay", "ebay_end", "", 2),
+        ("stop selling on ebay", "ebay_end", "", None),
+        ("unlist 1 from ebay", "ebay_end", "", 1),
+        ("take it off craigslist", "craigslist_end", "", None),
     ],
 )
 def test_ebay_commands(text: str, kind: str, zip_code: str, pick: int | None) -> None:
     command = commands.parse(text)
     assert command is not None
     assert (command.kind, command.zip_code, command.pick) == (kind, zip_code, pick)
+
+
+def test_channel_words_never_buy_or_unlist() -> None:
+    """Taking an item off one channel isn't accepting a price or taking it down everywhere, and
+    a buyer mentioning eBay mid-offer is still making an offer."""
+    for text in ("take it off ebay", "take it off craigslist", "stop selling on ebay"):
+        command = commands.parse(text)
+        assert command is not None and command.kind not in ("accept", "unlist"), text
+        assert not commands.accepts_deal(text)
+    offer = commands.parse("I'll pay $50, can you connect ebay?")
+    assert offer is not None and (offer.kind, offer.amount_cents) == ("offer", 5000)
 
 
 # --- Connecting ---------------------------------------------------------------------------------
@@ -345,6 +364,51 @@ async def test_listings_stay_in_step(shop: tuple[sim.Market, fakes.FakeEbay, Eba
     await ebay.poll()
     assert fake.items[record.ebay_item_id].ended
     assert market.store.ebay_listing(second.item_id).status == EBAY_ENDED  # type: ignore[union-attr]
+
+
+async def test_ebay_sale_after_a_yardsale_sale_is_caught(
+    shop: tuple[sim.Market, fakes.FakeEbay, EbaySeller],
+) -> None:
+    """A Buy It Now landing after the item sold here is recorded, not hidden by ending it."""
+    market, fake, ebay = shop
+    _, listing, ebay_item_id = await listed(market, fake, ebay)
+    assert market.store.close_deal(listing.item_id, "chat:someone", 34000) is not None
+    fake.items[ebay_item_id].sales.append(("txn-late", "latebuyer", 36000))
+    await ebay.poll()
+    assert market.store.ebay_listing(listing.item_id).status == EBAY_SOLD  # type: ignore[union-attr]
+    assert not fake.items[ebay_item_id].ended
+
+
+async def test_ebay_accept_claims_the_item_first(
+    shop: tuple[sim.Market, fakes.FakeEbay, EbaySeller], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The item is sold here before eBay hears "Accept", so no other buyer can slip in between."""
+    market, fake, ebay = shop
+    _, listing, ebay_item_id = await listed(market, fake, ebay)
+    respond = ebay.client.respond
+    seen: list[str] = []
+
+    async def checked(*args: Any, **kwargs: Any) -> None:
+        seen.append(market.store.get(listing.item_id).status)  # type: ignore[union-attr]
+        await respond(*args, **kwargs)
+
+    monkeypatch.setattr(ebay.client, "respond", checked)
+    fake.offer(ebay_item_id, "fastbuyer", listing.floor_cents)
+    await ebay.poll()
+    assert fake.responses[-1]["action"] == "Accept"
+    assert seen == [SOLD]
+
+
+async def test_take_it_off_ebay_keeps_it_on_yardsale(
+    shop: tuple[sim.Market, fakes.FakeEbay, EbaySeller],
+) -> None:
+    market, fake, ebay = shop
+    seller, listing, ebay_item_id = await listed(market, fake, ebay)
+    reply = await seller.say("take it off ebay")
+    assert "off eBay" in reply and "still for sale" in reply, reply
+    assert fake.items[ebay_item_id].ended
+    assert market.store.get(listing.item_id).status == ACTIVE  # type: ignore[union-attr]
+    assert "isn't on eBay" in await seller.say("take it off ebay")
 
 
 async def test_disconnect_ends_listings_and_forgets_tokens(

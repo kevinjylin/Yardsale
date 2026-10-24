@@ -32,6 +32,8 @@ Kind = Literal[
     "ebay_disconnect",
     "ebay_zip",
     "ebay_list",
+    "ebay_end",
+    "craigslist_end",
 ]
 
 # $1,250.50 or 1250 or 40.5, not part of a longer number such as 40.999
@@ -69,8 +71,11 @@ _OFFER = re.compile(
     + r"\b)?",
     re.IGNORECASE,
 )
+# "take it off ebay" isn't taking the price.
+_NOT_TAKING = r"(?!\s+(?:off|down|away|from|back)\b)"
 _ACCEPT = re.compile(
     r"^(?:i\s+)?(?:accept(?:ed)?|deal|it'?s\s+a\s+deal|i'?ll\s+take\s+it|take\s+it|agreed?)\b"
+    + _NOT_TAKING
 )
 _ACCEPT_PICK = re.compile(
     r"^(?:i\s+)?(?:accept|buy|take)\s+(?:the\s+)?(?:#|item\s*|number\s*|no\.?\s*|option\s*)?"
@@ -114,7 +119,7 @@ _BARE_AMOUNT = re.compile(r"^" + AMOUNT + r"$", re.IGNORECASE)
 # writes prose, like "The buyer accepts the negotiated deal ... Please proceed to complete the
 # purchase". These read such prose; the chat only uses them while a price is waiting to be taken.
 _ACCEPTS = re.compile(
-    r"\b(?:accept(?:s|ed|ing)?|buy\s+it|purchase\s+it|take\s+(?:it|the\s+deal)|"
+    r"\b(?:accept(?:s|ed|ing)?|buy\s+it|purchase\s+it|take\s+(?:it|the\s+deal)" + _NOT_TAKING + r"|"
     r"complete\s+the\s+(?:purchase|deal|order)|"
     r"proceed\s+(?:with\s+)?(?:the\s+)?(?:purchase|deal|order|checkout))\b"
 )
@@ -123,15 +128,25 @@ _EBAY_DISCONNECT = re.compile(
     r"\b(?:disconnect|unlink|remove|forget)\s+(?:my\s+)?ebay(?:\s+account)?\b"
 )
 _EBAY_CONNECT = re.compile(
-    r"\b(?:connect|link|hook\s+up|add|sign\s+in\s+(?:to|with)|log\s+in\s+(?:to|with))\s+"
+    r"^(?:please\s+)?(?:connect|link|hook\s+up|sign\s+in\s+(?:to|with)|log\s+in\s+(?:to|with))\s+"
     r"(?:my\s+|to\s+)?ebay(?:\s+account)?\b(?:\D{0,20}?\b" + _ZIP + r"\b)?"
 )
 _EBAY_ZIP = re.compile(
     r"^(?:my\s+)?(?:ebay\s+)?(?:zip|postal)(?:\s*code)?\s*(?:is\s+|:\s*|=\s*)?" + _ZIP + r"$"
 )
 _EBAY_LIST = re.compile(
-    r"^(?:list|post|put|sell)\s+(?:it\s+|them\s+|(?:my\s+)?(?:listings?|items?|stuff)\s+)?"
-    r"(?:on|to)\s+ebay(?:\s+too)?(?:\s+" + _PICK + r")?$"
+    r"^(?:(?:also\s+)?(?:list|post|put|sell|add)\s+"
+    r"(?:it\s+|them\s+|(?:my\s+)?(?:listings?|items?|stuff)\s+|" + _PICK + r"\s+)?"
+    r"(?:on|to)\s+ebay(?:\s+too)?(?:\s+" + _PICK + r")?|ebay\s+" + _PICK + r")$"
+)
+# Ends only the eBay copy; "unlist" takes the item down everywhere.
+_EBAY_END = re.compile(
+    r"^(?:please\s+)?(?:stop\s+selling|take|remove|end|unlist|delist|pull)\b(?:\s+(?:it|this|that|"
+    r"(?:my\s+)?listing|" + _PICK + r"))?\s+(?:on|off|from)\s+(?:of\s+)?ebay(?:\s+" + _PICK + r")?$"
+)
+_CRAIGSLIST_END = re.compile(
+    r"\b(?:stop\s+selling|take|remove|end|unlist|delist|pull|delete)\b.*\b(?:on|off|from)\s+"
+    r"craigslist\b"
 )
 _NOT_ACCEPTING = re.compile(
     r"\b(?:not|don'?t|doesn'?t|won'?t|never|decline[sd]?|reject(?:s|ed)?|cancel(?:s|led)?|"
@@ -196,9 +211,16 @@ def parse(text: str) -> Command | None:
     ebay = _EBAY_ZIP.search(lowered)
     if ebay is not None:
         return Command("ebay_zip", zip_code=ebay.group(1))
+    ebay = _EBAY_END.search(lowered)
+    if ebay is not None:
+        pick = next((g for g in ebay.groups() if g), None)
+        return Command("ebay_end", pick=int(pick) if pick else None)
+    if _CRAIGSLIST_END.search(lowered):
+        return Command("craigslist_end")
     ebay = _EBAY_LIST.search(lowered)
     if ebay is not None:
-        return Command("ebay_list", pick=int(ebay.group(1)) if ebay.group(1) else None)
+        pick = next((g for g in ebay.groups() if g), None)
+        return Command("ebay_list", pick=int(pick) if pick else None)
     offer = _OFFER.search(lowered)
     if offer is not None:
         amount, error = _cents(offer)

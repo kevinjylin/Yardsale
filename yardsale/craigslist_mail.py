@@ -240,8 +240,9 @@ def _mark_answered(store: Store, key: str) -> None:
 # --- The seller's side, in the ASI:One chat ----------------------------------------------------
 
 _POST_COMMAND = re.compile(
-    r"^\s*(?:post\s+(?:it\s+|this\s+|#?(?P<a>\d+)\s+)?(?:on|to)\s+craigslist"
-    r"|craigslist(?:\s+post)?(?:\s+#?(?P<b>\d+))?)\s*[.!]?\s*$",
+    r"^\s*(?:(?:yes|yeah|ok(?:ay)?|sure)\b[,.!]?\s*)?(?:also\s+)?"
+    r"(?:(?:post|list|put|sell|add)\s+(?:it\s+|this\s+|#?(?P<a>\d+)\s+)?(?:on|to)\s+craigslist"
+    r"(?:\s+too)?|craigslist(?:\s+post|\s+too)?(?:\s+#?(?P<b>\d+))?)\s*[.!]?\s*$",
     re.IGNORECASE,
 )
 
