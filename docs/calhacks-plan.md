@@ -132,74 +132,118 @@ and [video](https://drive.google.com/file/d/1EDfKrM7l8soO-40eKkPYDAEkRUTwQKyf):
 
 ## The pitch
 
-**One line:** Fetch Business for things without a barcode. `@yardsale` is a verified Fetch
-Business whose whole inventory is agents. A photo becomes a catalog entry priced from real sales,
-and each item gets its own agent that haggles within the seller's limits and checks out with Visa.
+Decided October 24: Yardsale is two products, one for sellers and one for buyers. Anything else
+built this weekend either serves one of them or is listed under "Also built" below.
 
-**The gap it fills.** Fetch Business turns a business into an agent that customers' AIs can find,
-talk to, and buy from. It gets products and prices from a catalog such as Shopify or Square. That
-works when every product has a catalog entry and a fixed price. Used, one-of-a-kind items have
-neither: the price has to be found from recent sales and then negotiated. Yardsale does both.
+**One line:** Photograph your stuff, set your minimums, and agents sell it for you. Say what you
+want and the most you'll pay, and an agent finds it and haggles for you.
 
-**Why it fits what Fetch is building.** One demo shows three things Fetch is pushing:
+**Product 1: sellers.** A student is moving out of their apartment right before finals.
+Everything in the dorm has to go, and posting it all brings 200+ DMs to answer ("is this still
+available?", "would you take $10?") while they study, and it's worse when they're flying home
+out of state. With Yardsale they photograph each item and say their minimum ("sell this, at
+least $40"). Claude identifies it, eBay sales from the last 90 days set a suggested price, and
+once the seller approves, the item gets its own agent that knows the minimum. The listing is on
+ASI:One and `@yardsale`, and Yardsale writes a Craigslist post for the seller to paste. Every
+buyer, in ASI:One or by email from the Craigslist post, haggles with the item's agent, which
+never goes below the minimum and never shows it.
 
-1. Discovery through Fetch Business.
-2. A customer's AI and a business's AI working out a deal.
-3. AI payments. Fetch's first AI-to-AI payment, in December 2025, used Visa.
+**Product 2: buyers.**
 
-**The marketplace problem.** A two-sided marketplace needs buyers. Yardsale doesn't have to build
-that crowd: every ASI:One user is a potential buyer, and Fetch Business is how their AI finds
-`@yardsale`.
+1. **Yardsale listings.** A buyer asks ASI:One or `@yardsale` for something, with a max.
+   Yardsale's buyer agent haggles with every matching item agent at once, and the buyer pays
+   through a link.
+2. **The deal finder.** Most of what a buyer wants won't be on Yardsale. So the buyer writes what
+   they want and the most they'll pay, and the agent searches eBay, Craigslist, and OfferUp for
+   the best deals under that max. For a Craigslist post the buyer picks, the agent emails the
+   seller and negotiates the price for them.
 
-**How Yardsale makes money.** A commission on each sale, taken from the payment before the
-seller's payout (for example 5%, so sellers keep 95%). Pricing a photo stays free, since that's
-what brings sellers in.
+**What's built** (October 24, evening):
 
-**Who it's for.** Sellers: students moving out, with more stuff than time. Buyers: bargain
-hunters, who shop by asking ASI:One.
+| Piece | Product | Status |
+| --- | --- | --- |
+| Photo → item identified (Claude) and priced from eBay sold listings (Apify) | Sellers | Built. Run live from the ASI:One app October 23–24; one photo took 36 seconds. |
+| Several photos in one message | Sellers | In progress. Today only the first photo in a message is priced. |
+| Minimum read from the seller's own words (`asi1-mini`) | Sellers | Built |
+| Approve → item agent with its own address | Sellers | Built. Hosted on Agentverse with its own profile, live October 24. |
+| Craigslist post text (`craigslist`), pasted by the seller | Sellers | Built |
+| Item agent haggles with Craigslist buyers by email, payment link on a deal | Sellers | Built; tested with a fake inbox only, not yet run against real Craigslist or Gmail |
+| Search, haggle, and buy Yardsale listings in ASI:One | Buyers 1 | Built. Live October 24, including through ASI:One's planner without an @mention. |
+| The same through `@yardsale` on Fetch Business | Buyers 1 | Built. Live October 24 through a Cloudflare tunnel (Plus trial). |
+| Payment link, 5% commission | Both | Built for test mode. A Stripe test payment went through end to end October 24. |
+| eBay and Craigslist listings for sale now (Apify Actors) | Buyers 2 | Search code written and tried on real results; not yet reachable from the chat or `@yardsale` (in progress) |
+| OfferUp | Buyers 2 | No source yet |
+| Standing searches ("watch for ...", every 6 hours for a week) | Buyers 2 | Storage and polling written; no chat commands yet |
+| Agent emails a Craigslist seller and negotiates for the buyer | Buyers 2 | In progress |
 
-**Pitch as first written** (condensed): snap a photo of something you don't use, and it becomes
-an agent that prices itself from real sold listings, gets found by buyers' agents in ASI:One,
-haggles within your limits, and gets paid. Past shopping projects (Shopybara, VShop AI, Revi)
-were buyer-side helpers that stopped before the purchase. Agent Santa negotiated between agents
-but faked payment. DIAL haggled with humans by phone. Yardsale makes the inventory itself agents,
-with real payment. The demo seeds inventory and uses judges as buyers. Posting to eBay or
-Facebook is future work.
+**Also built / next** (not on either product's main path):
+
+- **Selling on the seller's own eBay** ([ebay_seller.py](../yardsale/ebay_seller.py)): `connect
+  ebay`, list on approve, and Best Offers answered with the item agent's rules. Tested only
+  against a local stand-in, and blocked on eBay developer keys
+  ([ebay-setup.md](ebay-setup.md)). Next once keys arrive.
+- **Visa Pay By Link**: built for Visa's sandbox, never run (no keys). Stripe test mode is what
+  the demo uses.
+- **Orders webhook**: every order status change can be POSTed out, but Fetch Business's Orders
+  page takes orders only from Square or SumUp POS.
+- **Our own resale comps Actor**: pushed to Apify, but eBay answers 403 through Apify's proxy.
+
+**Why it fits what Fetch is building.** The challenge is "From Intent to Action", and both
+products end in action: a sale, or an offer sent to a real seller. One demo shows:
+
+1. Discovery through ASI:One and Fetch Business (`@yardsale`).
+2. Agents working out a deal: a buyer's agent and item agents, or an item agent and a person
+   emailing from Craigslist.
+3. AI payments, through a payment link and the Payment Protocol for agent buyers.
+
+**The marketplace problem.** A new marketplace has no buyers and no listings. Yardsale doesn't
+wait for either. A seller's Craigslist post brings Craigslist's buyers to the item agent, and the
+deal finder is useful on day one with nothing listed, because it searches where listings already
+are.
+
+**How Yardsale makes money.** A commission on each sale Yardsale collects payment for (ASI:One,
+`@yardsale`, and Craigslist buyers who pay through the link), taken before the seller's payout:
+5%, so sellers keep 95%. Pricing a photo is free, since that's what brings sellers in. The deal
+finder has no fee yet; one search costs Yardsale about $0.09 of Apify (eBay about $0.05,
+Craigslist about $0.04).
+
+**Who it's for.** Sellers: students moving out, with more stuff than time. Buyers: students
+moving in and bargain hunters, who shop by asking ASI:One.
+
+**Earlier work.** Past shopping projects (Shopybara, VShop AI, Revi) were buyer-side helpers
+that stopped before the purchase. Agent Santa negotiated between agents but faked payment. DIAL
+haggled with humans by phone. Yardsale covers both sides: the inventory is agents, they haggle
+with buyers wherever they come from, and the deal ends in a payment link.
 
 **How to frame it:**
 
-- **Two layers.** `@yardsale` on Fetch Business is the front door: the verified agent ASI:One
-  finds, and the only one buyers and sellers talk to. The uAgents are the specialists behind it:
-  the Identifier, Researcher, and Appraiser price items, item agents hold floors and haggle, and
-  the payment step settles. The business agent is the product, and the uAgents are the power
-  behind it. The Cal Hacks event agent is itself a Fetch Business agent, so this is the setup
-  Fetch is pushing.
-- **Fetch Business is the reveal, not the premise.** Open with the seller's problem and the
-  haggling. The `@yardsale` Orders page with a real sale on it comes near the end, as the
-  surprise.
+- **Two products, one story.** The seller moving out and the buyer looking for a deal. Don't
+  present eBay selling, Visa, or the Orders webhook as products.
+- **The agent answers the DMs.** Suggested line: "You can't answer 200 DMs during finals. Your
+  agents can."
+- **One agent per item, many channels.** ASI:One, `@yardsale`, and Craigslist email are just
+  where buyers come from. The same item agent answers all of them with the same rules, so the
+  minimum never leaves it.
+- **`@yardsale` is the front door for buyers.** It's Yardsale's Fetch Business agent, and it
+  searches, haggles, and buys through Yardsale's API. Sellers use `@ys-orchestrator`, because a
+  photo has to reach Claude. Fetch Business is the reveal, not the premise.
 - **The long tail of Fetch Business.** Suggested line: "Fetch Business gives brands a verified
   agent. Yardsale gives everyone else one, for each thing they own."
-- **Used next to new.** When someone asks ASI:One for a standing desk, brand agents offer new
-  ones and Yardsale adds used ones to the same search. That makes ASI:One a better place to shop
-  without competing with the brands Fetch is signing up.
-- **Trust.** Fetch Business launched to stop knock-off agents. Secondhand selling has the same
-  problem, worse. Every item agent sits under one verified `@yardsale`, with its photo and the
-  sales behind its price attached.
-- **A funnel into Fetch Business.** Anyone who keeps listing (a reseller, a thrift shop, a club
-  doing a move-out sale) outgrows per-item agents and claims their own Fetch Business agent.
-  Yardsale brings Fetch Business new customers.
-- **One handle, not one per seller.** Fetch Business is built around one agent per business, not
-  per item. Making every casual seller set up and verify a business would kill the snap-a-photo
-  moment, and if Fetch Business did the selling, Yardsale would add nothing.
 - **Be exact about models.** Claude reads photos, `asi1-mini` reads typed text, and ASI:One finds
   and routes to the agents. ASI:One's models don't take images, Fetch judges know it, and they
   check the repo and Devpost against what the pitch claims. Never imply ASI:One reads the photos.
-- **Don't dwell on outside services.** Relying on Apify and Claude is fine, as long as the whole
-  flow works inside ASI:One and can be demoed there. Show the flow; explain the services when
-  asked.
+- **Be exact about Craigslist.** Craigslist bans automated posting, so the seller posts by hand;
+  Yardsale writes the text. Buyers' emails reach Yardsale through Craigslist's relay. Yardsale
+  doesn't fetch eBay or Craigslist pages itself: listings come from Apify Actors.
+- **Be exact about what's in progress.** Several photos per message, the deal finder in the chat,
+  OfferUp, and emailing Craigslist sellers for a buyer aren't done yet. Say so if they aren't
+  done by the pitch.
+- **Don't dwell on outside services.** Relying on Apify and Claude is fine, as long as the flow
+  works inside ASI:One and can be demoed there. Show the flow; explain the services when asked.
 - **The agent count.** The submission asks how many agents there are, and a typical entry has
-  about ten plus an orchestrator. Ours is four service agents plus one per listed item, each live
-  on Agentverse with its own profile. Don't add agents just to raise the number.
+  about ten plus an orchestrator. Ours is five service agents (the Market, Identifier,
+  Researcher, Appraiser, and Shopper) plus one per listed item. Don't add agents just to raise
+  the number.
 
 ## What Fetch Business offers
 
