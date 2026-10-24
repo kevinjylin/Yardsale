@@ -9,12 +9,13 @@ from uagents import Model
 
 
 class ListItem(Model):
-    """Seller -> Market: list one item. The Market spins up a new item agent for it."""
+    """Seller -> Market: list one item with the seller's own title and prices. Nothing here is a
+    suggestion, so it goes live without a separate approval step."""
 
     listing_ref: str  # seller-side ID; resending the same ref returns the same item agent
     title: str
     asking_cents: int
-    floor_cents: int  # private to the item agent, never sent to buyers
+    floor_cents: int  # private to the seller and the item agent, never sent to buyers
     seller_id: str
 
 
@@ -26,7 +27,7 @@ class Listed(Model):
     title: str
     asking_cents: int
     item_address: str
-    almanac_registered: bool
+    almanac_registered: bool  # False offline: the address exists only on this server
 
 
 class ListingRejected(Model):
@@ -34,19 +35,29 @@ class ListingRejected(Model):
     reason: str
 
 
+# --- Haggling: buyer <-> item agent ---------------------------------------------------------
+# A buyer is identified by its agent address. The Market haggles for chat buyers, so it adds
+# buyer_ref (the chat) to tell them apart; item agents ignore buyer_ref from anyone else.
+# request_id, when set, is echoed in the reply.
+
+
 class Offer(Model):
-    """Buyer -> item agent."""
+    """Buyer -> item agent. At or above the floor closes the deal at this price."""
 
     item_id: str
     offer_cents: int
+    buyer_ref: str = ""
+    request_id: str = ""
 
 
 class Counter(Model):
-    """Item agent -> buyer: the offer was below the floor."""
+    """Item agent -> buyer: the offer was below the floor. Accept with AcceptCounter."""
 
     item_id: str
     counter_cents: int
     note: str
+    expires_at: str = ""  # ISO 8601 UTC; accepting after this is refused
+    request_id: str = ""
 
 
 class AcceptCounter(Model):
@@ -54,26 +65,35 @@ class AcceptCounter(Model):
 
     item_id: str
     counter_cents: int
+    buyer_ref: str = ""
+    request_id: str = ""
 
 
 class Deal(Model):
-    """Item agent -> buyer: agreed price. The prototype records it; no payment is made."""
+    """Item agent -> buyer: an agreed price, recorded once per item. No payment is made."""
 
     item_id: str
     price_cents: int
-    seller_id: str
+    deal_id: str = ""
+    title: str = ""
+    payment_status: str = "not_collected"  # payments aren't built; nothing has been charged
+    request_id: str = ""
 
 
 class OfferRejected(Model):
     item_id: str
     reason: str
+    # unknown_item | unavailable | invalid_amount | no_counter | counter_expired | counter_changed
+    code: str = ""
+    request_id: str = ""
 
 
 # --- Photo listings: Market <-> seller ---------------------------------------------------------
 
 
 class ListPhoto(Model):
-    """Seller -> Market: list an item from a photo. The Market prices it, then spawns its agent."""
+    """Seller -> Market: price an item from a photo. The Market answers with Appraised and
+    Proposed; nothing is listed until the seller sends ApproveListing."""
 
     listing_ref: str
     seller_id: str
@@ -82,6 +102,32 @@ class ListPhoto(Model):
     note: str = ""  # optional seller hint, e.g. "size M, barely used"
     asking_cents: int | None = None  # seller overrides; None means use the appraisal
     floor_cents: int | None = None
+
+
+class Proposed(Model):
+    """Market -> seller: the suggested listing, saved and waiting for approval."""
+
+    listing_ref: str
+    item_id: str
+    title: str
+    asking_cents: int
+    floor_cents: int  # only the seller sees this
+    asking_from: str  # seller | appraisal
+    floor_from: str  # seller | appraisal | default (70% of asking)
+
+
+class ApproveListing(Model):
+    """Seller -> Market: go live, optionally with changed prices. Answered with Listed."""
+
+    listing_ref: str
+    asking_cents: int | None = None
+    floor_cents: int | None = None
+
+
+class CancelListing(Model):
+    """Seller -> Market: drop a proposal, or take a live listing down."""
+
+    listing_ref: str
 
 
 class ListingUpdate(Model):
