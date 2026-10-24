@@ -93,11 +93,12 @@ from uagents_core.contrib.protocols.chat.cards import (
     ListItem as CardListItem,
 )
 
-from yardsale import commands, craigslist_mail
+from yardsale import commands, craigslist_mail, watches
 from yardsale.asione import ReadMessage
 from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
 from yardsale.ebay_seller import EbayError, EbaySeller
+from yardsale.elsewhere import DealFinder, Found, search_words, site_name
 from yardsale.models import (
     AcceptCounter,
     Appraisal,
@@ -114,6 +115,7 @@ from yardsale.payments import PaymentError, commission_text
 from yardsale.photos import PhotoError, download_from_storage, download_photo, prepare_photo
 from yardsale.pricing import PriceError, parse_usd, to_cents, usd
 from yardsale.search import search
+from yardsale.sources import ExternalListing, SourceError
 from yardsale.store import (
     ACTIVE,
     AGENTVERSE,
@@ -145,6 +147,7 @@ class Backend(Protocol):
     offline: bool
     boot_id: str
     ebay: EbaySeller | None  # sellers' own eBay accounts; None when eBay isn't set up
+    finder: DealFinder  # searches other sites when Yardsale has nothing; off without sources
 
     async def propose(self, ctx: Context, owner: str, photo: ListPhoto) -> Listing:
         """Price a photo and save the proposal. Raises PipelineError or UnpricedError."""
@@ -253,6 +256,9 @@ class Reply(NamedTuple):
     card: MetadataContent | None = None  # an Interactive Card shown with the text
     # Messages sent right after this one, such as the eBay sales behind a proposal's price.
     more: tuple[tuple[str, MetadataContent | None], ...] = ()
+    # (search, budget): search other sites, outside the conversation's lock, and add the best
+    # deals to this text before it's sent.
+    elsewhere: tuple[str, int | None] | None = None
 
 
 def as_reply(answer: str | Reply) -> Reply:
@@ -282,6 +288,7 @@ class Conversation:
     quotes: dict[str, int] = field(default_factory=dict)  # item ID -> price on offer to this buyer
     budget: int | None = None  # the buyer's max from their last search or haggle
     ebay_zip: str | None = None  # the seller's ZIP code, for their eBay listings
+    last_query: str = ""  # the buyer's last search words, for "search other sites" and "watch"
 
     @property
     def owner(self) -> str:
@@ -852,6 +859,88 @@ def payment_status_text(deal: DealRecord, title: str) -> str:
     return f"Order {deal.deal_id} for the {title}: no payment is needed on this server."
 
 
+# --- Other sites -------------------------------------------------------------------------------
+
+NOT_YARDSALE = (
+    "These aren't Yardsale listings, so my agents can't haggle for them. Open a link to buy from "
+    "the seller."
+)
+CRAIGSLIST_OFFERS = "Craigslist sellers usually take offers by email: reply to the post."
+SEARCHING_ELSEWHERE = "I'll send the best deals I find here in a moment."
+SITES_OFF = "Searching other sites is off on this Yardsale server."
+
+
+def watch_offer(sites: str) -> str:
+    hours = int(watches.WATCH_EVERY // 3600)
+    return f'Say "watch for it" and I\'ll keep checking {sites} every {hours} hours for a week.'
+
+
+def _under(budget_cents: int | None) -> str:
+    return f" under {usd(budget_cents)}" if budget_cents else ""
+
+
+def deal_line(n: int, listing: ExternalListing) -> str:
+    """One listing on another site: its link, price, site, and what the site says about it."""
+    price = usd(listing.price_cents) if listing.price_cents is not None else "no price given"
+    if listing.shipping_cents:
+        price += f" + {usd(listing.shipping_cents)} shipping"
+    notes = [note for note in (listing.condition, listing.location) if note]
+    if listing.accepts_offers:
+        notes.append("takes offers")
+    extra = f" ({', '.join(notes)})" if notes else ""
+    return (
+        f"{n}. {_link(listing.title, listing.url)}: {price} on {site_name(listing.source)}{extra}"
+    )
+
+
+def elsewhere_text(found: Found, sites: str) -> str:
+    about = f'"{found.query}"{_under(found.budget_cents)}'
+    if not found.listings:
+        lines = [f"I didn't find {about} on {sites} either."]
+    else:
+        lines = [f"Best deals on other sites for {about}:"]
+        lines += [deal_line(n, listing) for n, listing in enumerate(found.listings, 1)]
+        lines.append(NOT_YARDSALE)
+        if any(listing.source == "craigslist" for listing in found.listings):
+            lines.append(CRAIGSLIST_OFFERS)
+    if found.failed:
+        names = " and ".join(site_name(name) for name in found.failed)
+        lines.append(f"({names} couldn't be searched just now.)")
+    lines.append(watch_offer(sites))
+    return "\n".join(lines)
+
+
+def elsewhere_card(found: Found) -> MetadataContent | None:
+    """The deals as a carousel, with their photos. The links are in the text."""
+    if not found.listings:
+        return None
+    items = []
+    for listing in found.listings:
+        total = listing.total_cents
+        price = usd(total) if total is not None else "no price given"
+        if listing.shipping_cents:
+            price += " with shipping"
+        items.append(
+            CarouselItem(
+                id=f"{listing.source}-{listing.external_id}"[:80],
+                image=listing.image_url,
+                title=listing.title[:80],
+                subtitle=price,
+                badges=[CarouselBadge(label=site_name(listing.source), variant="info")],
+                secondary_text=listing.location or None,
+                primary_cta=CtaAction(label="Watch for more", selection={"action": "watch"}),
+            )
+        )
+    return create_card_content(
+        CarouselCardPayload(
+            title="On other sites",
+            subtitle="Not Yardsale listings: open the links in the message to buy",
+            items=items,
+        ),
+        card_id=uuid4(),
+    )
+
+
 def _form_price(value: SelectionValue | None) -> int | None:
     """A price typed into the rules form: a number of dollars, or empty."""
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -871,6 +960,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     answered: OrderedDict[str, Reply | None] = OrderedDict()  # message ID -> reply, for resends
     follow_ups: set[asyncio.Task[None]] = set()  # keeps background replies from being collected
     fields = {f.name for f in dataclasses.fields(Conversation)} - {"key"}
+    finder = backend.finder
+    searching: dict[str, str] = {}  # conversation -> what to say while other sites are searched
 
     def load(key: str) -> Conversation:
         saved = store.load_conversation(key)
@@ -1199,6 +1290,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         conv.budget = budget_cents or conv.budget
         conv.results = [listing.item_id for listing in found]
         conv.selected = found[0].item_id if len(found) == 1 else None
+        conv.last_query = search_words(query) or conv.last_query
+        if not found and finder.enabled and search_words(query):
+            return look_elsewhere(conv, query, budget_cents, "Nothing on Yardsale matches")
         if not found:
             under = f" under {usd(budget_cents)}" if budget_cents else ""
             about = f' for "{query}"' if query else ""
@@ -1364,7 +1458,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             conv.awaiting = "max"
             return ASK_MAX
         conv.budget = max_cents
+        conv.last_query = search_words(query) or conv.last_query
         targets = haggle_targets(conv, query, max_cents)
+        if not targets and finder.enabled and search_words(query):
+            return look_elsewhere(
+                conv, query, max_cents, "Nothing on Yardsale is close enough to haggle over"
+            )
         if not targets:
             about = f' for "{query}"' if query else ""
             return (
@@ -1384,6 +1483,131 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             conv.counter = {"item_id": result.best_item_id, "cents": best}
             conv.awaiting = "counter"
         return Reply(haggle_text(result), haggle_card(result))
+
+    # --- Other sites ------------------------------------------------------------------------
+
+    def look_elsewhere(conv: Conversation, query: str, budget: int | None, lead: str) -> Reply:
+        """Search other sites after this reply's text, outside the lock (handle_safely)."""
+        words = search_words(query)
+        conv.last_query = words
+        conv.budget = budget or conv.budget
+        text = f'{lead} "{words}"{_under(budget)} right now, so I checked {finder.site_names()}.'
+        return Reply(text, elsewhere=(words, budget))
+
+    def asked_for(conv: Conversation, command: commands.Command) -> tuple[str, int | None]:
+        """The search and budget a "search other sites" or "watch" message is about: its own
+        words, or the buyer's last search when it has none ("watch for it")."""
+        words = search_words(command.text)
+        if words:
+            return words, command.amount_cents
+        return conv.last_query, command.amount_cents or conv.budget
+
+    def search_other_sites(conv: Conversation, command: commands.Command) -> str | Reply:
+        if not finder.enabled:
+            return SITES_OFF
+        query, budget = asked_for(conv, command)
+        if not query:
+            return 'What should I look for? Like "search other sites for a road bike under $300".'
+        conv.last_query = query
+        conv.budget = budget or conv.budget
+        return Reply(
+            f'Checking {finder.site_names()} for "{query}"{_under(budget)}.',
+            elsewhere=(query, budget),
+        )
+
+    async def with_deals_elsewhere(key: str, reply: Reply) -> Reply:
+        """The reply with the best deals on other sites added. While the sites are searched,
+        on_chat can say so if the answer is slow."""
+        assert reply.elsewhere is not None
+        query, budget = reply.elsewhere
+        searching[key] = f"{reply.text}\n\n{SEARCHING_ELSEWHERE}"
+        try:
+            found = await finder.find(query, budget)
+        except SourceError as ex:
+            return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
+        finally:
+            searching.pop(key, None)
+        text = f"{reply.text}\n\n{elsewhere_text(found, finder.site_names())}"
+        return Reply(text, elsewhere_card(found) or reply.card, reply.more)
+
+    def watch(conv: Conversation, command: commands.Command | None) -> str:
+        """A standing search over other sites (watches.py), from the message or the last search."""
+        if not finder.enabled:
+            return SITES_OFF
+        if command is None:  # the card's "Watch for more"
+            query, budget = conv.last_query, conv.budget
+        else:
+            query, budget = asked_for(conv, command)
+        try:
+            started = watches.start(
+                store, watches.new_watch(conv.owner, query, store.clock(), budget_cents=budget)
+            )
+        except watches.WatchError as ex:
+            return str(ex)
+        n = len(store.watches_for(conv.owner))
+        hours = int(started.every_seconds // 3600)
+        return (
+            f'OK. I\'ll check {finder.site_names()} for "{started.query}"{_under(budget)} every '
+            f"{hours} hours for a week, and tell you about anything new next time you message me. "
+            f'Say "my watches" to see what turned up, or "stop watching {n}".'
+        )
+
+    def my_watches(conv: Conversation) -> str:
+        """The buyer's watches, and anything new they found, which then counts as told."""
+        running = store.watches_for(conv.owner)
+        lines = ["You're watching:"] if running else ["You aren't watching anything now."]
+        for n, standing in enumerate(running, 1):
+            days = max(1, int(-(-(standing.expires_at - store.clock()) // 86400)))
+            lines.append(
+                f'{n}. "{standing.query}"{_under(standing.budget_cents)}, for {days} more day(s)'
+            )
+        # Findings of watches that have since ended are shown too, once.
+        news: list[str] = []
+        for standing in store.watches_for(conv.owner, running_only=False):
+            # Unpriced posts stay in (watches.affordable keeps them), after the priced ones.
+            hits = store.untold_hits(standing.watch_id)
+            fresh = sorted(hits, key=lambda x: (x.total_cents is None, x.total_cents or 0))[:10]
+            if fresh:
+                news.append(f'New for "{standing.query}":')
+                news += [deal_line(i, listing) for i, listing in enumerate(fresh, 1)]
+            store.mark_told(standing.watch_id)
+        if news:
+            lines += ["", *news, NOT_YARDSALE]
+        elif running:
+            lines.append("Nothing new has turned up yet.")
+        if running:
+            lines.append('Say "stop watching 1" to stop one.')
+        else:
+            lines.append(
+                'Say something like "watch for a road bike under $300" and I\'ll keep checking '
+                "other sites for a week."
+            )
+        return "\n".join(lines)
+
+    def unwatch(conv: Conversation, pick: int | None) -> str:
+        running = store.watches_for(conv.owner)
+        if not running:
+            return "You aren't watching anything."
+        if pick is None and len(running) == 1:
+            pick = 1
+        if pick is None:
+            return my_watches(conv) + '\nWhich one? Like "stop watching 2".'
+        if not 1 <= pick <= len(running):
+            return f"Pick a number from 1 to {len(running)}."
+        stopped = store.stop_watch(running[pick - 1].watch_id, conv.owner)
+        if stopped is None:
+            return "That one had already stopped."
+        store.mark_told(stopped.watch_id)  # so "found N new" stops mentioning it
+        return f'OK, I stopped watching for "{stopped.query}".'
+
+    def untold_note(conv: Conversation) -> str:
+        count = store.count_untold(conv.owner)
+        if not count:
+            return ""
+        return (
+            f'\n\n(Your watches found {count} new listing(s) on other sites. Say "my watches" to '
+            "see them.)"
+        )
 
     # --- Paying -----------------------------------------------------------------------------
 
@@ -1451,6 +1675,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return await accept(ctx, conv, item_id, open_price)
         if action == "paid":
             return await check_payments(conv)
+        if action == "watch":
+            return watch(conv, None)
         if action == "comp":
             return comp_details(conv, item_id, choice.get("n"))
         if action == "rules":
@@ -1514,6 +1740,14 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return await ebay_command(conv, command)
         if kind == "craigslist_end":
             return CRAIGSLIST_END
+        if command is not None and kind == "elsewhere":
+            return search_other_sites(conv, command)
+        if command is not None and kind == "watch":
+            return watch(conv, command)
+        if kind == "watches":
+            return my_watches(conv)
+        if command is not None and kind == "unwatch":
+            return unwatch(conv, command.pick)
         if command is not None and kind == "edit" and selling:
             return await change_prices(
                 ctx, conv, proposal, command.asking_cents, command.floor_cents, command.approve
@@ -1648,7 +1882,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 except PipelineError as ex:
                     reply = Reply(f"Sorry, that didn't go through. {ex}")
                 save(conv)
-                return Reply(notice + reply.text, reply.card, reply.more)
+                news = "" if reply.elsewhere else untold_note(conv)
+                return reply._replace(text=notice + reply.text + news)
             conv.pricing[photos[0].url] = backend.boot_id
             # Only the first photo is priced. The others count as seen so a repeated link
             # doesn't price them later; sending one again on its own makes a new upload.
@@ -1662,7 +1897,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     async def handle_safely(ctx: Context, key: str, msg: ChatMessage) -> Reply:
         try:
-            return await handle(ctx, key, msg)
+            reply = await handle(ctx, key, msg)
+            if reply.elsewhere is not None:
+                reply = await with_deals_elsewhere(key, reply)
+            return reply
         except Exception:
             ctx.logger.exception(f"Chat message in {key[:8]} failed")
             return Reply(SOMETHING_BROKE)
@@ -1717,7 +1955,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if done:
             reply = job.result()
         else:
-            reply = Reply(STILL_WORKING if photos_in(msg) else WORKING)
+            reply = Reply(STILL_WORKING if photos_in(msg) else searching.get(key, WORKING))
 
             async def send_when_done() -> None:
                 result = await job

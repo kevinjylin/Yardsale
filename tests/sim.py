@@ -43,6 +43,7 @@ from yardsale.hosting import HostingClient
 from yardsale.identifier import Identify
 from yardsale.payments import PaymentProvider
 from yardsale.researcher import Research
+from yardsale.sources import Source
 from yardsale.store import Store
 
 REPLY_TIMEOUT = 10.0
@@ -104,6 +105,7 @@ async def running_market(
     ebay: EbaySeller | None = None,
     mail: MailSettings | None = None,
     mailbox: Mailbox | None = None,
+    sources: dict[str, Source] | None = None,
 ) -> AsyncIterator[Market]:
     """The Market and friends in offline mode, with the store's active listings restored."""
     _, market, services = bureau_server.build(
@@ -122,6 +124,7 @@ async def running_market(
         ebay=ebay,
         mail=mail,
         mailbox=mailbox,
+        sources=sources,
     )
     rt = bureau_server.runtime()
     start([market, *services, *rt.agents.values()])
@@ -157,6 +160,7 @@ class ChatUser:
         self.session: UUID = session or uuid4()  # the same session continues a conversation
         self.replies: asyncio.Queue[ChatMessage] = asyncio.Queue()
         self.follow_ups: list[ChatMessage] = []  # sent after an answer, like the sales carousel
+        self.interim: list[str] = []  # "still searching other sites" replies, set aside
         self.acks = 0
         self.agent = Agent(
             name=name,
@@ -207,5 +211,7 @@ class ChatUser:
             reply = await self.next_reply()
             if any(marker in reply.text() for marker in FOLLOW_UPS):
                 self.follow_ups.append(reply)
+            elif reply.text().endswith(chat.SEARCHING_ELSEWHERE):
+                self.interim.append(reply.text())
             elif reply.text() not in (chat.STILL_WORKING, chat.WORKING):
                 return reply
