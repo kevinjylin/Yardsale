@@ -38,12 +38,22 @@ class ExternalListing:
     title: str
     price_cents: int | None  # None when there's no usable price ("contact me"); 0 means free
     url: str
-    location: str = ""  # as the site words it, such as "sunset / parkside"
+    location: str = ""  # as the site words it: "sunset / parkside", "San Jose, CA"
     image_url: str | None = None
-    latitude: float | None = None
+    latitude: float | None = None  # Craigslist gives these; eBay gives a place name only
     longitude: float | None = None
     posted_at: str = ""  # YYYY-MM-DD when the site gives one
+    condition: str = ""  # as the site words it: "Pre-Owned", "New". Classifieds rarely say.
+    shipping_cents: int | None = None  # None when unknown; 0 means free shipping
+    accepts_offers: bool = False  # the site lets a buyer send an offer, e.g. eBay Best Offer
     negotiable: bool = False  # nothing scraped is: there's no agent on the other end
+
+    @property
+    def total_cents(self) -> int | None:
+        """Price plus shipping, for comparing a posted item with one you'd drive to."""
+        if self.price_cents is None:
+            return None
+        return self.price_cents + (self.shipping_cents or 0)
 
     def searchable_text(self) -> str:
         """Public words a buyer's search can match, like `store.Listing.searchable_text`."""
