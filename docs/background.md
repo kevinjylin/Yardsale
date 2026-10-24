@@ -6,6 +6,15 @@ including seller approval, haggling, payment, hosting, and saved state.
 The Cal Hacks 13.0 plan (the pitch, what Fetch Business offers, what's missing, and the build
 order) is in [calhacks-plan.md](calhacks-plan.md).
 
+**Two products (decided October 24).** Sellers photograph their things and set minimums; each
+item gets an agent that lists it (on ASI:One, on `@yardsale`, and in a Craigslist post the
+seller pastes by hand) and haggles with every buyer automatically, never below the minimum.
+Buyers either find, haggle for, and buy Yardsale listings in ASI:One or through `@yardsale`, or,
+when nothing on Yardsale fits, use the deal finder: it searches eBay, Craigslist, and OfferUp
+under the buyer's max and can email a Craigslist seller to negotiate for them. Selling on the
+seller's own eBay is built but secondary. What's built and what's in progress is in
+[calhacks-plan.md](calhacks-plan.md#the-pitch).
+
 ## The idea
 
 1. A seller snaps a photo of an item.
