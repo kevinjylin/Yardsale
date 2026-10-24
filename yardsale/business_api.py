@@ -9,6 +9,8 @@ telling buyers to message the Market:
     GET  /haggles/{id}            a haggle that was still running when POST answered
     POST /haggles/{id}/accept     buy at the haggled price; returns the payment link
     GET  /deals/{id}              whether a deal is paid
+    GET  /other-sites             the best deals on eBay, Craigslist, OfferUp... under a max, for
+                                  when Yardsale has nothing (not Yardsale listings: links only)
     GET  /openapi.json            this API's description (no key needed)
     GET  /ebay/callback           where eBay sends a seller after connecting their account (no
                                   key; its one-time `state` is checked instead). Not a tool.
@@ -42,11 +44,13 @@ from uagents import Context
 from yardsale.chat import LOWEST_SHARE_REACH, STATUS_TEXT, Backend, haggle_text
 from yardsale.common import PipelineError
 from yardsale.ebay_seller import EbayError
+from yardsale.elsewhere import Found, search_words, site_name
 from yardsale.hosting import profile_url
 from yardsale.models import AcceptCounter, Counter, Deal, HaggleResult, OfferRejected
 from yardsale.payments import PaymentError
 from yardsale.pricing import PriceError, parse_usd, to_cents, usd, valid_cents
 from yardsale.search import search
+from yardsale.sources import ExternalListing
 from yardsale.store import AGENTVERSE, PENDING, Listing
 
 DEFAULT_PORT = 8110
@@ -122,6 +126,50 @@ def _listing_json(listing: Listing) -> dict[str, Any]:
     return data
 
 
+def _external_json(listing: ExternalListing) -> dict[str, Any]:
+    """A listing on another site, for @yardsale to show with its link."""
+    price, shipping, total = listing.price_cents, listing.shipping_cents, listing.total_cents
+    data: dict[str, Any] = {
+        "site": site_name(listing.source),
+        "title": listing.title,
+        "price_usd": dollars(price) if price is not None else None,
+        "shipping_usd": dollars(shipping) if shipping is not None else None,
+        "total_usd": dollars(total) if total is not None else None,
+        "url": listing.url,
+        "location": listing.location,
+        "condition": listing.condition,
+        "accepts_offers": listing.accepts_offers,
+    }
+    if listing.image_url:
+        data["image_url"] = listing.image_url
+    return data
+
+
+def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
+    failed = [site_name(name) for name in found.failed]
+    if found.listings:
+        next_step = (
+            "Show the buyer these deals with their links. They aren't Yardsale listings: "
+            "Yardsale's agents can't haggle for them or take payment, so the buyer opens the link "
+            "to buy from the seller. Craigslist sellers usually take offers by email."
+        )
+    else:
+        next_step = "Nothing fits on other sites either. Try other words or a higher max."
+    unsearched = f" ({', '.join(failed)} couldn't be searched)" if failed else ""
+    return {
+        "status": "done",
+        "count": len(found.listings),
+        "listings": [_external_json(listing) for listing in found.listings],
+        "searched": [site_name(name) for name in found.searched],
+        "failed": failed,
+        "summary": (
+            f"{len(found.listings)} deal(s) on {sites}{unsearched}. Best match first, then "
+            "cheapest total price."
+        ),
+        "next_step": next_step,
+    }
+
+
 def _amount(value: Any) -> int | None:
     """A max price from JSON: a number of dollars, or text like "$320"."""
     if isinstance(value, bool):
@@ -169,6 +217,7 @@ class BusinessApi:
         app.router.add_get("/haggles/{haggle_id}", self.get_haggle)
         app.router.add_post("/haggles/{haggle_id}/accept", self.accept)
         app.router.add_get("/deals/{deal_id}", self.get_deal)
+        app.router.add_get("/other-sites", self.other_sites)
         app.router.add_get(EBAY_CALLBACK, self.ebay_callback)
         return app
 
@@ -249,10 +298,45 @@ class BusinessApi:
                     "To get a lower price, call startHaggle with what the buyer wants and the most "
                     "they'll pay."
                     if found
+                    else "Nothing on Yardsale matches right now. Call searchOtherSites with the "
+                    "same q and max_usd to find deals on other sites, or try other words."
+                    if self.backend.finder.enabled
                     else "Nothing matches right now. Try other words or a higher budget."
                 ),
             }
         )
+
+    # --- Other sites ------------------------------------------------------------------------
+
+    async def other_sites(self, request: web.Request) -> web.Response:
+        """The best deals on other sites, waiting up to answer_within seconds. A search still
+        running keeps going, and the same q and max_usd pick it up (elsewhere.DealFinder)."""
+        finder = self.backend.finder
+        if not finder.enabled:
+            return _error(503, "Searching other sites is off on this server.", "sources_off")
+        query = request.query.get("q", "")[:200]
+        if not search_words(query):
+            return _error(400, 'Say what the buyer wants in q, like "road bike".', "bad_request")
+        budget = None
+        if "max_usd" in request.query:
+            budget = _amount(request.query["max_usd"])
+            if budget is None:
+                return _error(400, "max_usd must be a dollar amount, like 300.", "bad_amount")
+        task = finder.start(query, budget)
+        try:
+            found = await asyncio.wait_for(asyncio.shield(task), self.answer_within)
+        except TimeoutError:
+            return web.json_response(
+                {
+                    "status": "running",
+                    "count": 0,
+                    "listings": [],
+                    "summary": f"Yardsale is searching {finder.site_names()}.",
+                    "next_step": "Call searchOtherSites again with the same q and max_usd. It "
+                    "picks up the same search and waits for the result.",
+                }
+            )
+        return web.json_response(_other_sites_json(found, finder.site_names()))
 
     # --- Haggling ---------------------------------------------------------------------------
 
@@ -572,6 +656,21 @@ _LISTING = {
         },
     },
 }
+_EXTERNAL = {
+    "type": "object",
+    "properties": {
+        "site": {"type": "string", "description": "eBay, Craigslist, OfferUp, ..."},
+        "title": {"type": "string"},
+        "price_usd": {"type": "number", "nullable": True},
+        "shipping_usd": {"type": "number", "nullable": True, "description": "Unknown: null"},
+        "total_usd": {"type": "number", "nullable": True, "description": "Price plus shipping"},
+        "url": {"type": "string", "description": "The listing on its own site"},
+        "location": {"type": "string"},
+        "condition": {"type": "string"},
+        "accepts_offers": {"type": "boolean", "description": "The site lets the buyer offer"},
+        "image_url": {"type": "string"},
+    },
+}
 _HAGGLE = {
     "type": "object",
     "properties": {
@@ -804,6 +903,55 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                         }
                     ],
                     "responses": {"200": _ok(_DEAL, "The deal"), "404": _ERROR},
+                }
+            },
+            "/other-sites": {
+                "get": {
+                    "operationId": "searchOtherSites",
+                    "summary": "Find the best deals on other sites when Yardsale has none",
+                    "description": (
+                        "Use it when searchListings or startHaggle finds nothing on Yardsale. "
+                        "Searches eBay, Craigslist, OfferUp, and other sites once and returns the "
+                        "best few listings at or under max_usd (price plus shipping), best match "
+                        "first. These are NOT Yardsale listings: no haggling or payment through "
+                        "Yardsale, so give the buyer the links. Answers within about 25 seconds; "
+                        "if status is running, call it again with the same q and max_usd."
+                    ),
+                    "parameters": [
+                        {
+                            "name": "q",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": 'What the buyer wants, like "road bike"',
+                        },
+                        {
+                            "name": "max_usd",
+                            "in": "query",
+                            "schema": {"type": "number"},
+                            "description": "The most the buyer will pay, shipping included",
+                        },
+                    ],
+                    "responses": {
+                        "200": _ok(
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "status": {"type": "string", "enum": ["running", "done"]},
+                                    "count": {"type": "integer"},
+                                    "listings": {"type": "array", "items": _EXTERNAL},
+                                    "searched": {"type": "array", "items": {"type": "string"}},
+                                    "failed": {"type": "array", "items": {"type": "string"}},
+                                    "summary": {"type": "string"},
+                                    "next_step": {"type": "string"},
+                                },
+                            },
+                            "Deals on other sites, or a search still running",
+                        ),
+                        "400": _ERROR,
+                        "401": _ERROR,
+                        "503": _ERROR,
+                    },
                 }
             },
             "/openapi.json": {
