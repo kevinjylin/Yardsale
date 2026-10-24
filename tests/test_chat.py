@@ -1,180 +1,174 @@
-"""Sellers in the ASI:One chat: a test agent plays ASI:One and talks to the real Market over the
-Agent Chat Protocol. Claude, Apify, ASI:One's model, and photo downloads are fakes."""
+"""The ASI:One chat: test users play ASI:One and talk to the real Market over the Agent Chat
+Protocol. Claude, Apify, ASI:One's model, and photo downloads are fakes (tests/fakes.py)."""
 
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
-from uagents import Agent, Context, Protocol
+from uagents import Context
 from uagents_core.contrib.protocols.chat import (
-    ChatAcknowledgement,
     ChatMessage,
     MetadataContent,
     Resource,
     ResourceContent,
-    StartSessionContent,
-    TextContent,
-    chat_protocol_spec,
+)
+from uagents_core.contrib.protocols.chat.cards import (
+    Card,
+    CarouselCardPayload,
+    ReviewCardPayload,
+    extract_card,
 )
 
-from tests.fakes import (
-    BIKE,
-    fake_fetch,
-    fake_identify,
-    fake_judge,
-    fake_read,
-    fake_research,
-    jpeg_bytes,
-    run_agents,
-    slow_research,
-)
+from tests import fakes, sim
 from yardsale import bureau_server, chat, photos
-from yardsale.photos import PhotoError
-from yardsale.researcher import Research
+from yardsale.models import Comp
+from yardsale.store import ACTIVE, CANCELED, PROPOSED, Store
 
-PHOTO_URL = "https://res.cloudinary.com/asi1/image/upload/v1/bike.heic"
-STORAGE_URI = "agent-storage://agentverse.ai/v1/storage/3f2a"
-
-
-def message(
-    text: str = "",
-    photo: str | None = None,
-    mime_type: str = "image/heic",
-    start_session: bool = False,
-) -> ChatMessage:
-    content: list[Any] = [StartSessionContent(type="start-session")] if start_session else []
-    if text:
-        content.append(TextContent(type="text", text=text))
-    if photo:
-        resource = Resource(uri=photo, metadata={"mime_type": mime_type})
-        content.append(ResourceContent(type="resource", resource_id=uuid4(), resource=resource))
-    return ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=content)
+BIKE = fakes.photo_url("bike")
+ADDRESS = re.compile(r"agent1q[0-9a-z]{50,}")
 
 
-def reply_text(msg: ChatMessage) -> str:
-    return msg.text()
+async def listed_bike(market: sim.Market, text: str = "sell this, at least $300") -> str:
+    """A seller lists the bike (ask $360, lowest $300) and returns the item agent's address."""
+    seller = market.user("seller")
+    await seller.say(text, BIKE)
+    await seller.say("ask $360")
+    found = ADDRESS.search(await seller.say("approve"))
+    assert found
+    return found.group(0)
 
 
-async def converse(
-    messages: list[ChatMessage], replies_expected: int, research: Research = fake_research
-) -> tuple[list[ChatMessage], int]:
-    """Send each message after the previous one is answered; return the replies and acks."""
-    _, market, services = bureau_server.build(
-        True, fake_identify, research, fake_judge, read=fake_read, fetch=fake_fetch
-    )
-    replies: list[ChatMessage] = []
-    acks = 0
-    to_send = list(messages)
-    done = asyncio.Event()
-    proto = Protocol(spec=chat_protocol_spec)
-
-    @proto.on_message(ChatMessage)
-    async def on_reply(ctx: Context, sender: str, msg: ChatMessage) -> None:
-        replies.append(msg)
-        await ctx.send(
-            sender, ChatAcknowledgement(timestamp=datetime.now(UTC), acknowledged_msg_id=msg.msg_id)
-        )
-        if len(replies) >= replies_expected:
-            done.set()
-        elif to_send and reply_text(msg):
-            await ctx.send(sender, to_send.pop(0))  # same conversation (session) as before
-
-    @proto.on_message(ChatAcknowledgement)
-    async def on_ack(ctx: Context, sender: str, msg: ChatAcknowledgement) -> None:
-        nonlocal acks
-        acks += 1
-
-    asi_one = Agent(
-        name="test-asi-one",
-        seed=uuid4().hex,
-        loop=asyncio.get_running_loop(),
-        enable_agent_inspector=False,
-        publish_agent_details=False,
-    )
-    asi_one.include(proto)
-
-    @asi_one.on_event("startup")
-    async def start(ctx: Context) -> None:
-        await ctx.send(market.address, to_send.pop(0))
-
-    await run_agents([market, *services, asi_one], done)
-    return replies, acks
-
-
-async def test_photo_in_chat_becomes_an_item_agent() -> None:
-    replies, acks = await converse([message("Sell this, at least $300", PHOTO_URL)], 1)
-
-    text = reply_text(replies[0])
-    assert f"Your {BIKE.title} is for sale." in text
-    assert "Asking price: $340" in text
-    assert "Lowest price you'll take: $300" in text
-    assert "Based on 5 eBay sales of the same product" in text
-    assert acks == 1
-
-    rt = bureau_server.runtime()
-    (address, listing), *_ = rt.listings.items()
-    assert address in text
-    assert listing.floor_cents == 30000  # from the typed message, not the appraisal
-    assert listing.seller_id.startswith("asi1:session:")
+async def test_photo_becomes_a_proposal_not_a_listing(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    await seller.send(sim.chat_message("Sell this, at least $300", BIKE))
+    reply = await seller.next_reply()
+    text = reply.text()
+    assert "Here's my suggested listing for your Trek FX 2 Disc hybrid bike" in text
+    assert "Asking price: $340 (from recent eBay sales)" in text
+    assert "Lowest price you'll take: $300 (your price; buyers never see it)" in text
+    assert "Based on 6 eBay sales of the same product" in text
+    assert 'Reply "approve"' in text
+    assert seller.acks == 1
     # The first reply in a conversation tells ASI:One that uploads are welcome.
-    assert any(isinstance(c, MetadataContent) for c in replies[0].content)
+    assert any(isinstance(c, MetadataContent) for c in reply.content)
+    (proposal,) = store.owned(proposal_owner(store))
+    assert proposal.status == PROPOSED and proposal.seller_id.startswith("asi1:")
+    assert store.active() == []
 
 
-async def test_slow_pricing_answers_first_then_sends_the_result(
-    monkeypatch: pytest.MonkeyPatch,
+def proposal_owner(store: Store) -> str:
+    row = store._db.execute("SELECT owner FROM listings").fetchone()
+    return str(row["owner"])
+
+
+async def test_seller_edits_then_approves(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    await seller.say("sell this", BIKE)
+    reply = await seller.say("ask $360")
+    assert "Asking price: $360 (your price; recent eBay sales suggest $340)" in reply
+    reply = await seller.say("lowest 320")
+    assert "Lowest price you'll take: $320 (your price" in reply
+    reply = await seller.say("lowest 400")
+    assert "above your asking price" in reply
+    reply = await seller.say("approve")
+    assert "is for sale at $360" in reply
+    assert "isn't on the public Almanac" in reply  # offline: made here, registered nowhere
+    (listing,) = store.active()
+    assert listing.address and listing.address in reply
+    assert (listing.asking_cents, listing.floor_cents) == (36000, 32000)
+    assert bureau_server.runtime().agents[listing.item_id].address == listing.address
+    assert "nothing waiting" in (await seller.say("approve")).lower()
+
+
+async def test_cancel_lists_nothing(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    await seller.say("sell this", BIKE)
+    assert "Nothing was listed" in await seller.say("cancel")
+    assert store.active() == []
+    assert bureau_server.runtime().agents == {}
+
+
+async def test_other_conversations_cannot_touch_a_proposal(
+    market: sim.Market, store: Store
 ) -> None:
-    monkeypatch.setattr(chat, "REPLY_WITHIN", 0.2)
-    replies, _ = await converse([message("", PHOTO_URL)], 2, research=slow_research)
-    assert reply_text(replies[0]) == chat.STILL_WORKING
-    assert "is for sale" in reply_text(replies[1])
+    seller, mallory = market.user("seller"), market.user("mallory")
+    await seller.say("sell this, at least $300", BIKE)
+    for text in ("approve", "cancel", "ask $1", "my listings"):
+        reply = await mallory.say(text)
+        assert "$300" not in reply and "Trek" not in reply
+    (proposal,) = store.owned(proposal_owner(store))
+    assert (proposal.status, proposal.asking_cents) == (PROPOSED, 34000)
 
 
-async def test_a_repeated_photo_link_is_not_listed_twice() -> None:
-    # ASI:One's planner repeats earlier links when it relays the next message, so the answer
-    # is what happened to that photo, not a fresh listing or "attach a photo".
-    replies, _ = await converse(
-        [message("Sell this", PHOTO_URL), message(f"did you list it? [bike]({PHOTO_URL})")], 2
-    )
-    assert "is for sale" in reply_text(replies[0])
-    assert reply_text(replies[1]) == reply_text(replies[0])
-    assert len(bureau_server.runtime().listings) == 1
+async def test_slow_pricing_answers_first_then_sends_the_proposal(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(chat, "REPLY_WITHIN", 0.05)
+    release = asyncio.Event()
+
+    async def slow_research(query: str, condition: str, max_results: int) -> list[Comp]:
+        await release.wait()
+        return await fakes.research(query, condition, max_results)
+
+    async with sim.running_market(store, research=slow_research) as market:
+        seller = market.user("seller")
+        await seller.send(sim.chat_message("", BIKE))
+        assert (await seller.next_reply()).text() == chat.STILL_WORKING
+        release.set()
+        assert "suggested listing" in (await seller.next_reply()).text()
 
 
-async def test_a_repeated_photo_still_being_priced_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(chat, "REPLY_WITHIN", 0.2)
-    replies, _ = await converse(
-        [message("sell", PHOTO_URL), message("is it done?", PHOTO_URL)], 3, research=slow_research
-    )
-    texts = [reply_text(r) for r in replies]
-    assert texts[0] == chat.STILL_WORKING
-    assert chat.ALREADY_WORKING in texts
-    assert sum("is for sale" in t for t in texts) == 1
-    assert len(bureau_server.runtime().listings) == 1
+async def test_a_repeated_photo_link_is_not_priced_twice(market: sim.Market, store: Store) -> None:
+    # ASI:One's planner repeats earlier links when it relays the next message.
+    seller = market.user("seller")
+    await seller.say("Sell this", BIKE)
+    reply = await seller.say(f"thanks! [bike]({BIKE})")
+    assert "suggested listing" not in reply
+    assert len(store.owned(proposal_owner(store))) == 1
 
 
-async def test_a_session_start_gets_the_uploads_welcome_and_no_text() -> None:
-    # ASI:One opens a session with a StartSessionContent-only message. Fetch's examples answer
-    # it with the attachments metadata and nothing else.
-    replies, _ = await converse([message(start_session=True)], 1)
-    assert [type(c) for c in replies[0].content] == [MetadataContent]
-    assert replies[0].content[0].metadata == {"attachments": "true"}  # type: ignore[union-attr]
-    assert not bureau_server.runtime().listings
+async def test_a_photo_that_failed_can_be_sent_again(store: Store) -> None:
+    attempts = 0
+
+    async def flaky_fetch(ctx: Context, photo: chat.Photo) -> bytes:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise fakes.PhotoError("I couldn't download the photo (the link returned 502).")
+        return await fakes.fetch(ctx, photo)
+
+    async with sim.running_market(store, fetch=flaky_fetch) as market:
+        seller = market.user("seller")
+        assert "couldn't download" in await seller.say("sell", BIKE)
+        assert "suggested listing" in await seller.say("sell", BIKE)
 
 
-async def test_an_upload_in_agentverse_storage_is_listed() -> None:
-    replies, _ = await converse([message("sell this", STORAGE_URI, start_session=True)], 2)
-    assert [type(c) for c in replies[0].content] == [MetadataContent]
-    assert "is for sale" in reply_text(replies[1])
+async def test_a_resent_message_is_answered_again_not_redone(
+    market: sim.Market, store: Store
+) -> None:
+    seller = market.user("seller")
+    msg = sim.chat_message("sell", BIKE)
+    await seller.send(msg)
+    first = (await seller.next_reply()).text()
+    await seller.send(msg)
+    assert (await seller.next_reply()).text() == first
+    assert len(store.owned(proposal_owner(store))) == 1
 
 
-async def test_photo_link_in_the_text_is_used() -> None:
-    replies, _ = await converse([message(f"sell this ![photo]({PHOTO_URL})")], 1)
-    assert "is for sale" in reply_text(replies[0])
+async def test_no_close_sales_then_the_sellers_price(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    reply = await seller.say("sell this", fakes.photo_url("mug"))
+    assert "no recent eBay sales were close enough" in reply
+    reply = await seller.say("sell it for $18")
+    assert "Asking price: $18 (your price)" in reply
+    assert "Lowest price you'll take: $13 (70% of the asking price" in reply
+    assert "is for sale at $18" in await seller.say("approve")
 
 
 @pytest.mark.parametrize(
@@ -183,25 +177,120 @@ async def test_photo_link_in_the_text_is_used() -> None:
         ("hi, what do you do?", chat.HELP),
         ("I want to sell my bike", chat.NEEDS_PHOTO),
         ("I want to sell this, see the photo", chat.PHOTO_MISSING),
-        ("find me a cheap road bike", chat.BUYING_NOT_READY),
     ],
 )
-async def test_messages_without_a_photo(text: str, expected: str) -> None:
-    replies, _ = await converse([message(text)], 1)
-    assert reply_text(replies[0]) == expected
-    assert not bureau_server.runtime().listings
+async def test_messages_without_a_photo(market: sim.Market, text: str, expected: str) -> None:
+    assert await market.user("someone").say(text) == expected
 
 
-async def test_a_photo_that_cannot_be_downloaded_is_explained() -> None:
-    replies, _ = await converse([message("sell", "https://example.com/broken.jpg")], 1)
-    assert reply_text(replies[0]).startswith("I couldn't list this. I couldn't download")
+async def test_photo_problems_are_explained(market: sim.Market) -> None:
+    seller = market.user("seller")
+    reply = await seller.say("sell", "https://example.com/broken.jpg")
+    assert reply.startswith("I couldn't price this. I couldn't download")
+    reply = await seller.say("sell", fakes.photo_url("camera"))
+    assert "Apify returned 503" in reply
+
+
+async def test_a_buyer_finds_haggles_and_buys(market: sim.Market, store: Store) -> None:
+    address = await listed_bike(market)
+    buyer = market.user("buyer")
+    replies = [await buyer.say("find me a cheap hybrid bike under $400")]
+    assert "1. Trek FX 2 Disc hybrid bike, medium: $360 (good)" in replies[-1]
+    replies.append(await buyer.say("1"))
+    assert address in replies[-1]
+    replies.append(await buyer.say("offer $250"))
+    assert "countered with $305" in replies[-1]
+    replies.append(await buyer.say("yes"))  # a bare yes answers the counter-offer
+    assert "Deal! You agreed to buy the Trek FX 2 Disc hybrid bike, medium for $305" in replies[-1]
+    assert "No payment has been taken" in replies[-1]
+    for reply in replies:  # the floor never reaches a buyer
+        assert "$300" not in reply and "lowest" not in reply.lower()
+    (listing,) = store.owned(proposal_owner(store))
+    deal = store.deal_for(listing.item_id)
+    assert deal is not None and deal.price_cents == 30500
+    assert "Sold: Trek" in await market.users[0].say("my listings")
+
+
+async def test_buyer_mistakes(market: sim.Market) -> None:
+    await listed_bike(market)
+    buyer = market.user("buyer")
+    assert "looking for first" in await buyer.say("offer $200")
+    assert "no counter-offer" in await buyer.say("accept")
+    await buyer.say("bike")
+    assert "more than the asking price" in await buyer.say("offer $3600")
+    assert "between" in await buyer.say("offer $5,000,000")
+    assert "Pick a number from 1 to 1" in await buyer.say("tell me about 4")
+    assert "Nothing is for sale" in await buyer.say("find me a surfboard")
+
+
+async def test_sellers_cannot_buy_their_own_item(market: sim.Market) -> None:
+    await listed_bike(market)
+    seller = market.users[0]
+    assert "(yours)" in await seller.say("find me a bike")
+    assert "your own listing" in await seller.say("offer $360 on 1")
+
+
+async def test_competing_chat_buyers(market: sim.Market) -> None:
+    await listed_bike(market)
+    alice, bob = market.user("alice"), market.user("bob")
+    for buyer in (alice, bob):
+        await buyer.say("bike")
+    assert "countered" in await bob.say("offer $220")
+    replies = await asyncio.gather(alice.say("offer $360"), bob.say("accept"))
+    assert sum("Deal!" in reply for reply in replies) == 1
+    assert "no longer for sale" in await bob.say("offer $360")
+
+
+async def test_unlist(market: sim.Market, store: Store) -> None:
+    await listed_bike(market)
+    seller, buyer = market.users[0], market.user("buyer")
+    await buyer.say("bike")
+    assert "no longer for sale" in await seller.say("unlist")
+    assert store.active() == []
+    assert "no longer for sale" in await buyer.say("offer $300")
+    assert "Nothing is for sale" in await buyer.say("find me a bike")
+    listing = store.get(store.owned(proposal_owner(store))[0].item_id)
+    assert listing is not None and listing.status == CANCELED
+
+
+async def test_restart_keeps_listings_addresses_and_conversations(tmp_path: Path) -> None:
+    path = tmp_path / "listings.sqlite3"
+    store = Store(path)
+    async with sim.running_market(store) as market:
+        address = await listed_bike(market)
+        seller_session = market.users[0].session
+        await market.user("other").say("sell", fakes.photo_url("espresso"))  # left proposed
+    store.close()
+
+    store = Store(path)
+    async with sim.running_market(store) as market:
+        restored = bureau_server.runtime().agents
+        assert [agent.address for agent in restored.values()] == [address]
+        assert address in await market.user("seller", session=seller_session).say("my listings")
+        buyer = market.user("buyer")
+        await buyer.say("bike")
+        assert "countered" in await buyer.say("offer $250")
+        assert [listing.status for listing in store.active()] == [ACTIVE]
+    store.close()
+
+
+async def test_a_photo_lost_in_a_restart_is_mentioned(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    await seller.say("help")
+    (key,) = [row["key"] for row in store._db.execute("SELECT key FROM conversations")]
+    state = store.load_conversation(key)
+    state["pricing"] = {BIKE: "an-earlier-boot"}
+    store.save_conversation(key, state)
+    reply = await seller.say("hello?")
+    assert reply.startswith(chat.RESTARTED)
+    assert "suggested listing" in await seller.say("sell", BIKE)  # and it can be sent again
 
 
 def test_photos_are_found_in_resources_and_text() -> None:
-    msg = message(
+    msg = sim.chat_message(
         "@agent1qxyz sell these https://example.com/a.png. Listing like "
         "https://www.ebay.com/itm/123 isn't a photo",
-        PHOTO_URL,
+        BIKE,
     )
     msg.content.append(
         ResourceContent(
@@ -212,36 +301,175 @@ def test_photos_are_found_in_resources_and_text() -> None:
             ),
         )
     )
-    assert [p.url for p in chat.photos_in(msg)] == [PHOTO_URL, "https://example.com/a.png"]
+    assert [p.url for p in chat.photos_in(msg)] == [BIKE, "https://example.com/a.png"]
     assert chat.clean_text(msg) == (
         "sell these Listing like https://www.ebay.com/itm/123 isn't a photo"
     )
+
+
+def test_resource_link_can_be_in_metadata() -> None:
+    msg = sim.chat_message()
+    msg.content.append(
+        ResourceContent(
+            type="resource",
+            resource_id=uuid4(),
+            resource=Resource(
+                uri="agent-storage://abc", metadata={"mime_type": "image/jpeg", "url": BIKE}
+            ),
+        )
+    )
+    assert [p.url for p in chat.photos_in(msg)] == [BIKE]
+
+
+async def test_photo_link_in_the_text_is_used(market: sim.Market) -> None:
+    assert "suggested listing" in await market.user("seller").say(f"sell this ![photo]({BIKE})")
+
+
+def card_in(msg: ChatMessage) -> Card | None:
+    for block in msg.content:
+        if isinstance(block, MetadataContent) and (card := extract_card(block)) is not None:
+            return card
+    return None
+
+
+async def test_proposals_come_with_an_approve_card(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    reply = await seller.exchange(sim.chat_message("sell this, at least $300", BIKE))
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, ReviewCardPayload)
+    (proposal,) = store.owned(proposal_owner(store))
+    approve = card.payload.approve_cta.selection
+    assert approve == {"action": "approve", "item_id": proposal.item_id}
+    rows = {row.label: row.value for row in card.payload.summary_rows}
+    assert rows["Asking price"] == "$340"
+
+    # Another conversation tapping the same button gets nowhere.
+    assert "isn't waiting" in await market.user("mallory").tap(approve)
+    assert store.active() == []
+    assert "is for sale at $340" in await seller.tap(approve)
+    assert store.active()[0].item_id == proposal.item_id
+    assert "isn't waiting" in await seller.tap(approve)
+
+
+async def test_search_and_counter_cards(market: sim.Market, store: Store) -> None:
+    await listed_bike(market)
+    buyer = market.user("buyer")
+    results = await buyer.exchange(sim.chat_message("find me a bike"))
+    carousel = card_in(results)
+    assert carousel is not None and isinstance(carousel.payload, CarouselCardPayload)
+    (item,) = carousel.payload.items
+    assert "$300" not in item.model_dump_json()  # no floor in cards either
+    assert "Its agent:" in await buyer.tap(item.primary_cta.selection)
+
+    countered = await buyer.exchange(sim.chat_message("offer $250"))
+    counter = card_in(countered)
+    assert counter is not None and isinstance(counter.payload, ReviewCardPayload)
+    accept = counter.payload.approve_cta.selection
+    assert accept["cents"] == 30500
+    assert "isn't open anymore" in await buyer.tap({**accept, "cents": 30000})  # tampered
+    assert "isn't open anymore" in await market.user("mallory").tap(accept)
+    assert "Deal!" in await buyer.tap(accept)
+    deal = store.deal_for(item.id)
+    assert deal is not None and deal.price_cents == 30500
+
+
+async def test_dismissed_cards_and_json_taps(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    await seller.say("sell this", BIKE)
+    assert await seller.tap(None) == "OK."
+    (proposal,) = store.owned(proposal_owner(store))
+    # Some clients send the selection as JSON text instead (cards README).
+    tapped = f'{{"action": "cancel", "item_id": "{proposal.item_id}"}}'
+    assert "Nothing was listed" in await seller.say(tapped)
+
+
+# --- ASI:One uploads and session starts ----------------------------------------------------------
+
+
+async def test_an_upload_in_agentverse_storage_is_priced(market: sim.Market) -> None:
+    seller = market.user("seller")
+    reply = await seller.say("sell this", fakes.storage_uri("bike"))
+    assert "suggested listing for your Trek FX 2 Disc" in reply
+
+
+async def test_a_session_start_gets_the_uploads_welcome_and_no_text(market: sim.Market) -> None:
+    # ASI:One opens a session with a StartSessionContent-only message. Fetch's examples answer
+    # it with the attachments metadata and nothing else.
+    seller = market.user("seller")
+    await seller.send(sim.chat_message(start_session=True))
+    reply = await seller.next_reply()
+    assert [type(c) for c in reply.content] == [MetadataContent]
+    assert reply.content[0].metadata == {"attachments": "true"}
+
+
+async def test_a_session_start_with_a_photo_is_welcomed_then_priced(market: sim.Market) -> None:
+    seller = market.user("seller")
+    await seller.send(sim.chat_message("sell this", fakes.storage_uri("bike"), start_session=True))
+    welcome = await seller.next_reply()
+    assert [type(c) for c in welcome.content] == [MetadataContent]
+    proposal = await seller.next_reply()
+    assert "suggested listing" in proposal.text()
+    # The welcome already offered uploads, so the proposal doesn't repeat it.
+    assert not any(
+        getattr(c, "metadata", None) == {"attachments": "true"} for c in proposal.content
+    )
+
+
+async def test_a_repeated_photo_still_being_priced_says_so(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(chat, "REPLY_WITHIN", 0.05)
+    release = asyncio.Event()
+
+    async def slow_research(query: str, condition: str, max_results: int) -> list[Comp]:
+        await release.wait()
+        return await fakes.research(query, condition, max_results)
+
+    async with sim.running_market(store, research=slow_research) as market:
+        seller = market.user("seller")
+        await seller.send(sim.chat_message("sell", BIKE))
+        assert (await seller.next_reply()).text() == chat.STILL_WORKING
+        await seller.send(sim.chat_message("is it done?", BIKE))
+        assert (await seller.next_reply()).text() == chat.ALREADY_WORKING
+        release.set()
+        assert "suggested listing" in (await seller.next_reply()).text()
+    assert len(store.owned(proposal_owner(store))) == 1
+
+
+async def test_extra_photos_are_not_priced_when_repeated(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    msg = sim.chat_message(f"sell these ![espresso]({fakes.photo_url('espresso')})", BIKE)
+    reply = (await seller.exchange(msg)).text()
+    assert "Trek" in reply and "I used the first photo" in reply
+    assert "suggested listing" not in await seller.say(f"[espresso]({fakes.photo_url('espresso')})")
+    assert len(store.owned(proposal_owner(store))) == 1
 
 
 @pytest.mark.parametrize("mime_type", ["image", "jpeg", "IMAGE/JPEG", "application/octet-stream"])
 def test_image_link_is_used_whatever_its_mime_type(mime_type: str) -> None:
     # ASI:One's uploads are Cloudinary image links whose mime_type isn't always "image/...".
     url = "https://res.cloudinary.com/fetch-ai/image/upload/v1/chat-images/kmzr0d8"
-    msg = message("i wanna sell this", url, mime_type=mime_type)
+    msg = sim.chat_message("i wanna sell this", url, mime_type=mime_type)
     assert [p.url for p in chat.photos_in(msg)] == [url]
 
 
+def test_storage_uploads_are_photos_with_an_asset_id() -> None:
+    msg = sim.chat_message("sell", fakes.storage_uri("bike"))
+    (photo,) = chat.photos_in(msg)
+    assert photo.url == fakes.storage_uri("bike")
+    assert photo.resource_id == str(msg.content[1].resource_id)
+    assert chat.clean_text(msg) == "sell"
+
+
 def test_a_storage_upload_that_says_it_is_not_an_image_is_skipped() -> None:
-    assert chat.photos_in(message("sell", STORAGE_URI, mime_type="application/pdf")) == []
+    msg = sim.chat_message("sell", fakes.storage_uri("doc"), mime_type="application/pdf")
+    assert chat.photos_in(msg) == []
 
 
 def test_attachments_are_summarised_for_the_log() -> None:
-    summary = chat.attachments_summary(message("sell", STORAGE_URI, mime_type="image/jpeg"))
-    assert STORAGE_URI in summary and "mime_type='image/jpeg'" in summary
-    assert chat.attachments_summary(message("hi")) == "none"
-
-
-def test_storage_uploads_are_photos_with_an_asset_id() -> None:
-    msg = message("sell", STORAGE_URI, mime_type="image/jpeg")
-    (photo,) = chat.photos_in(msg)
-    assert photo.url == STORAGE_URI
-    assert photo.resource_id == str(msg.content[1].resource_id)  # type: ignore[union-attr]
-    assert chat.clean_text(msg) == "sell"
+    summary = chat.attachments_summary(sim.chat_message("sell", fakes.storage_uri("bike")))
+    assert fakes.storage_uri("bike") in summary and "mime_type='image/jpeg'" in summary
+    assert chat.attachments_summary(sim.chat_message("hi")) == "none"
 
 
 async def test_fetch_photo_uses_storage_for_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,45 +477,24 @@ async def test_fetch_photo_uses_storage_for_uploads(monkeypatch: pytest.MonkeyPa
 
     def fake_storage(identity: object, asset_id: str) -> bytes:
         downloaded.append((str(identity), asset_id))
-        return jpeg_bytes()
+        return fakes.photo_bytes("bike")
 
     async def link_is_dead(url: str) -> bytes:
-        raise PhotoError("I couldn't download the photo (the link returned 403).")
+        raise fakes.PhotoError("I couldn't download the photo (the link returned 403).")
 
     monkeypatch.setattr(chat, "download_from_storage", fake_storage)
     monkeypatch.setattr(chat, "download_photo", link_is_dead)
     ctx: Any = SimpleNamespace(
         agent=SimpleNamespace(identity="market-identity"), logger=SimpleNamespace(info=print)
     )
-    storage_photo = chat.Photo(url=STORAGE_URI, mime_type="image/jpeg", resource_id="3f2a")
-    assert await chat.fetch_photo(ctx, storage_photo) == jpeg_bytes()
-    # A web link that doesn't open falls back to storage when the upload has an asset id.
-    linked = chat.Photo(url=PHOTO_URL, mime_type="image/jpeg", resource_id="9c1d")
-    assert await chat.fetch_photo(ctx, linked) == jpeg_bytes()
+    upload = chat.Photo(url=fakes.storage_uri("3f2a"), mime_type="image/jpeg", resource_id="3f2a")
+    assert await chat.fetch_photo(ctx, upload) == fakes.photo_bytes("bike")
+    # A web link that doesn't open falls back to storage when the upload has an asset ID.
+    linked = chat.Photo(url=BIKE, mime_type="image/jpeg", resource_id="9c1d")
+    assert await chat.fetch_photo(ctx, linked) == fakes.photo_bytes("bike")
     assert downloaded == [("market-identity", "3f2a"), ("market-identity", "9c1d")]
-    with pytest.raises(PhotoError):
-        await chat.fetch_photo(ctx, chat.Photo(url=PHOTO_URL, mime_type="image/jpeg"))
-
-
-def test_resource_link_can_be_in_metadata() -> None:
-    msg = message()
-    msg.content.append(
-        ResourceContent(
-            type="resource",
-            resource_id=uuid4(),
-            resource=Resource(
-                uri="agent-storage://abc", metadata={"mime_type": "image/jpeg", "url": PHOTO_URL}
-            ),
-        )
-    )
-    assert [p.url for p in chat.photos_in(msg)] == [PHOTO_URL]
-
-
-def test_prices_in_replies_read_naturally() -> None:
-    assert chat.usd(34000) == "$340"
-    assert chat.usd(1250) == "$12.50"
-    assert chat.to_cents(39.99) == 3999
-    assert chat.to_cents(0) is None
+    with pytest.raises(fakes.PhotoError):
+        await chat.fetch_photo(ctx, chat.Photo(url=BIKE, mime_type="image/jpeg"))
 
 
 def test_storage_download_refuses_garbled_base64(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -299,5 +506,5 @@ def test_storage_download_refuses_garbled_base64(monkeypatch: pytest.MonkeyPatch
             return {"contents": "not base64!!"}
 
     monkeypatch.setattr(photos, "ExternalStorage", GarbledStorage)
-    with pytest.raises(PhotoError):
-        photos.download_from_storage(object(), "3f2a")  # type: ignore[arg-type]
+    with pytest.raises(photos.PhotoError):
+        photos.download_from_storage(object(), "3f2a")

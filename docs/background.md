@@ -1,18 +1,19 @@
 # Background and decisions
 
-This page records Yardsale's product decisions and prototype behavior during Cal Hacks 13.0.
+This page records Yardsale's product decisions and prototype behavior during Cal Hacks 13.0,
+including seller approval, buying in the chat, and saved state.
 
 ## The idea
 
 1. A seller snaps a photo of an item.
-2. About 20 seconds later, the item is a live agent with its own address. It knows the seller's
-   secret lowest price.
+2. About 20 seconds later, Yardsale suggests a listing. Once the seller approves, the item is a
+   live agent with its own address. It knows the seller's secret lowest price.
 3. A buyer asks ASI:One something like "find me a cheap road bike." ASI:One reaches Yardsale, and
    Yardsale connects the buyer to the matching item agents.
 4. Item agents counter lowballs and close deals. The seller keeps the money.
 
-**Demo moment:** the item agent's address appears right after the photo upload. That's the visual
-proof judges will remember.
+**Demo moment:** the item agent's address appears right after the seller approves the listing.
+That's the visual proof judges will remember.
 
 ## Decisions
 
@@ -59,7 +60,8 @@ proof judges will remember.
 Buyer flow: ASI:One → `@yardsale` → Market agent → item agent. The Market relays replies back.
 
 Seller flow: ASI:One chat (photo + text) → Market → Identifier → Researcher → Appraiser →
-Market → new item agent → reply in the chat. The next sections cover it.
+Market → proposal in the chat → seller approves → new item agent → address in the chat. The next
+sections cover it.
 
 ## Selling in the ASI:One chat
 
@@ -73,10 +75,17 @@ Code: [yardsale/chat.py](../yardsale/chat.py) and [yardsale/asione.py](../yardsa
    arrive as a plain web link instead, in the resource or in the text; those are downloaded
    directly. The Market fixes the rotation and shrinks the photo to a 1280 px JPEG. HEIC works.
 3. `asi1-mini` reads the text into an intent (sell, buy, other), an asking price, a lowest
-   price, and a note such as "size M". It uses a strict JSON schema. If ASI:One is down or
-   `ASI_ONE_API_KEY` isn't set, the photo still lists at the appraised price.
-4. The photo goes through the pipeline below. The reply gives the item, the asking and lowest
-   prices, the three closest eBay sales as links, and the item agent's address.
+   price, a note such as "size M", and for buyers a search and a budget. It uses a strict JSON
+   schema. If ASI:One is down or `ASI_ONE_API_KEY` isn't set, a keyword reader
+   (`read_locally`) does the same job more roughly.
+4. The photo goes through the pipeline below. The reply is a proposal: the item, the asking and
+   lowest prices and where each came from, and the three closest eBay sales as links. Nothing is
+   listed yet.
+5. The seller replies `approve`, changes a price (`ask $360`, `lowest $280`), or `cancel`.
+   [commands.py](../yardsale/commands.py) reads these with patterns, not a model, so a misread
+   can't approve anything. Approving starts the item agent and the reply gives its address. If
+   no sales were close enough, the reply asks for the seller's price, and that makes the
+   proposal.
 
 Rules learned from Maestro's live testing:
 
@@ -85,13 +94,44 @@ Rules learned from Maestro's live testing:
   "still working" and then the result as a second message.
 - **Acknowledge every message first** (`ChatAcknowledgement`), before any slow work.
 - **The planner repeats earlier links** in later messages, so each conversation remembers the
-  photos it has already listed.
+  photos it has already priced. A photo that failed can be sent again.
 - **One conversation is one session**, not one sender. The planner relays many users from one
-  address, so listings record the session as the seller ID (`asi1:session:...`).
+  address, so a conversation is identified by a hash of its session ID (`asi1:<hash>`). It owns
+  its proposals and listings; no other conversation can approve, change, or cancel them, or see
+  their floors.
 - **The first reply carries `{"attachments": "true"}` metadata**, which tells ASI:One the agent
-  accepts uploads.
+  accepts uploads. A session that opens with a `StartSessionContent`-only message gets just that
+  metadata and no text, as in Fetch's own examples.
+- **A repeated photo that's still being priced** gets "I'm still pricing that photo" instead of
+  the help text.
 
-Only the first photo in a message is used. Buyers asking in the chat get "not ready yet".
+Only the first photo in a message is used; the others count as seen, so a repeated link doesn't
+price them later. A photo link counts whatever its `mime_type` says, since ASI:One doesn't always
+send a full `image/...`, and each message's attachments are logged (URI, type, metadata keys, never
+the text). A message ASI:One sends twice (same message ID) gets
+the same answer again instead of being acted on twice.
+
+## Buying in the ASI:One chat
+
+1. The buyer asks for something ("find me a cheap road bike under $300"). The Market searches
+   active listings by word ([search.py](../yardsale/search.py)), with no paid service. A budget
+   filters on the asking price only, so results never hint at a floor.
+2. The buyer picks a result by number, or offers straight away (`offer $250 on 2`).
+3. The Market sends the offer to the item agent with the conversation as `buyer_ref`. Item agents
+   accept `buyer_ref` only from the Market, so no other agent can act as a chat buyer.
+4. At or above the floor, the deal closes at the offer. Below it, the agent counters halfway to
+   the asking price, never below the floor ([negotiation.py](../yardsale/negotiation.py)).
+5. `accept` takes the buyer's own latest counter at its exact price, within 24 hours. Two buyers
+   can't both buy: closing a deal is a conditional update that only one can win.
+
+## Saved state
+
+[store.py](../yardsale/store.py) keeps listings, proposals, counter-offers, deals, and chat
+conversation state in SQLite, one file per mode. Listings move `proposed → active → sold`, or to
+`canceled`. On start, the Bureau re-creates the agent of every active listing; seeds come from
+the item ID, so addresses don't change. Approval starts the agent before marking the listing
+active, so an interrupted approval leaves a proposal, never a live listing without an agent. A
+photo still being priced when the server stops is lost; the seller is told to send it again.
 
 ## Photo to listing
 
@@ -103,7 +143,7 @@ they come with an optional note and the seller's own asking or lowest price.
 | 1 | Identifier | Claude looks at the photo and returns brand, model, condition, details, and an eBay search query. It flags generic items, like an unbranded mug. | [identifier.py](../yardsale/identifier.py) |
 | 2 | Researcher | Searches eBay **sold** listings from the last 90 days through the Apify actor `caffein.dev/ebay-sold-listings`, up to 20 results. It returns each sale's title, price, condition, date, link, and photo. | [researcher.py](../yardsale/researcher.py) |
 | 3 | Appraiser | Claude compares the seller's photo with each sale's title and photo (up to 10 photos), and marks each sale as the same product or not, plus a 0–1 similarity score. The price is then worked out in code, not by Claude. | [appraiser.py](../yardsale/appraiser.py) |
-| 4 | Market | Sends the seller the appraisal, then spawns the item agent with that price. | [bureau_server.py](../yardsale/bureau_server.py) |
+| 4 | Market | Saves a proposal with the prices and sends it to the seller. Spawns the item agent once the seller approves. | [bureau_server.py](../yardsale/bureau_server.py) |
 
 **How "is this the same item?" is decided.** Claude judges each eBay sale against the photo.
 "Same product" means same brand, model, and any variant or size that changes the price. Bundles,
@@ -120,13 +160,17 @@ reason, and the seller sees which sales the price came from.
   list price for those, not what the buyer paid.
 - Asking price is the median. Lowest price is the higher of the lower quartile and 70% of the
   median. Both are rounded the way a person would price: $1 steps under $20, $5 under $100, and
-  $10 above that.
-- A price the seller gives always wins over the appraisal.
+  $10 above that. Halves round up (the first prototype used Python's `round()`, which rounds
+  halves to even, so a $105 floor became $100; it's now $110). The math uses exact fractions.
+- A price the seller gives always wins over the appraisal. The first prototype could raise a
+  seller's asking price to the appraised floor; now the floor drops below the seller's price
+  instead. [README](../README.md#pricing-rules) has the full rules.
 
 **Agent messages.** The Market tags each request with an ID and waits for the reply with the same
 ID: up to 180 s for the Identifier and 240 s each for the Researcher and Appraiser. If a service
 fails or times out, the seller gets a `ListingRejected` with the reason, for example "APIFY_TOKEN
-is not set". All three services handle requests concurrently, so several photos can be in
+is not set". Agents other than the chat send `ListPhoto`, get `Proposed`, and answer with
+`ApproveListing` or `CancelListing`; only the agent that sent the photo can. All three services handle requests concurrently, so several photos can be in
 progress at once. Message types are in [models.py](../yardsale/models.py), and each agent's
 Agentverse profile text is in [yardsale/readmes/](../yardsale/readmes/).
 
@@ -152,32 +196,34 @@ per agent, because agent addresses come from the master seed and don't change.
 
 ## Not built or unknown
 
-- **Public address.** Agents are reachable only at `127.0.0.1`. ASI:One needs the server on a hosted
-  machine or behind a tunnel such as ngrok, with that public URL as the Bureau endpoint.
+- **Public address.** `YARDSALE_PUBLIC_URL` sets the URL item agents advertise. It's untested:
+  the server needs a hosted machine or a tunnel such as ngrok.
 - **ASI:One end to end.** The Market speaks the Chat Protocol, publishes it to Agentverse, and
-  has a mailbox, and tests cover the chat flow with fakes. Nobody has sent it a photo from the real
-  ASI:One app yet, and whether ASI:One's planner routes "sell this" to it without an @mention is
-  unknown.
-- **Buyers in the chat.** "Find me a cheap road bike" gets "not ready yet". Search over live
-  listings and haggling through chat are next on the buyer side.
-- **Live buyer test needs the Market connected.** In live mode the Market's Almanac entry now
-  points at its Agentverse mailbox, so `buyer_test` without `--offline` only reaches it once it's
+  has a mailbox, and tests cover selling and buying with fakes. Nobody has sent it a photo from
+  the real ASI:One app yet. Unknown: whether upload links download without authentication,
+  whether one chat keeps one session ID, and whether the planner routes "sell this" to it without
+  an @mention.
+- **Real keys.** The pipeline hasn't run with real Claude and Apify keys or a real photo, so
+  matching quality and Apify's response time are unproven.
+- **Live buyer test needs the Market connected.** In live mode the Market's Almanac entry points
+  at its Agentverse mailbox, so `buyer_test` without `--offline` only reaches it once it's
   connected to Agentverse.
 - **`@yardsale` handing off to our agents.** Unknown whether a Fetch Business agent can pass buyers
   to an outside uAgent address. Fallback: run everything on Agentverse and pitch Fetch Business as
-  the graduation path for power sellers.
-- **Photo to listing with real keys.** The pipeline above is built and tested offline with fake
-  Claude and Apify answers, and the three agents register and publish their protocols in live mode.
-  It hasn't run yet with real Claude and Apify keys or a real photo, so matching quality and
-  Apify's response time are unproven.
-- **Seller confirms the price.** The item agent goes live as soon as the appraisal is done. There
-  is no step yet where the seller approves or edits the price first.
-- **"Offline" isn't fully offline.** `--offline` skips the Almanac and Agentverse, but photo
-  listings still call Claude and Apify. uAgents also checks the Fetch ledger each time an agent is
-  created; without a network it logs a warning and carries on.
-- **Payments.** None yet. A closed deal is only an agreed price.
-- **Persistence.** Listings live in memory, so a restart forgets them. Seeds come from item IDs, so
-  re-creating stored items on boot would bring back the same addresses.
+  the graduation path for power sellers. No code depends on it.
+- **Telling sellers about a sale.** The seller sees a sale under "my listings"; Yardsale doesn't
+  message them when it happens.
+- **Interactive Cards in the real app.** Proposals, search results, and counter-offers carry cards
+  built with the installed `uagents_core.contrib.protocols.chat.cards` module (Approve, Details,
+  Accept buttons; metadata only, no protocol digest change). Whether ASI:One shows them is
+  unverified, so every reply also works as plain text and typed commands do the same things.
+- **Payments.** None. A deal records `payment_status="not_collected"`.
+- **Sold or canceled items on the Almanac.** Their entries stay until they expire; the agent turns
+  down offers, and after a restart it isn't re-created.
+
+Fixed on October 23: "offline" mode and the tests used to call Fetch's ledger and Almanac every
+time an agent was created or started. `offline.stay_offline()` stops that, and the tests fail if
+anything reaches beyond localhost.
 
 ## Fetch Business to-dos from the chat
 
@@ -200,6 +246,7 @@ These were planned in the chat; whether they're done wasn't recorded.
 ## Code to borrow from Maestro
 
 Maestro ([LA Hacks repo](https://github.com/RogueL90/LA-Hacks-AI-Hackathon)) has working
-code for things Yardsale doesn't do yet: Interactive Cards (tap-to-choose replies in ASI:One,
-which could let a seller approve the price) and the Payment Protocol with Stripe test mode. It
-uses uagents 0.26.1; Yardsale is pinned below 0.26.
+code for things Yardsale doesn't do yet: the Payment Protocol with Stripe test mode, and a
+working example of Interactive Cards in the real ASI:One app. It uses
+uagents 0.26.1; Yardsale is pinned below 0.26 because it relies on Bureau and agent internals
+tested on 0.25.5.

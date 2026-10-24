@@ -45,7 +45,16 @@ def completion(fields: dict[str, Any]) -> Answer:
 async def test_typed_prices_and_notes_are_read(asi_one: tuple[list[Any], list[Answer]]) -> None:
     requests, answers = asi_one
     answers.append(
-        completion({"intent": "sell", "asking_usd": 60, "floor_usd": 45, "note": "size M"})
+        completion(
+            {
+                "intent": "sell",
+                "asking_usd": 60,
+                "floor_usd": 45,
+                "note": "size M",
+                "query": "",
+                "budget_usd": None,
+            }
+        )
     )
 
     message = await asione.read_seller_message("List this for $60, at least 45. Size M", True)
@@ -57,12 +66,29 @@ async def test_typed_prices_and_notes_are_read(asi_one: tuple[list[Any], list[An
     assert body["response_format"]["type"] == "json_schema"
     assert body["response_format"]["json_schema"]["strict"] is True
     assert "Photo attached: yes" in body["messages"][1]["content"]
+    assert set(body["response_format"]["json_schema"]["schema"]["required"]) == {
+        "intent",
+        "asking_usd",
+        "floor_usd",
+        "note",
+        "query",
+        "budget_usd",
+    }
 
 
 async def test_a_photo_is_always_a_sale(asi_one: tuple[list[Any], list[Answer]]) -> None:
     _, answers = asi_one
     answers.append(
-        completion({"intent": "other", "asking_usd": None, "floor_usd": None, "note": ""})
+        completion(
+            {
+                "intent": "other",
+                "asking_usd": None,
+                "floor_usd": None,
+                "note": "",
+                "query": "",
+                "budget_usd": None,
+            }
+        )
     )
     assert (await asione.read_seller_message("what do you think?", True)).intent == "sell"
 
@@ -75,15 +101,44 @@ async def test_a_photo_is_always_a_sale(asi_one: tuple[list[Any], list[Answer]])
         (200, {"choices": []}),
     ],
 )
-async def test_asi_one_trouble_falls_back_to_defaults(
+async def test_asi_one_trouble_falls_back_to_the_local_reader(
     asi_one: tuple[list[Any], list[Answer]], answer: Answer
 ) -> None:
     _, answers = asi_one
     answers.append(answer)
     message = await asione.read_seller_message("sell this for $50", True)
-    assert message == asione.fallback(has_photo=True)
+    assert message == asione.read_locally("sell this for $50", True)
+    assert message.asking_usd == 50
 
 
 async def test_no_key_means_no_request() -> None:
     message = await asione.read_seller_message("sell my bike", False)  # conftest clears the key
-    assert message == asione.fallback(has_photo=False)
+    assert message.intent == "sell"
+
+
+@pytest.mark.parametrize(
+    ("text", "has_photo", "expected"),
+    [
+        ("sell this, at least $40, small dent", True, ("sell", None, 40, "small dent")),
+        (
+            "List this jacket for $60. Size M, worn twice.",
+            True,
+            ("sell", 60, None, "Size M, worn twice"),
+        ),
+        ("", True, ("sell", None, None, "")),
+        ("I want to sell my bike", False, ("sell", None, None, "")),
+        ("hi, what do you do?", False, ("other", None, None, "")),
+    ],
+)
+def test_local_reader_for_sellers(
+    text: str, has_photo: bool, expected: tuple[str, float | None, float | None, str]
+) -> None:
+    message = asione.read_locally(text, has_photo)
+    assert (message.intent, message.asking_usd, message.floor_usd, message.note) == expected
+
+
+def test_local_reader_for_buyers() -> None:
+    message = asione.read_locally("find me a cheap road bike under $300", False)
+    assert (message.intent, message.query, message.budget_usd) == ("buy", "cheap road bike", 300)
+    message = asione.read_locally("do you have any espresso machines?", False)
+    assert (message.intent, message.query) == ("buy", "espresso machines")

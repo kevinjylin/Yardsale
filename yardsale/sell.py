@@ -2,11 +2,12 @@
 
     uv run python -m yardsale.sell photo.jpg
     uv run python -m yardsale.sell photo.heic --note "size M, worn twice" --floor 40
-    uv run python -m yardsale.sell photo.jpg --offline
 
 The photo is resized and sent to the Market. The Identifier, Researcher, and Appraiser work out
-what it is and what it's worth, then the Market spawns a live agent for it. This prints each
-step, the eBay sales behind the price, and the new item agent's address. Exits 0 once listed.
+what it is and what it's worth, and the Market proposes a listing. This prints each step and the
+eBay sales behind the price, then asks you to approve, change the prices, or cancel (--yes
+approves without asking). Once approved, the Market spawns the item agent and this prints its
+address. Exits 0 once listed.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ import argparse
 import asyncio
 import logging
 import sys
-from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -24,6 +24,7 @@ from uagents.registration import AlmanacApiRegistrationPolicy
 from uagents.resolver import Resolver
 from uagents_core.registration import AgentRegistrationPolicy
 
+from yardsale.commands import seller_prices
 from yardsale.common import (
     MARKET_FILE,
     SELLER_PORT,
@@ -34,9 +35,19 @@ from yardsale.common import (
     read_json,
     wait_until,
 )
-from yardsale.models import Appraised, Listed, ListingRejected, ListingUpdate, ListPhoto
-from yardsale.offline import LocalDirectoryResolver, NoRegistration, publish_locally
+from yardsale.models import (
+    Appraised,
+    ApproveListing,
+    CancelListing,
+    Listed,
+    ListingRejected,
+    ListingUpdate,
+    ListPhoto,
+    Proposed,
+)
+from yardsale.offline import LocalDirectoryResolver, NoRegistration, publish_locally, stay_offline
 from yardsale.photos import PhotoError, load_photo
+from yardsale.pricing import PriceError, parse_usd
 
 log = logging.getLogger("yardsale.sell")
 
@@ -46,7 +57,8 @@ def print_appraisal(msg: Appraised) -> None:
     print(f"\nItem: {item.title}")
     maker = " ".join(part for part in (item.brand, item.model) if part) or "no brand or model seen"
     print(f"  {maker} | {item.category} | condition: {item.condition} | sure: {item.confidence}")
-    print(f"\neBay: checked {appraisal.comps_considered} sales. Based on {appraisal.basis}.")
+    basis = appraisal.basis if appraisal.asking_cents is None else f"Based on {appraisal.basis}."
+    print(f"\neBay: checked {appraisal.comps_considered} sales. {basis}")
     for match in appraisal.matches[:10]:
         kind = "same" if match.same_product else f"~{match.similarity:.0%}"
         best_offer = " (best offer)" if match.comp.best_offer else ""
@@ -66,6 +78,43 @@ def print_appraisal(msg: Appraised) -> None:
         )
 
 
+async def decide(msg: Proposed, auto_approve: bool) -> ApproveListing | CancelListing | None:
+    """Ask the seller about the proposal. None means there's no one to ask."""
+    asking, floor = msg.asking_cents, msg.floor_cents
+    print(
+        f"\nProposed: '{msg.title}' asking {dollars(asking)} ({msg.asking_from}), lowest "
+        f"{dollars(floor)} ({msg.floor_from}; buyers never see it)"
+    )
+    if auto_approve:
+        return ApproveListing(listing_ref=msg.listing_ref)
+    if not sys.stdin.isatty():
+        print("Not approved: rerun with --yes to approve without asking.", file=sys.stderr)
+        return None
+    while True:
+        answer = await asyncio.to_thread(
+            input, "Approve? [y]es, [n]o, or new prices like 'ask 120 floor 90': "
+        )
+        answer = answer.strip().lower()
+        if answer in ("y", "yes"):
+            changed = (asking, floor) != (msg.asking_cents, msg.floor_cents)
+            return ApproveListing(
+                listing_ref=msg.listing_ref,
+                asking_cents=asking if changed else None,
+                floor_cents=floor if changed else None,
+            )
+        if answer in ("n", "no", "cancel"):
+            return CancelListing(listing_ref=msg.listing_ref)
+        new_asking, new_floor, error = seller_prices(answer)
+        if error or (new_asking is None and new_floor is None):
+            print(error or "Type y, n, or prices like 'ask 120 floor 90'.")
+            continue
+        if (new_floor or floor) > (new_asking or asking):
+            print("The lowest price can't be above the asking price.")
+            continue
+        asking, floor = new_asking or asking, new_floor or floor
+        print(f"Now: asking {dollars(asking)}, lowest {dollars(floor)}.")
+
+
 async def main(args: argparse.Namespace) -> int:
     if not MARKET_FILE.exists():
         print("Start bureau_server first; it writes the Market address.", file=sys.stderr)
@@ -76,10 +125,20 @@ async def main(args: argparse.Namespace) -> int:
         return 2
     market: str = market_info["address"]
     try:
+        asking_cents, floor_cents = _cents(args.ask), _cents(args.floor)
+    except PriceError as ex:
+        print(ex, file=sys.stderr)
+        return 2
+    if asking_cents and floor_cents and floor_cents > asking_cents:
+        print("--floor can't be above --ask.", file=sys.stderr)
+        return 2
+    try:
         image_b64, media_type = load_photo(args.photo)
     except (OSError, PhotoError) as ex:
         print(f"Can't use {args.photo}: {ex}", file=sys.stderr)
         return 2
+    if args.offline:
+        stay_offline()
     print(f"Photo ready ({len(image_b64) * 3 // 4 // 1024} KB). Sending it to the Market...")
 
     done = asyncio.Event()
@@ -94,13 +153,21 @@ async def main(args: argparse.Namespace) -> int:
     async def on_appraised(ctx: Context, sender: str, msg: Appraised) -> None:
         print_appraisal(msg)
 
+    @proto.on_message(Proposed)
+    async def on_proposed(ctx: Context, sender: str, msg: Proposed) -> None:
+        decision = await decide(msg, args.yes)
+        if decision is None:
+            done.set()
+        else:
+            await ctx.send(sender, decision)
+
     @proto.on_message(Listed)
     async def on_listed(ctx: Context, sender: str, msg: Listed) -> None:
         nonlocal exit_code
         print(
             f"\nListed '{msg.title}' at {dollars(msg.asking_cents)}.\n"
             f"Its agent is live at {msg.item_address} "
-            f"(on the Almanac: {'yes' if msg.almanac_registered else 'no'})"
+            f"(on the public Almanac: {'yes' if msg.almanac_registered else 'no'})"
         )
         exit_code = 0
         done.set()
@@ -149,8 +216,8 @@ async def main(args: argparse.Namespace) -> int:
                 image_b64=image_b64,
                 media_type=media_type,
                 note=args.note,
-                asking_cents=_cents(args.ask),
-                floor_cents=_cents(args.floor),
+                asking_cents=asking_cents,
+                floor_cents=floor_cents,
             ),
         )
 
@@ -167,7 +234,7 @@ async def main(args: argparse.Namespace) -> int:
 
 
 def _cents(amount: str | None) -> int | None:
-    return None if amount is None else int(Decimal(amount) * 100)
+    return None if amount is None else parse_usd(amount)
 
 
 if __name__ == "__main__":
@@ -177,6 +244,7 @@ if __name__ == "__main__":
     parser.add_argument("--ask", help="your asking price in dollars (default: from eBay sales)")
     parser.add_argument("--floor", help="your lowest price in dollars (default: from eBay sales)")
     parser.add_argument("--seller", default="me", help="seller ID stored with the listing")
+    parser.add_argument("--yes", action="store_true", help="approve the proposal without asking")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--timeout", type=float, default=600.0)
     args = parser.parse_args()
