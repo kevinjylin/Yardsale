@@ -30,7 +30,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,7 @@ from uuid import uuid4
 
 from yardsale.models import Appraisal, ItemDetails
 from yardsale.pricing import listing_prices
+from yardsale.sources import ExternalListing
 
 PROPOSED, ACTIVE, SOLD, CANCELED = "proposed", "active", "sold", "canceled"
 COUNTER_TTL = 24 * 3600.0  # seconds a counter-offer can be accepted
@@ -141,6 +142,30 @@ CREATE TABLE IF NOT EXISTS ebay_offers (
     answered_at REAL NOT NULL,
     buyer TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS watches (
+    watch_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    query TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT '',
+    budget_cents INTEGER,
+    sources TEXT NOT NULL,
+    every_seconds REAL NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    last_run_at REAL,
+    stopped INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS watches_by_owner ON watches (owner, stopped);
+CREATE TABLE IF NOT EXISTS watch_hits (
+    watch_id TEXT NOT NULL REFERENCES watches (watch_id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    found_at REAL NOT NULL,
+    told INTEGER NOT NULL DEFAULT 0,
+    listing_json TEXT NOT NULL,
+    PRIMARY KEY (watch_id, source, external_id)
+);
+CREATE INDEX IF NOT EXISTS watch_hits_untold ON watch_hits (watch_id, told);
 """
 
 # Columns added after the first prototype. Older database files get them on open.
@@ -263,6 +288,30 @@ class EbayListing:
 
 
 _EBAY_LISTING_COLUMNS = "item_id, owner, ebay_item_id, url, status, created_at, updated_at"
+
+
+@dataclass
+class Watch:
+    """A standing search of other sites for one buyer, polled until it expires."""
+
+    watch_id: str
+    owner: str  # the conversation that may see and stop it: asi1:<hash>
+    query: str
+    scope: str = ""  # what the sources search: a Craigslist city, an eBay site
+    budget_cents: int | None = None  # filters on the asking price only
+    sources: tuple[str, ...] = ()  # source names; empty means every known source
+    every_seconds: float = 0.0
+    created_at: float = 0.0
+    expires_at: float = 0.0
+    last_run_at: float | None = None
+    stopped: bool = False
+
+    def due_at(self) -> float:
+        return (
+            self.created_at if self.last_run_at is None else self.last_run_at + self.every_seconds
+        )
+
+
 _LISTING_COLUMNS = (
     "item_id, owner, seller_id, listing_ref, status, title, asking_cents, floor_cents, "
     "seller_asking_cents, seller_floor_cents, suggested_asking_cents, suggested_floor_cents, "
@@ -273,6 +322,21 @@ _DEAL_COLUMNS = (
     "payment_ref, payment_url, commission_cents, payout_cents, paid_at"
 )
 _COUNTER_COLUMNS = "item_id, buyer, offer_cents, counter_cents, expires_at, rounds, agreed"
+_WATCH_COLUMNS = (
+    "watch_id, owner, query, scope, budget_cents, sources, every_seconds, created_at, "
+    "expires_at, last_run_at, stopped"
+)
+
+
+def _watch(row: sqlite3.Row) -> Watch:
+    fields = dict(row)
+    return Watch(
+        **{
+            **fields,
+            "sources": tuple(name for name in fields["sources"].split(",") if name),
+            "stopped": bool(fields["stopped"]),
+        }
+    )
 
 
 def _listing(row: sqlite3.Row) -> Listing:
@@ -796,3 +860,119 @@ class Store:
             (item_id, buyer),
         ).fetchone()
         return int(row["n"])
+
+    # --- Watches ----------------------------------------------------------------------------
+    # A standing search over other sites. watch_hits is both the seen-set that stops a listing
+    # being reported twice and the queue of findings the buyer hasn't been told about yet.
+
+    def add_watch(self, watch: Watch) -> Watch:
+        now = self.clock()
+        watch.created_at = now
+        self._db.execute(
+            f"INSERT INTO watches ({_WATCH_COLUMNS}) VALUES ({', '.join('?' * 11)})",
+            (
+                watch.watch_id,
+                watch.owner,
+                watch.query,
+                watch.scope,
+                watch.budget_cents,
+                ",".join(watch.sources),
+                watch.every_seconds,
+                now,
+                watch.expires_at,
+                watch.last_run_at,
+                int(watch.stopped),
+            ),
+        )
+        return watch
+
+    def watch(self, watch_id: str) -> Watch | None:
+        row = self._db.execute(
+            f"SELECT {_WATCH_COLUMNS} FROM watches WHERE watch_id = ?", (watch_id,)
+        ).fetchone()
+        return _watch(row) if row else None
+
+    def watches_for(self, owner: str, running_only: bool = True) -> list[Watch]:
+        """One owner's watches, oldest first, so a buyer's numbering stays stable."""
+        sql = f"SELECT {_WATCH_COLUMNS} FROM watches WHERE owner = ?"
+        if running_only:
+            sql += " AND stopped = 0"
+        return [_watch(row) for row in self._db.execute(sql + " ORDER BY created_at", (owner,))]
+
+    def due_watches(self, limit: int = 50) -> list[Watch]:
+        """Watches that are running, unexpired, and haven't been polled for every_seconds."""
+        now = self.clock()
+        return [
+            _watch(row)
+            for row in self._db.execute(
+                f"SELECT {_WATCH_COLUMNS} FROM watches WHERE stopped = 0 AND expires_at > ?"
+                " AND (last_run_at IS NULL OR last_run_at + every_seconds <= ?)"
+                " ORDER BY last_run_at IS NOT NULL, last_run_at LIMIT ?",
+                (now, now, limit),
+            )
+        ]
+
+    def mark_polled(self, watch_id: str) -> None:
+        self._db.execute(
+            "UPDATE watches SET last_run_at = ? WHERE watch_id = ?", (self.clock(), watch_id)
+        )
+
+    def stop_watch(self, watch_id: str, owner: str) -> Watch | None:
+        """Only the owner may stop their own watch. Returns None if it isn't theirs."""
+        changed = self._db.execute(
+            "UPDATE watches SET stopped = 1 WHERE watch_id = ? AND owner = ? AND stopped = 0",
+            (watch_id, owner),
+        ).rowcount
+        return self.watch(watch_id) if changed else None
+
+    def expire_watches(self) -> int:
+        """Stop watches whose week is up. Returns how many were stopped."""
+        return self._db.execute(
+            "UPDATE watches SET stopped = 1 WHERE stopped = 0 AND expires_at <= ?",
+            (self.clock(),),
+        ).rowcount
+
+    def record_hits(self, watch_id: str, listings: list[ExternalListing]) -> list[ExternalListing]:
+        """Save findings, returning only the ones not seen before. Repeats are ignored, so a
+        listing that stays up for days is reported once."""
+        now = self.clock()
+        fresh: list[ExternalListing] = []
+        with self._transaction() as db:
+            for listing in listings:
+                added = db.execute(
+                    "INSERT OR IGNORE INTO watch_hits"
+                    " (watch_id, source, external_id, found_at, told, listing_json)"
+                    " VALUES (?, ?, ?, ?, 0, ?)",
+                    (
+                        watch_id,
+                        listing.source,
+                        listing.external_id,
+                        now,
+                        json.dumps(asdict(listing)),
+                    ),
+                ).rowcount
+                if added:
+                    fresh.append(listing)
+        return fresh
+
+    def untold_hits(self, watch_id: str) -> list[ExternalListing]:
+        """Findings the buyer hasn't been shown, oldest first."""
+        return [
+            ExternalListing(**json.loads(row["listing_json"]))
+            for row in self._db.execute(
+                "SELECT listing_json FROM watch_hits WHERE watch_id = ? AND told = 0"
+                " ORDER BY found_at",
+                (watch_id,),
+            )
+        ]
+
+    def count_untold(self, owner: str) -> int:
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM watch_hits JOIN watches USING (watch_id)"
+            " WHERE watches.owner = ? AND watch_hits.told = 0",
+            (owner,),
+        ).fetchone()
+        return int(row["n"])
+
+    def mark_told(self, watch_id: str) -> None:
+        self._db.execute("UPDATE watch_hits SET told = 1 WHERE watch_id = ?", (watch_id,))
