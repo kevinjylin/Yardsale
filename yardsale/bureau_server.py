@@ -1026,10 +1026,11 @@ def build(
         if rt.checkout.enabled:
             await rt.checkout.refresh_all()
 
-    @market.on_interval(period=EBAY_CHECK_EVERY)
-    async def check_ebay(ctx: Context) -> None:
-        if rt.ebay is not None:
-            await rt.ebay.poll()
+    if ebay is not None:
+
+        @market.on_interval(period=EBAY_CHECK_EVERY)
+        async def check_ebay(ctx: Context) -> None:
+            await ebay.poll()
 
     if mail is not None:
         # Craigslist buyers' emails go to the item agents as offers, like chat buyers' do.

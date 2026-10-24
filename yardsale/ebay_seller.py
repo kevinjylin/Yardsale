@@ -68,7 +68,7 @@ from yardsale.store import (
     Store,
 )
 
-log = logging.getLogger("yardsale.ebay")
+log = logging.getLogger(__name__)
 
 HOSTS = {
     "sandbox": ("https://auth.sandbox.ebay.com", "https://api.sandbox.ebay.com"),
@@ -560,6 +560,15 @@ class EbaySeller:
                 except Exception:
                     log.exception(f"eBay check for {record.item_id} failed")
 
+    async def end_listing(self, item_id: str) -> bool:
+        """End one item's eBay listing and keep it for sale on Yardsale. False if it wasn't on
+        eBay."""
+        record = self.store.ebay_listing(item_id)
+        if record is None or record.status != "active":
+            return False
+        await self._end(record)
+        return True
+
     async def _end(self, record: EbayListing) -> None:
         try:
             await self.client.end_item(await self.access_token(record.owner), record.ebay_item_id)
@@ -573,13 +582,15 @@ class EbaySeller:
         listing = self.store.get(record.item_id)
         if not self.connected(record.owner):
             return  # disconnected: nothing can be done with this listing on eBay
-        if listing is None or listing.status != ACTIVE:
-            await self._end(record)
-            return
         token = await self.access_token(record.owner)
+        # Look for an eBay sale before ending the listing: a Buy It Now, or a buyer taking an
+        # earlier counter, can land after the item sold here, and must not go unnoticed.
         sales = await self.client.sales(token, record.ebay_item_id)
         if sales:
             self._record_sale(record, sales[0])
+            return
+        if listing is None or listing.status != ACTIVE:
+            await self._end(record)
             return
         for offer in await self.client.best_offers(token, record.ebay_item_id):
             if await self._answer(token, record, offer):
@@ -594,7 +605,7 @@ class EbaySeller:
         )
         self.store.set_ebay_status(record.item_id, EBAY_SOLD)
         if deal is None:
-            log.warning(f"{record.item_id} sold on eBay but was no longer for sale on Yardsale")
+            log.error(f"{record.item_id} sold on eBay after it was sold or unlisted on Yardsale")
         else:
             log.info(f"{record.item_id} sold on eBay ({deal.deal_id})")
 
@@ -614,18 +625,35 @@ class EbaySeller:
             listing.asking_cents, listing.floor_cents, gap_cents(listing), offer.price_cents, state
         )
         if move.agreed:
-            await self.client.respond(
-                token, record.ebay_item_id, offer.offer_id, "Accept", "Deal. Thanks for the offer!"
-            )
-            self.store.record_ebay_answer(offer.offer_id, listing.item_id, "accept", buyer)
+            # Claim the item here first, so a chat or Craigslist buyer closing at the same moment
+            # can't leave eBay holding a binding sale of something already sold.
             deal = self.store.close_deal(
                 listing.item_id, buyer, offer.price_cents, deal_id=f"ebay-offer-{offer.offer_id}"
             )
-            self.store.set_ebay_status(listing.item_id, EBAY_SOLD)
             if deal is None:
-                log.warning(f"{listing.item_id} sold on eBay but was no longer for sale here")
-            else:
-                log.info(f"Accepted an eBay offer for {listing.item_id} ({deal.deal_id})")
+                await self.client.respond(
+                    token, record.ebay_item_id, offer.offer_id, "Decline", "Sorry, it just sold."
+                )
+                self.store.record_ebay_answer(offer.offer_id, listing.item_id, "decline", buyer)
+                log.info(f"Declined an eBay offer for {listing.item_id}: sold meanwhile")
+                return False
+            try:
+                await self.client.respond(
+                    token,
+                    record.ebay_item_id,
+                    offer.offer_id,
+                    "Accept",
+                    "Deal. Thanks for the offer!",
+                )
+            except Exception:
+                log.error(
+                    f"{listing.item_id} is closed for an eBay offer ({deal.deal_id}), "
+                    "but eBay's Accept failed; accept it on eBay by hand"
+                )
+                raise
+            self.store.record_ebay_answer(offer.offer_id, listing.item_id, "accept", buyer)
+            self.store.set_ebay_status(listing.item_id, EBAY_SOLD)
+            log.info(f"Accepted an eBay offer for {listing.item_id} ({deal.deal_id})")
             return True
         saved_cents = move.price_cents
         if self.store.ebay_counters_sent(listing.item_id, buyer) >= MAX_COUNTERS:
