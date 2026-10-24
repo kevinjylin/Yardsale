@@ -53,6 +53,13 @@ async def identify_with_claude(image_b64: str, media_type: str, note: str) -> It
     return ItemDetails(**guess.model_dump())
 
 
+def tidy(item: ItemDetails) -> ItemDetails:
+    """Short single-line title and query. An empty query falls back to the title."""
+    item.title = " ".join(item.title.split())[:80] or "Unidentified item"
+    item.search_query = " ".join(item.search_query.split())[:120] or item.title
+    return item
+
+
 def build_identifier(identify: Identify, offline: bool) -> Agent:
     agent = service_agent(
         "identifier",
@@ -65,7 +72,11 @@ def build_identifier(identify: Identify, offline: bool) -> Agent:
     @proto.on_message(IdentifyRequest, replies={Identified, ServiceError})
     async def handle(ctx: Context, sender: str, msg: IdentifyRequest) -> None:
         try:
-            item = await identify(msg.image_b64, msg.media_type, msg.note)
+            item = tidy(await identify(msg.image_b64, msg.media_type, msg.note))
+        except llm.LLMError as ex:  # no key, or Claude declined
+            ctx.logger.warning(f"Identification failed: {ex}")
+            await ctx.send(sender, ServiceError(request_id=msg.request_id, reason=str(ex)[:300]))
+            return
         except Exception as ex:  # report every failure to the caller instead of going silent
             ctx.logger.exception("Identification failed")
             await ctx.send(sender, ServiceError(request_id=msg.request_id, reason=str(ex)[:300]))
