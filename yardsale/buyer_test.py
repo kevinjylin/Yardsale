@@ -49,6 +49,7 @@ from yardsale.offline import (
     LocalDirectoryResolver,
     NoRegistration,
     publish_locally,
+    stay_offline,
 )
 
 log = logging.getLogger("yardsale.buyer")
@@ -199,6 +200,8 @@ async def main(count: int, offline: bool, wait_seconds: float) -> int:
         return 2
     market: str = market_info["address"]
     TRACKER = Tracker(count=count)
+    if offline:
+        stay_offline()
 
     almanac_policy = None if offline else AlmanacApiRegistrationPolicy(logger=log)
     policy: AgentRegistrationPolicy = almanac_policy or NoRegistration()
