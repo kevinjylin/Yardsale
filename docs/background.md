@@ -250,6 +250,53 @@ The Market can't start a message in a seller's ASI:One chat (it keeps only a has
 session), so `my listings` shows Craigslist buyers and sales. Setup steps are in the
 [README](../README.md#craigslist-by-email).
 
+## Negotiating with Craigslist sellers by email
+
+Code: [craigslist_buyer.py](../yardsale/craigslist_buyer.py). The other direction: when what a
+buyer wants is on Craigslist, Yardsale's buyer agent emails the seller and haggles, within the
+buyer's max, without telling the seller the max.
+
+**The reply address comes from the buyer.** Craigslist shows a post's relay address
+(`<random>@sale.craigslist.org`) only after a reader taps Reply, and that step can ask for a
+CAPTCHA. Its [terms](https://www.craigslist.org/about/terms.of.use) forbid "robots, spiders,
+scripts, scrapers, crawlers", collecting users' information, and getting around anything that
+controls access to the site, and the search actor's results carry no address. So Yardsale never
+fetches it: the buyer taps Reply on the post
+([Craigslist's steps](https://www.craigslist.org/about/help/replying_to_posts)) and pastes the
+address into the chat: `negotiate abc123@sale.craigslist.org "Trek FX 2 bike" max $250 asking
+$300`. The title (in quotes, or the post's link) becomes the email subject; the asking price is
+optional, and without it the first email asks for it. Craigslist's
+[relay help](https://www.craigslist.org/about/help/posting/features/contact-info/email/mail-relay)
+says replies come back from an `@reply.craigslist.org` address and threads last up to 4 months.
+
+1. The chat saves the negotiation (the conversation, the address, the title, and the max, which
+   is never logged or emailed). The next inbox check sends the first email from Yardsale's
+   inbox: is it still available, and an opening offer from `haggle.opening_offer`. Every email
+   says it's from the buyer's Yardsale assistant, an AI agent, and carries a "Yardsale ref" in
+   its subject and signature.
+2. Each seller answer is read with patterns: a dollar amount is their price; "yes", "deal",
+   "sure", or "ok" after an offer takes it; "firm" or "no" holds their price; "sold" or "no
+   longer available" ends it. The next offer comes from `haggle.buyer_move`, at most 4 offers,
+   always at least one price step under the max. An unclear answer is re-asked once, then left
+   for the buyer.
+3. Once a price is agreed, the last email says the buyer pays in person and asks for a pickup
+   time and place. The seller's next email is kept for the buyer. Yardsale takes no payment for
+   Craigslist deals.
+4. `negotiations` (or `my orders`) in the chat shows each one's state, since the Market can't
+   message the chat unprompted.
+
+**One inbox, two sides.** The inbox check asks the buyer side first. An email answering a
+Message-ID we sent as a buyer (In-Reply-To or References, kept as hashes), or naming a
+negotiation's ref in its subject or quoted text, goes to the buyer agent. Everything else goes
+to the seller side as before. An email the buyer agent wrote, relayed back into the inbox (our
+buyer agent writing to one of Yardsale's own posts), always goes to the seller side, and the
+seller agent's own replies that no negotiation claims are marked read instead of answered. So
+Yardsale's two agents can haggle through Craigslist's relay, and it ends: the buyer side sends
+nothing once a negotiation is agreed, stopped, or sold. A test runs that exchange through a fake
+relay, with and without the relay keeping Message-IDs, to a deal ($340 max) and to no deal ($250
+max, under the $300 floor). On our own post the seller agent still answers "deal" with its
+payment link, as it does for any email buyer.
+
 ## Saved state
 
 [store.py](../yardsale/store.py) keeps listings (and whether each agent runs in the server or on
@@ -371,6 +418,11 @@ per agent, because agent addresses come from the master seed and don't change.
   what the relayed body contains (a quoted price in it could be read as an offer), relay
   delays, and whether links are stripped (if so, `YARDSALE_MAIL_LINKS=0` asks the buyer for a
   phone number and the seller texts the link from `my listings`).
+- **Negotiating with Craigslist sellers.** Tested only with a fake inbox and relay. Unknown:
+  whether the relay keeps our Message-IDs and subjects (the ref in the subject and signature is
+  the fallback), whether it accepts mail from Yardsale's address for posts made by someone else,
+  and how real sellers word their answers. Each email is one buyer's own reply to a post they
+  chose; Yardsale never sends to an address it found itself.
 - **Telling sellers about a sale.** The seller sees a sale under "my listings"; Yardsale doesn't
   message them when it happens.
 - **Interactive Cards in the real app.** Proposals, the eBay sales behind a price (a carousel),

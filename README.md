@@ -287,6 +287,24 @@ whether the relay strips links. If it strips the payment link, set `YARDSALE_MAI
 reply then gives the amount and asks for a phone number, and the seller texts the link shown
 under `my listings`.
 
+### Negotiating with Craigslist sellers
+
+The other direction ([craigslist_buyer.py](yardsale/craigslist_buyer.py)): Yardsale's buyer
+agent emails a Craigslist seller from the same inbox and haggles within the buyer's max, never
+writing the max in an email. Craigslist shows a post's reply address only after Reply (which can
+ask for a CAPTCHA), and its terms ban scripts and collecting users' information, so Yardsale
+never looks it up. The buyer taps Reply on the post and pastes the address into the chat:
+
+```text
+negotiate abc123@sale.craigslist.org "Trek FX 2 bike" max $250 asking $300
+```
+
+The first email goes out on the next inbox check. Every email says it's from the buyer's
+Yardsale assistant. `negotiations` (or `my orders`) shows where each one stands; agreed deals are
+paid to the seller in person, not through Yardsale. Details are in
+[background.md](docs/background.md#negotiating-with-craigslist-sellers-by-email).
+**Unverified** against real Craigslist, like the selling side.
+
 ## `@yardsale` on Fetch Business
 
 `@yardsale` ([asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale)) is Yardsale's Fetch Business
@@ -482,6 +500,8 @@ agent can't accept a chat buyer's counter-offer.
   redirect and at connect time; 25 MB cap), rotation, HEIC, and a 50-megapixel limit.
 - [craigslist_mail.py](yardsale/craigslist_mail.py): Craigslist buyers' emails, passed to the
   item agents and answered through Craigslist's relay.
+- [craigslist_buyer.py](yardsale/craigslist_buyer.py): the buyer agent emailing Craigslist
+  sellers and haggling within the buyer's max.
 - [business_api.py](yardsale/business_api.py): the HTTP API and OpenAPI description that
   `@yardsale` on Fetch Business calls.
 - [config.py](yardsale/config.py): settings, the public endpoint, and the readiness check.
