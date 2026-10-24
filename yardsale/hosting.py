@@ -4,20 +4,27 @@ When a seller approves a listing and hosting is on, the Market creates the item'
 Agentverse instead of in its own Bureau: it creates the agent with a profile (title, asking
 price, how to make an offer), gives it the floor and private gap as a secret (and in its
 storage, in case the secret isn't readable as an environment variable), uploads its code, and
-starts it. The seller gets the agent's Agentverse profile link.
+starts it. It also gets a handle made from the item's title (@trek-fx-3-hybrid) and, in the
+background, a picture of the item (avatars.py). The seller gets the agent's Agentverse profile
+link. When the listing is sold or canceled, the Market deletes the agent; a delete that fails
+(Agentverse unreachable, say) is tried again every minute and when the server starts.
 
 The code is hosted_item_template.py with haggle.py and the message classes from models.py pasted
 in, so a hosted agent haggles exactly like one in the Bureau. Hosted agents may only import
 Agentverse's allowed packages; this code needs uagents, uagents-core, and the standard library.
 
 Hosting is on in live mode when AGENTVERSE_API_KEY is set and YARDSALE_HOST_ITEMS is above 0.
-That number caps how many active listings are hosted at once (Agentverse limits agents per
-account, reportedly 8 free and 25 on Premium, and Yardsale's five mailbox agents count too).
+That number caps how many item agents are on Agentverse at once, counting closed listings' agents
+not deleted yet (Agentverse limits agents per account, reportedly 8 free and 25 on Premium, and
+Yardsale's five mailbox agents count too).
 Past the cap, or if hosting fails, the item agent runs in the Bureau and registers on the
 Almanac as before.
 
     uv run python -m yardsale.hosting --list       # Yardsale's hosted agents on Agentverse
     uv run python -m yardsale.hosting --cleanup    # delete the ones whose listing isn't active
+
+The server does what --cleanup does by itself; the command is for agents left behind while it
+wasn't running.
 """
 
 from __future__ import annotations
@@ -29,9 +36,12 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 
@@ -46,6 +56,7 @@ HOSTED_CODE_MARK = "# --- hosted code ---\n"
 HOSTED_MODELS = (Offer, Counter, AcceptCounter, Deal, OfferRejected, ItemSold)
 NAME_PREFIX = "Yardsale item: "  # how hosted agents were named before October 24
 NAME_LIMIT = 32  # Agentverse profiles show only the first 32 characters of a name
+HANDLE_LIMIT = 20  # Agentverse handles are at most 20 characters
 TIMEOUT = aiohttp.ClientTimeout(total=30)
 BADGES = (
     "![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)\n"
@@ -56,11 +67,13 @@ log = logging.getLogger("yardsale.hosting")
 
 
 class HostingError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status  # Agentverse's HTTP status, or None if it wasn't an HTTP error
 
 
 def hosted_limit() -> int:
-    """YARDSALE_HOST_ITEMS: how many active listings may be hosted on Agentverse (0 = none)."""
+    """YARDSALE_HOST_ITEMS: how many item agents may be on Agentverse at once (0 = none)."""
     raw = os.getenv("YARDSALE_HOST_ITEMS", "").strip()
     try:
         return max(0, int(raw)) if raw else 0
@@ -80,6 +93,27 @@ def agent_name(title: str) -> str:
     head = title[: NAME_LIMIT + 1]
     cut = head.rsplit(" ", 1)[0].rstrip(" ,;:-(") if " " in head else ""
     return cut or title[:NAME_LIMIT]
+
+
+def item_handle(title: str) -> str:
+    """A handle that says what the item is: the title before any comma or parentheses, as
+    lowercase words joined by hyphens, cut at a word to fit Agentverse's 20 characters.
+    "Trek FX 3 hybrid bike, medium" -> "trek-fx-3-hybrid"."""
+    name = re.split(r"[,(]", title, maxsplit=1)[0]
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    # "2.0" stays one word, so a cut never leaves half a version number.
+    words = [w.replace(".", "-") for w in re.findall(r"[a-z0-9]+(?:\.[0-9]+)*", ascii_name)]
+    handle = ""
+    for word in words:
+        longer = f"{handle}-{word}" if handle else word
+        if len(longer) > HANDLE_LIMIT:
+            break
+        handle = longer
+    if not handle and words:
+        handle = words[0][:HANDLE_LIMIT].strip("-")
+    if len(handle) < 3:
+        handle = f"{handle}-item" if handle else "yardsale-item"
+    return handle
 
 
 # --- The hosted agent's code and profile -------------------------------------------------------
@@ -151,7 +185,9 @@ def item_readme(listing: Listing) -> str:
 
 
 class HostingClient:
-    """Agentverse's Hosting API (v1), authenticated with an Agentverse API key."""
+    """Agentverse's APIs for the agents on Yardsale's account, authenticated with an Agentverse
+    API key: the Hosting API (v1) for item agents, plus handles and profile pictures (v2) for
+    any of its agents."""
 
     def __init__(self, api_key: str, base_url: str = API) -> None:
         self._key = api_key
@@ -170,7 +206,8 @@ class HostingClient:
                 if response.status >= 400:
                     raise HostingError(
                         f"Agentverse {method} {path.split('/agent1')[0]} returned "
-                        f"{response.status}: {text[:200]}"
+                        f"{response.status}: {text[:200]}",
+                        response.status,
                     )
                 return json.loads(text) if text.strip() else None
         except (aiohttp.ClientError, TimeoutError) as ex:
@@ -203,12 +240,57 @@ class HostingClient:
         await self._call("POST", f"/v1/hosting/agents/{address}/start")
 
     async def delete(self, address: str) -> None:
-        await self._call("DELETE", f"/v1/hosting/agents/{address}")
+        """Delete a hosted agent. One that's already gone (404) counts as deleted."""
+        try:
+            await self._call("DELETE", f"/v1/hosting/agents/{address}")
+        except HostingError as ex:
+            if ex.status != 404:
+                raise
 
     async def agents(self) -> list[dict[str, Any]]:
         data = await self._call("GET", "/v1/hosting/agents")
         items = data.get("items", data) if isinstance(data, dict) else data
         return [a for a in items or [] if isinstance(a, dict)]
+
+    # Handles and profile pictures. The v2 calls are the ones Agentverse's own web app makes.
+
+    async def free_handle(self, wanted: str) -> str | None:
+        """`wanted` if no agent has it yet, else Agentverse's suggestion (None if it has none)."""
+        data = await self._call("GET", f"/v2/almanac/handles/{quote(wanted, safe='')}/available")
+        if not isinstance(data, dict):
+            return None
+        handle = wanted if data.get("available") else data.get("alternative")
+        return handle if isinstance(handle, str) and 0 < len(handle) <= HANDLE_LIMIT else None
+
+    async def agent(self, address: str) -> dict[str, Any]:
+        """An agent's name, handle, and profile, as Agentverse's web app reads them."""
+        current = await self._call("GET", f"/v2/agents/{address}")
+        if not isinstance(current, dict):
+            raise HostingError("Agentverse didn't return the agent's profile")
+        return current
+
+    async def agent_profile(self, address: str) -> dict[str, Any]:
+        """The agent's profile: description, readme, avatar_url, and so on."""
+        profile = (await self.agent(address)).get("profile")
+        return profile if isinstance(profile, dict) else {}
+
+    async def update_profile(
+        self, address: str, handle: str | None = None, avatar_url: str | None = None
+    ) -> None:
+        """Set an agent's handle or picture, keeping the rest of its profile."""
+        current = await self.agent(address)
+        profile = {k: v for k, v in (current.get("profile") or {}).items() if v is not None}
+        if avatar_url is not None:
+            profile["avatar_url"] = avatar_url
+        body: dict[str, Any] = {"address": address, "profile": profile}
+        if current.get("name"):
+            body["name"] = current["name"]
+        if handle is not None:
+            body["handle"] = handle
+        await self._call("PUT", f"/v2/agents/{address}", body)
+
+    async def set_hosted_avatar(self, address: str, avatar_url: str) -> None:
+        await self._call("PUT", f"/v1/hosting/agents/{address}", {"avatar_url": avatar_url})
 
 
 async def host_item(
@@ -249,6 +331,21 @@ async def host_item(
     return address
 
 
+async def claim_handle(client: HostingClient, address: str, title: str) -> str | None:
+    """Give a hosted item agent a handle made from its title, or Agentverse's suggestion if
+    that's taken. None if Agentverse said no; the agent works the same without one."""
+    try:
+        handle = await client.free_handle(item_handle(title))
+        if handle is None:
+            log.warning(f"No free handle for {address}")
+            return None
+        await client.update_profile(address, handle=handle)
+    except HostingError as ex:
+        log.warning(f"Couldn't give {address} a handle: {ex}")
+        return None
+    return handle
+
+
 # --- Command line -----------------------------------------------------------------------------
 
 
@@ -261,7 +358,7 @@ async def _main(cleanup: bool) -> int:
     store = Store(config.db_path("live"))
     # Only agents Yardsale made: ones its listings point at (or named the old way). Any other
     # hosted agents on the account are left alone.
-    ours = {listing.address for listing in store.hosted()}
+    ours = {listing.address: listing for listing in store.hosted()}
     hosted = [
         a
         for a in await client.agents()
@@ -274,6 +371,8 @@ async def _main(cleanup: bool) -> int:
         print(f"{'active ' if keep else 'stale  '} {address}  {agent.get('name')}")
         if cleanup and not keep:
             await client.delete(address)
+            if address in ours:
+                store.agent_deleted(ours[address].item_id)
             print("         deleted")
     if not hosted:
         print("No Yardsale item agents are hosted on Agentverse.")

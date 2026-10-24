@@ -7,7 +7,8 @@ at most once however messages interleave.
 
 No seeds are stored here. An item agent's address comes from the master seed and the item ID, so
 re-creating the agents for active listings after a restart gives the same addresses. Item agents
-hosted on Agentverse (host = 'agentverse') keep running there and aren't re-created.
+hosted on Agentverse (host = 'agentverse') keep running there and aren't re-created. Once their
+listing is sold or canceled, the Market deletes them and records when (agent_deleted_at).
 
 Listing states:
 
@@ -67,6 +68,8 @@ CREATE TABLE IF NOT EXISTS listings (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     host TEXT NOT NULL DEFAULT 'bureau',
+    handle TEXT,
+    agent_deleted_at REAL,
     UNIQUE (owner, listing_ref)
 );
 CREATE INDEX IF NOT EXISTS listings_by_status ON listings (status);
@@ -104,7 +107,11 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 # Columns added after the first prototype. Older database files get them on open.
 ADDED_COLUMNS = {
-    "listings": {"host": "TEXT NOT NULL DEFAULT 'bureau'"},
+    "listings": {
+        "host": "TEXT NOT NULL DEFAULT 'bureau'",
+        "handle": "TEXT",
+        "agent_deleted_at": "REAL",
+    },
     "counters": {
         "rounds": "INTEGER NOT NULL DEFAULT 0",
         "agreed": "INTEGER NOT NULL DEFAULT 0",
@@ -140,6 +147,7 @@ class Listing:
     created_at: float = 0.0
     updated_at: float = 0.0
     host: str = BUREAU  # where the item agent runs: this server's Bureau, or Agentverse
+    handle: str | None = None  # the hosted item agent's Agentverse handle, without the @
 
     @property
     def asking_from(self) -> str:
@@ -195,7 +203,7 @@ class DealRecord:
 _LISTING_COLUMNS = (
     "item_id, owner, seller_id, listing_ref, status, title, asking_cents, floor_cents, "
     "seller_asking_cents, seller_floor_cents, suggested_asking_cents, suggested_floor_cents, "
-    "item_json, appraisal_json, address, created_at, updated_at, host"
+    "item_json, appraisal_json, address, created_at, updated_at, host, handle"
 )
 _DEAL_COLUMNS = (
     "deal_id, item_id, buyer, price_cents, payment_status, created_at, payment_provider, "
@@ -266,7 +274,7 @@ class Store:
         listing.created_at = listing.updated_at = now
         try:
             self._db.execute(
-                f"INSERT INTO listings ({_LISTING_COLUMNS}) VALUES ({', '.join('?' * 18)})",
+                f"INSERT INTO listings ({_LISTING_COLUMNS}) VALUES ({', '.join('?' * 19)})",
                 (
                     listing.item_id,
                     listing.owner,
@@ -286,6 +294,7 @@ class Store:
                     now,
                     now,
                     listing.host,
+                    listing.handle,
                 ),
             )
         except sqlite3.IntegrityError:
@@ -331,6 +340,23 @@ class Store:
         )
         return [_listing(row) for row in rows]
 
+    def on_agentverse(self) -> list[Listing]:
+        """Listings whose hosted agent is still on Agentverse: active ones, and sold or canceled
+        ones whose agent hasn't been deleted yet."""
+        rows = self._db.execute(
+            f"SELECT {_LISTING_COLUMNS} FROM listings WHERE host = ? AND address IS NOT NULL "
+            "AND agent_deleted_at IS NULL ORDER BY created_at",
+            (AGENTVERSE,),
+        )
+        return [_listing(row) for row in rows]
+
+    def agent_deleted(self, item_id: str) -> None:
+        """Record that a sold or canceled listing's hosted agent was deleted from Agentverse."""
+        self._db.execute(
+            "UPDATE listings SET agent_deleted_at = ? WHERE item_id = ? AND status IN (?, ?)",
+            (self.clock(), item_id, SOLD, CANCELED),
+        )
+
     def reprice(
         self, item_id: str, owner: str, seller_asking: int | None, seller_floor: int | None
     ) -> Listing | None:
@@ -358,19 +384,28 @@ class Store:
         return self.get(item_id)
 
     def activate(
-        self, item_id: str, owner: str, address: str, host: str = BUREAU
+        self,
+        item_id: str,
+        owner: str,
+        address: str,
+        host: str = BUREAU,
+        handle: str | None = None,
     ) -> Listing | None:
         """proposed -> active. Approving twice returns the active listing; anything else (sold,
         canceled, someone else's) returns None."""
         self._db.execute(
-            "UPDATE listings SET status = ?, address = ?, host = ?, updated_at = ? "
+            "UPDATE listings SET status = ?, address = ?, host = ?, handle = ?, updated_at = ? "
             "WHERE item_id = ? AND owner = ? AND status = ?",
-            (ACTIVE, address, host, self.clock(), item_id, owner, PROPOSED),
+            (ACTIVE, address, host, handle, self.clock(), item_id, owner, PROPOSED),
         )
         listing = self.get(item_id)
         if listing is None or listing.owner != owner or listing.status != ACTIVE:
             return None
         return listing
+
+    def set_handle(self, item_id: str, handle: str) -> None:
+        """Record a hosted item agent's handle, given after it went live."""
+        self._db.execute("UPDATE listings SET handle = ? WHERE item_id = ?", (handle, item_id))
 
     def cancel(self, item_id: str, owner: str) -> Listing | None:
         """proposed or active -> canceled, for the owner only. Open counter-offers lapse."""

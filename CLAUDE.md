@@ -18,6 +18,7 @@ uv run python -m yardsale.bureau_server --check     # which live-mode keys are s
 uv run python -m yardsale.buyer_test --count 12     # end-to-end test; needs the server running
 uv run python -m yardsale.sell photo.jpg            # photo listing; needs .env keys and the server
 uv run python -m yardsale.hosting --list            # item agents hosted on Agentverse (--cleanup)
+uv run python -m yardsale.avatars --draw            # agent pictures drawn by ASI:One (--sync, --items)
 cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8110  # public URL for @yardsale's API
 uv run ruff format --check . && uv run ruff check . && uv run mypy yardsale
 uv run pytest                                       # no keys; fails if anything leaves localhost
@@ -38,8 +39,10 @@ Code shell.
   `chat.REPLY_WITHIN` (40 s); slower work is sent as a second message.
 - `sell`, chat photo listings, and ASI:One calls spend real money or quota (Apify, Claude, ASI:One).
   Ask before running them, and before live hosting (`YARDSALE_HOST_ITEMS`, `yardsale.hosting
-  --cleanup`), which creates and deletes real Agentverse agents, or anything that calls Visa or
-  Stripe.
+  --cleanup`, or any live start with `AGENTVERSE_API_KEY`, since the server deletes sold or
+  canceled listings' hosted agents), which creates and deletes real Agentverse agents,
+  `yardsale.avatars` (ASI:One drawing, Agentverse handles), `YARDSALE_ITEM_AVATARS` (ASI:One
+  drawing, writes to the Apify account), or anything that calls Visa or Stripe.
 - Payments are test mode only: Visa Acceptance sandbox (`apitest.` hosts) or Stripe test keys.
   `payments.py` refuses live keys and production hosts; keep it that way. The payment provider,
   never a buyer's word, decides that a deal is paid.

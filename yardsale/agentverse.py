@@ -20,6 +20,7 @@ from uagents import Agent
 from uagents.mailbox import AgentverseConnectRequest, register_in_agentverse
 from uagents_core.registration import RegistrationRequest
 
+from yardsale.avatars import service_avatar
 from yardsale.common import derive_seed
 from yardsale.offline import LocalDirectoryResolver
 
@@ -30,10 +31,11 @@ log = logging.getLogger("yardsale.agentverse")
 
 
 def service_agent(key: str, name: str, handle: str, description: str, offline: bool) -> Agent:
-    """A long-lived agent with a stable address and an Agentverse profile (README + description).
+    """A long-lived agent with a stable address and an Agentverse profile (README, description,
+    and the picture avatars.py made for it).
 
     `name` and `handle` must match what's set on Agentverse: connecting sends both, so a different
-    value here would overwrite the one there.
+    value here would overwrite the one there. The same goes for the picture.
 
     Offline, it finds other processes' agents (the test buyer, the sell command) through the
     local directory instead of the Almanac.
@@ -46,6 +48,7 @@ def service_agent(key: str, name: str, handle: str, description: str, offline: b
         resolve=LocalDirectoryResolver() if offline else None,
         description=description,
         readme_path=str(READMES / f"{key}.md"),
+        avatar_url=service_avatar(key),
         publish_agent_details=not offline,
         # The Inspector endpoints are what Agentverse's Connect button talks to.
         enable_agent_inspector=not offline,

@@ -8,6 +8,7 @@ item agents, and haggle by the same rules.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import re
 from pathlib import Path
@@ -18,16 +19,18 @@ import aiohttp
 import pytest
 import uagents
 from aiohttp import web
+from PIL import Image
 from uagents import Agent, Model
 from uagents_core.identity import Identity
 
 from tests import sim
 from tests.helpers import Peer, local_server
-from yardsale import hosting, models
+from yardsale import avatars, bureau_server, hosting, models
+from yardsale.avatars import AvatarError, ItemPictures
 from yardsale.hosting import HOSTED_MODELS, HostingClient, HostingError, host_item, item_agent_code
 from yardsale.models import AcceptCounter, Counter, Deal, ItemSold, Offer, OfferRejected
 from yardsale.search import search
-from yardsale.store import AGENTVERSE, BUREAU, PROPOSED, SOLD, Listing, Store
+from yardsale.store import AGENTVERSE, BUREAU, CANCELED, PROPOSED, SOLD, Listing, Store
 
 BUYER_KINDS = (Counter, Deal, OfferRejected)
 PROFILE = re.compile(r"agentverse\.ai/agents/details/(agent1q[0-9a-z]+)/profile")
@@ -78,6 +81,11 @@ class FakeAgentverse(HostingClient):
         self.hosted: dict[str, dict[str, Any]] = {}
         self.deleted: list[str] = []
         self.fail_start = False
+        self.fail_delete = False  # as if Agentverse couldn't be reached
+        self.handles: dict[str, str] = {}  # address -> handle
+        self.avatars: dict[str, str] = {}  # address -> picture URL
+        self.uploads: dict[str, bytes] = {}  # picture URL -> its bytes
+        self.fail_handles = False
 
     async def create(self, name: str, readme: str, short_description: str) -> str:
         seed = uuid4().hex
@@ -111,13 +119,41 @@ class FakeAgentverse(HostingClient):
         )
 
     async def delete(self, address: str) -> None:
+        if self.fail_delete:
+            raise HostingError("Agentverse couldn't be reached (ClientConnectorError)")
         entry = self.hosted.pop(address)
         self.deleted.append(address)
         if entry["agent"] is not None:
             await sim.stop([entry["agent"]])
 
     async def agents(self) -> list[dict[str, Any]]:
-        return [{"address": a, "name": e["name"]} for a, e in self.hosted.items()]
+        return [
+            {"address": a, "name": e["name"], "avatar_url": self.avatars.get(a)}
+            for a, e in self.hosted.items()
+        ]
+
+    async def free_handle(self, wanted: str) -> str | None:
+        if self.fail_handles:
+            raise HostingError("Agentverse GET /v2/almanac/handles returned 500")
+        return f"{wanted[:18]}-2" if wanted in self.handles.values() else wanted
+
+    async def update_profile(
+        self, address: str, handle: str | None = None, avatar_url: str | None = None
+    ) -> None:
+        if handle is not None:
+            self.handles[address] = handle
+        if avatar_url is not None:
+            self.avatars[address] = avatar_url
+
+    async def set_hosted_avatar(self, address: str, avatar_url: str) -> None:
+        assert address in self.hosted
+        self.avatars[address] = avatar_url
+
+    async def publish_picture(self, image: bytes, name: str) -> str:
+        """Stands in for the public picture store (Apify in the server)."""
+        url = f"https://pictures.example/{name}"
+        self.uploads[url] = image
+        return url
 
     async def stop_all(self) -> None:
         await sim.stop([e["agent"] for e in self.hosted.values() if e["agent"] is not None])
@@ -268,6 +304,24 @@ async def test_a_slow_agentverse_is_a_hosting_error(monkeypatch: pytest.MonkeyPa
             await HostingClient("av-test-key", base).create("Trek FX 2", "readme", "a bike")
 
 
+def test_item_handles_say_what_the_item_is() -> None:
+    cases = {
+        "Trek FX 3 hybrid bike, medium": "trek-fx-3-hybrid",
+        "Trek FX 2 Disc hybrid bike, medium": "trek-fx-2-disc",
+        # A version number is one word, so it's kept whole or left out.
+        "Specialized Sirrus 2.0 hybrid bike (test listing)": "specialized-sirrus",
+        "Sirrus 2.0": "sirrus-2-0",
+        "Air Jordan 4 Retro 'Black Cat', size 10": "air-jordan-4-retro",
+        "Crème brûlée torch": "creme-brulee-torch",
+        "TV": "tv-item",
+        "日本の時計": "yardsale-item",
+        "Supercalifragilisticexpialidocious lamp": "supercalifragilistic",
+    }
+    for title, handle in cases.items():
+        assert hosting.item_handle(title) == handle, title
+        assert len(handle) <= hosting.HANDLE_LIMIT
+
+
 def test_hosting_is_off_unless_a_limit_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
     assert hosting.hosted_limit() == 0
     monkeypatch.setenv("YARDSALE_HOST_ITEMS", "5")
@@ -279,11 +333,17 @@ def test_hosting_is_off_unless_a_limit_is_set(monkeypatch: pytest.MonkeyPatch) -
 # --- Through the Market -------------------------------------------------------------------------
 
 
-async def approve_bike(market: sim.Market, name: str = "seller") -> str:
+async def list_bike(market: sim.Market, name: str = "seller") -> tuple[sim.ChatUser, str]:
+    """A seller lists a bike: their conversation and the reply to "approve"."""
     seller = market.user(name)
     await seller.say("sell this, at least $300", sim_photo())
     await seller.say("ask $360")
-    return await seller.say("approve")
+    return seller, await seller.say("approve")
+
+
+async def approve_bike(market: sim.Market, name: str = "seller") -> str:
+    _, approved = await list_bike(market, name)
+    return approved
 
 
 def sim_photo() -> str:
@@ -324,6 +384,11 @@ async def test_approved_items_are_hosted_and_sold_through_the_chat(store: Store)
             assert hosted is not None and hosted.status == SOLD
             (deal,) = store.deals()
             assert deal.item_id == listing.item_id and deal.price_cents == 36000
+
+            # Sold, so its agent is deleted from Agentverse.
+            await asyncio.gather(*bureau_server.runtime().background)
+            assert agentverse.deleted == [address] and address not in agentverse.hosted
+            assert store.on_agentverse() == []
         finally:
             await agentverse.stop_all()
 
@@ -350,6 +415,94 @@ async def test_only_a_listings_own_hosted_agent_can_report_its_sale(store: Store
             await agentverse.stop_all()
 
 
+async def test_unlisting_a_hosted_item_deletes_its_agent(store: Store) -> None:
+    agentverse = FakeAgentverse()
+    async with sim.running_market(store, hosting=agentverse, host_limit=1) as market:
+        try:
+            seller, _ = await list_bike(market)
+            (listing,) = store.active()
+            assert "is being deleted" in await seller.say("unlist")
+            await asyncio.gather(*bureau_server.runtime().background)
+            assert agentverse.deleted == [listing.address] and agentverse.hosted == {}
+            unlisted = store.get(listing.item_id)
+            assert unlisted is not None and unlisted.status == CANCELED
+            assert store.on_agentverse() == []
+        finally:
+            await agentverse.stop_all()
+
+
+async def test_a_failed_delete_is_tried_again(store: Store) -> None:
+    agentverse = FakeAgentverse()
+    async with sim.running_market(store, hosting=agentverse, host_limit=1) as market:
+        try:
+            seller, _ = await list_bike(market)
+            (listing,) = store.active()
+            agentverse.fail_delete = True
+            await seller.say("unlist")
+            rt = bureau_server.runtime()
+            await asyncio.gather(*rt.background)
+            assert listing.address in agentverse.hosted
+            assert [x.item_id for x in store.on_agentverse()] == [listing.item_id]
+
+            # The undeleted agent still takes the only hosting slot.
+            assert not PROFILE.search(await approve_bike(market, "second"))
+
+            agentverse.fail_delete = False
+            await bureau_server.delete_closed_hosted(rt)  # the next sweep
+            assert agentverse.deleted == [listing.address] and store.on_agentverse() == []
+            assert PROFILE.search(await approve_bike(market, "third"))
+        finally:
+            await agentverse.stop_all()
+
+
+async def test_on_start_the_market_deletes_agents_of_closed_listings(store: Store) -> None:
+    """Agents whose listing closed while the server was down, even with hosting off."""
+    agentverse = FakeAgentverse()
+    addresses = {}
+    for item_id in ("sold", "canceled", "active"):
+        store.add_listing(bike(item_id))
+        addresses[item_id] = await agentverse.create("Trek FX 2", "", "")
+        store.activate(item_id, "seller", addresses[item_id], host=AGENTVERSE)
+    store.close_deal("sold", "chat:x", 36000)
+    store.cancel("canceled", "seller")
+    async with sim.running_market(store, hosting=agentverse, host_limit=0):
+        for _ in range(100):
+            if len(agentverse.deleted) == 2:
+                break
+            await asyncio.sleep(0.02)
+    assert sorted(agentverse.deleted) == sorted([addresses["sold"], addresses["canceled"]])
+    assert list(agentverse.hosted) == [addresses["active"]]
+    assert [x.item_id for x in store.on_agentverse()] == ["active"]
+
+
+def test_only_closed_listings_are_marked_deleted(store: Store) -> None:
+    store.add_listing(bike())
+    store.activate("bike", "seller", "agent1qbike", host=AGENTVERSE)
+    store.agent_deleted("bike")
+    assert [x.item_id for x in store.on_agentverse()] == ["bike"]
+    store.cancel("bike", "seller")
+    store.agent_deleted("bike")
+    assert store.on_agentverse() == []
+
+
+async def test_deleting_an_agent_thats_already_gone_succeeds() -> None:
+    async def delete(request: web.Request) -> web.Response:
+        gone = request.match_info["address"] == "agent1qgone"
+        return web.Response(status=404 if gone else 500, text="no")
+
+    app = web.Application()
+    app.router.add_delete("/v1/hosting/agents/{address}", delete)
+    async with local_server(app) as base:
+        client = HostingClient("test-key", base)
+        await client.delete("agent1qgone")
+        with pytest.raises(HostingError) as failed:
+            await client.delete("agent1qbroken")
+        assert failed.value.status == 500
+    with pytest.raises(HostingError) as unreachable:
+        await client.delete("agent1qgone")  # the server has stopped
+    assert unreachable.value.status is None
+
+
 async def test_a_hosting_failure_falls_back_to_the_bureau(store: Store) -> None:
     agentverse = FakeAgentverse()
     agentverse.fail_start = True
@@ -358,3 +511,118 @@ async def test_a_hosting_failure_falls_back_to_the_bureau(store: Store) -> None:
         assert not PROFILE.search(approved) and "is for sale" in approved
         (listing,) = store.active()
         assert listing.host == BUREAU and agentverse.hosted == {}
+
+
+# --- Handles and pictures ----------------------------------------------------------------------
+
+
+def png(width: int = 1024, height: int = 1024) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (240, 200, 60)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+async def test_hosted_item_agents_get_a_handle_and_a_picture(store: Store) -> None:
+    agentverse = FakeAgentverse()
+    prompts: list[str] = []
+
+    async def draw(prompt: str) -> bytes:
+        prompts.append(prompt)
+        return png(1792, 1024)
+
+    pictures = ItemPictures(draw, agentverse.publish_picture)
+    async with sim.running_market(
+        store, hosting=agentverse, host_limit=2, pictures=pictures
+    ) as market:
+        try:
+            seller = market.user("seller")
+            await seller.say("sell this, at least $300", sim_photo())
+            await seller.say("ask $360")
+            approved = await seller.say("approve")
+            assert "live on Agentverse as @trek-fx-2-disc" in approved, approved
+            (listing,) = store.active()
+            assert listing.handle == "trek-fx-2-disc"
+            assert agentverse.handles[listing.address or ""] == "trek-fx-2-disc"
+            await asyncio.gather(*bureau_server.runtime().background)
+            url = agentverse.avatars[listing.address or ""]
+            with Image.open(io.BytesIO(agentverse.uploads[url])) as picture:
+                assert (picture.format, picture.size) == ("JPEG", (512, 512))
+            (prompt,) = prompts
+            assert "hybrid bike" in prompt and "matte black" in prompt
+            assert "Trek" not in prompt and "FX" not in prompt
+            assert "$300" not in prompt and "300" not in prompt  # never the floor
+            assert "(@trek-fx-2-disc)" in await seller.say("my listings")
+
+            # Agentverse suggests another handle when one is taken.
+            await approve_bike(market, "second")
+            second = next(x for x in store.active() if x.item_id != listing.item_id)
+            assert second.handle == "trek-fx-2-disc-2"
+        finally:
+            await agentverse.stop_all()
+
+
+async def test_handles_and_pictures_are_extras(store: Store) -> None:
+    """If Agentverse won't give a handle or ASI:One can't draw, the item is listed anyway."""
+    agentverse = FakeAgentverse()
+    agentverse.fail_handles = True
+
+    async def draw(prompt: str) -> bytes:
+        raise AvatarError("ASI:One returned 500")
+
+    pictures = ItemPictures(draw, agentverse.publish_picture)
+    async with sim.running_market(
+        store, hosting=agentverse, host_limit=1, pictures=pictures
+    ) as market:
+        try:
+            approved = await approve_bike(market)
+            assert PROFILE.search(approved) and " as @" not in approved
+            await asyncio.gather(*bureau_server.runtime().background)
+            (listing,) = store.active()
+            assert listing.host == AGENTVERSE and listing.handle is None
+            assert agentverse.avatars == {}
+        finally:
+            await agentverse.stop_all()
+
+
+async def test_without_item_pictures_nothing_is_drawn(store: Store) -> None:
+    agentverse = FakeAgentverse()
+    async with sim.running_market(store, hosting=agentverse, host_limit=1) as market:
+        try:
+            await approve_bike(market)
+            assert bureau_server.runtime().background == set()
+            assert agentverse.avatars == {} and len(agentverse.handles) == 1
+        finally:
+            await agentverse.stop_all()
+
+
+async def test_the_command_pictures_hosted_items_and_redraws_by_handle(store: Store) -> None:
+    agentverse = FakeAgentverse()
+    drawn: list[str] = []
+
+    async def draw(prompt: str) -> bytes:
+        drawn.append(prompt)
+        buffer = io.BytesIO()
+        Image.new("RGB", (64, 64), (40 * len(drawn), 90, 60)).save(buffer, "PNG")
+        return buffer.getvalue()  # a different picture each time
+
+    pictures = ItemPictures(draw, agentverse.publish_picture)
+    async with sim.running_market(store, hosting=agentverse, host_limit=1) as market:
+        try:
+            await approve_bike(market)
+            (listing,) = store.active()
+            handle = listing.handle or ""
+            assert handle and agentverse.avatars == {}  # pictures were off
+
+            assert await avatars.dress_hosted_items(agentverse, store, pictures) == set()
+            first = agentverse.avatars[listing.address or ""]
+            assert len(drawn) == 1
+            await avatars.dress_hosted_items(agentverse, store, pictures)
+            assert len(drawn) == 1  # it has one already
+
+            found = await avatars.dress_hosted_items(
+                agentverse, store, pictures, frozenset({handle, "no-such-item"})
+            )
+            assert found == {handle} and len(drawn) == 2
+            assert agentverse.avatars[listing.address or ""] != first  # a new URL
+        finally:
+            await agentverse.stop_all()
