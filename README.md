@@ -18,8 +18,9 @@ app yet (see [Going live](#going-live)). No code moves money: a deal is an agree
 
 ## Agents
 
-Yardsale is a [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/) project. These four agents are
-registered on Agentverse as mailbox agents and run in one Bureau server:
+Yardsale was started during [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/), October 23–25,
+2026. These four agents are registered on Agentverse as mailbox agents and run in one Bureau
+server:
 
 | Agent | Address | Does |
 | --- | --- | --- |

@@ -10,6 +10,8 @@ code works.
 
 From the [Cal Hacks 13.0 Devpost](https://cal-hacks-13-0.devpost.com/):
 
+- The [submission window](https://cal-hacks-13-0.devpost.com/details/dates) opens Friday,
+  October 23, 2026 at 6 PM PDT and closes Sunday, October 25 at 9 AM PDT.
 - Be at the venue by Sunday 8 AM PT. Submit by Sunday 9 AM PT, with teammates. The deadline is
   hard.
 - The submission needs an image of the project and the GitHub repository.
