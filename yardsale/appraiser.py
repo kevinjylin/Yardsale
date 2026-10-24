@@ -6,7 +6,7 @@ photo. The price math is plain code: the median of same-product sales sets the a
 
 from __future__ import annotations
 
-import statistics
+import math
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -25,11 +25,11 @@ from yardsale.models import (
     MatchedComp,
     ServiceError,
 )
+from yardsale.pricing import suggested_prices
 
 MAX_COMP_PHOTOS = 10
 SAME_PRODUCT_NEEDED = 3  # fewer same-product sales than this, and similar items count too
-SIMILAR_MIN = 0.6
-FLOOR_SHARE_OF_MEDIAN = 0.7
+SIMILAR_MIN = 0.6  # inclusive: a similarity of exactly 0.6 counts
 
 
 class Judgement(BaseModel):
@@ -110,20 +110,23 @@ async def judge_with_claude(
     return result.judgements
 
 
-def round_price(cents: float) -> int:
-    """Round to a price a person would ask: $1 steps under $20, $5 under $100, $10 above."""
-    step = 100 if cents < 2000 else 500 if cents < 10000 else 1000
-    return max(step, round(cents / step) * step)
-
-
 def appraise(request_id: str, comps: list[Comp], judgements: list[Judgement]) -> Appraisal:
+    """The price math, in plain code. Claude's judgements only say which sales match.
+
+    - 3 or more same-product sales: price from those only. Confidence is high with 5 or more.
+    - Fewer: add similar items (similarity 0.6 or more), and confidence is low.
+    - Neither: no price.
+    - Accepted Best Offer sales show the list price, not what was paid, so they're left out
+      whenever the chosen sales include any others.
+    """
     matches: dict[int, MatchedComp] = {}
     for j in judgements:
         if 0 <= j.index < len(comps) and j.index not in matches:
+            similarity = j.similarity if math.isfinite(j.similarity) else 0.0
             matches[j.index] = MatchedComp(
                 comp=comps[j.index],
                 same_product=j.same_product,
-                similarity=min(1.0, max(0.0, j.similarity)),
+                similarity=min(1.0, max(0.0, similarity)),
                 reason=j.reason,
             )
     same = [m for m in matches.values() if m.same_product]
@@ -155,16 +158,12 @@ def appraise(request_id: str, comps: list[Comp], judgements: list[Judgement]) ->
 
     used.sort(key=lambda m: (m.same_product, m.similarity), reverse=True)
     # A Best Offer sale shows the list price, not what the buyer paid, so skip those when we can.
-    prices = sorted(m.comp.price_cents for m in used if not m.comp.best_offer) or sorted(
-        m.comp.price_cents for m in used
-    )
-    median = statistics.median(prices)
-    if len(prices) >= 4:
-        low, _, high = statistics.quantiles(prices, n=4)
-    else:
-        low, high = prices[0], prices[-1]
-    asking = round_price(median)
-    floor = min(asking, round_price(max(low, median * FLOOR_SHARE_OF_MEDIAN)))
+    prices = [m.comp.price_cents for m in used if not m.comp.best_offer]
+    if prices and len(prices) < len(used):
+        skipped = len(used) - len(prices)
+        basis += f" (left out {skipped} Best Offer sale{'s' if skipped != 1 else ''})"
+    prices = prices or [m.comp.price_cents for m in used]
+    asking, floor, low, high = suggested_prices(prices)
     return Appraisal(
         request_id=request_id,
         comps_considered=len(comps),
@@ -173,8 +172,8 @@ def appraise(request_id: str, comps: list[Comp], judgements: list[Judgement]) ->
         confidence=confidence,
         asking_cents=asking,
         floor_cents=floor,
-        low_cents=int(low),
-        high_cents=int(high),
+        low_cents=low,
+        high_cents=high,
     )
 
 
@@ -191,6 +190,10 @@ def build_appraiser(judge: Judge, offline: bool) -> Agent:
     async def handle(ctx: Context, sender: str, msg: AppraiseRequest) -> None:
         try:
             judgements = await judge(msg.item, msg.image_b64, msg.media_type, msg.comps)
+        except llm.LLMError as ex:  # no key, or Claude declined
+            ctx.logger.warning(f"Appraisal failed: {ex}")
+            await ctx.send(sender, ServiceError(request_id=msg.request_id, reason=str(ex)[:300]))
+            return
         except Exception as ex:  # report every failure to the caller instead of going silent
             ctx.logger.exception("Appraisal failed")
             await ctx.send(sender, ServiceError(request_id=msg.request_id, reason=str(ex)[:300]))
