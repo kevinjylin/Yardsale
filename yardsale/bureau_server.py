@@ -69,6 +69,9 @@ from yardsale.common import (
     dollars,
     write_json,
 )
+from yardsale.craigslist_mail import POLL_EVERY as MAIL_POLL_EVERY
+from yardsale.craigslist_mail import CraigslistMail, Mailbox, MailConfigError, MailSettings
+from yardsale.craigslist_mail import settings_from_env as mail_settings_from_env
 from yardsale.hosting import HostingClient, HostingError, claim_handle, host_item, hosted_limit
 from yardsale.identifier import Identify, build_identifier, identify_with_claude
 from yardsale.models import (
@@ -166,6 +169,7 @@ class Runtime:
     registered: dict[str, bool] = field(default_factory=dict)  # item_id -> Almanac confirmed
     in_progress: set[tuple[str, str]] = field(default_factory=set)  # (seller, ref) being priced
     pending: dict[str, PendingReply] = field(default_factory=dict)  # request_id -> reply slot
+    craigslist: CraigslistMail | None = None  # answers Craigslist buyers' emails, when set up
 
 
 RUNTIME: Runtime | None = None
@@ -956,12 +960,14 @@ def build(
     host_limit: int = 0,
     round_timeout: float = 30.0,
     pictures: ItemPictures | None = None,
+    mail: MailSettings | None = None,
+    mailbox: Mailbox | None = None,
 ) -> tuple[Bureau, Agent, list[Agent]]:
     """Create the Bureau, the Market, the buyer agent and three service agents, and the agents
     of the store's active listings that run here, inside a running loop. Without a store, state
     lives in memory. Without `payments`, deals get no payment link; without `hosting`, every
-    item agent runs here; without `pictures`, hosted item agents get no picture. The returned
-    services include the buyer agent."""
+    item agent runs here; without `pictures`, hosted item agents get no picture; without `mail`,
+    nobody answers Craigslist buyers' emails. The returned services include the buyer agent."""
     global RUNTIME
     registration: BatchRegistrationPolicy = (
         NoBatchRegistration() if offline else BatchAlmanacApiRegistrationPolicy(logger=log)
@@ -1012,6 +1018,14 @@ def build(
     async def check_payments(ctx: Context) -> None:
         if rt.checkout.enabled:
             await rt.checkout.refresh_all()
+
+    if mail is not None:
+        # Craigslist buyers' emails go to the item agents as offers, like chat buyers' do.
+        craigslist = rt.craigslist = CraigslistMail(store, rt.checkout, mail, negotiate, mailbox)
+
+        @market.on_interval(period=MAIL_POLL_EVERY)
+        async def answer_craigslist_mail(ctx: Context) -> None:
+            await craigslist.poll(ctx)
 
     # Also runs on start, for agents whose listing closed while the server was down.
     @market.on_interval(period=RETRY_DELETES_EVERY)
@@ -1080,6 +1094,11 @@ async def main(mode: str) -> None:
     except PaymentConfigError as error:
         log.error(f"Payments are off: {error}")
         payments = None
+    try:
+        mail = mail_settings_from_env()
+    except MailConfigError as error:
+        log.error(f"Craigslist email is off: {error}")
+        mail = None
     api_key = os.getenv("AGENTVERSE_API_KEY", "").strip()
     hosting = HostingClient(api_key) if api_key and not offline else None
     bureau, market, services = build(
@@ -1092,6 +1111,7 @@ async def main(mode: str) -> None:
         hosting=hosting,
         host_limit=hosted_limit() if hosting else 0,
         pictures=item_pictures_from_env() if hosting else None,
+        mail=mail,
     )
     if not offline:
         await connect_to_agentverse([market, *services])
@@ -1116,6 +1136,8 @@ async def main(mode: str) -> None:
             "mailbox. Sellers chat with it in ASI:One or from its Agentverse profile. Item agents "
             f"restored: {restored}, advertising {runtime().endpoint}"
         )
+    if mail is not None:
+        log.info(f"Craigslist email: answering buyers every {MAIL_POLL_EVERY:.0f} s")
     for agent in services:
         log.info(f"{agent.name}: {agent.address}")
     # run_async() sets up every agent added so far, before any message can arrive. Item agents
