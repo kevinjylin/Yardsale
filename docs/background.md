@@ -193,6 +193,27 @@ the default QUIC connection dropped on venue Wi-Fi). A quick tunnel gets a new U
 starts. Live on October 24, `@yardsale` searched, haggled, and accepted through it; see
 [calhacks-plan.md](calhacks-plan.md#what-fetch-business-offers).
 
+## Buying through Craigslist email
+
+Code: [craigslist_mail.py](../yardsale/craigslist_mail.py). Added October 24 as a backup for the
+live demo: the item's agent negotiates; email is the channel.
+
+Craigslist bans automated posting and scraping, so the seller posts by hand. `craigslist` in the
+ASI:One chat gives a title, price, and description to paste, and the email to post with
+(`YARDSALE_MAIL_ADDRESS`, a Gmail account with an app password). A buyer who answers the post
+writes through Craigslist's relay. Every 10 seconds the Market reads new mail from Craigslist
+addresses, matches its subject to a posted title, and sends the item's agent (in the server or
+hosted on Agentverse) the same `Offer` or `AcceptCounter` a chat buyer's offer becomes, with
+`buyer_ref` `email-<hash of the relay address>`. The item agent's counter, agreement, or deal
+becomes the email reply, sent through the relay in the buyer's thread with a payment link once
+they accept. A dollar amount is an offer, and "deal", "I'll take it", or "yes" while a price is
+on the table accepts it; both are read with patterns, not a model. If the item agent doesn't
+answer in time, the buyer gets "let me check" once and the email is tried again.
+
+The Market can't start a message in a seller's ASI:One chat (it keeps only a hash of the
+session), so `my listings` shows Craigslist buyers and sales. Setup steps are in the
+[README](../README.md#craigslist-by-email).
+
 ## Saved state
 
 [store.py](../yardsale/store.py) keeps listings (and whether each agent runs in the server or on
@@ -308,6 +329,12 @@ per agent, because agent addresses come from the master seed and don't change.
   Orders page takes orders only from Square or SumUp POS, so our sales don't show there. The
   API is public only through a quick tunnel, whose URL changes when it restarts. Details are in
   [calhacks-plan.md](calhacks-plan.md#what-fetch-business-offers).
+- **Craigslist by email.** Tested only with a fake inbox; never run against real Craigslist
+  or Gmail. Unknown: whether the relay takes replies only from the posting's own email (we reply
+  from it), whether relayed subjects keep the title (matching ignores case and punctuation),
+  what the relayed body contains (a quoted price in it could be read as an offer), relay
+  delays, and whether links are stripped (if so, `YARDSALE_MAIL_LINKS=0` asks the buyer for a
+  phone number and the seller texts the link from `my listings`).
 - **Telling sellers about a sale.** The seller sees a sale under "my listings"; Yardsale doesn't
   message them when it happens.
 - **Interactive Cards in the real app.** Proposals, the eBay sales behind a price (a carousel),
