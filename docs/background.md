@@ -68,9 +68,11 @@ sections cover it.
 Code: [yardsale/chat.py](../yardsale/chat.py) and [yardsale/asione.py](../yardsale/asione.py).
 
 1. The seller attaches a photo and types anything, like "sell this, at least $40, small dent".
-2. ASI:One uploads the photo and sends the Market a web link to it, in a `ResourceContent` or as
-   a link in the text when its planner relays the message. The Market downloads it, fixes the
-   rotation, and shrinks it to a 1280 px JPEG. HEIC works.
+2. ASI:One uploads the photo and sends it to the Market in a `ResourceContent`: as a web link
+   (a Cloudinary link, whose `mime_type` can be just `"image"`), or as an `agent-storage://`
+   file in Agentverse storage, which the Market downloads with its own identity. When the
+   planner relays the message, the link can be in the text instead. The Market downloads the
+   photo, fixes the rotation, and shrinks it to a 1280 px JPEG. HEIC works.
 3. `asi1-mini` reads the text into an intent (sell, buy, other), an asking price, a lowest
    price, a note such as "size M", and for buyers a search and a budget. It uses a strict JSON
    schema. If ASI:One is down or `ASI_ONE_API_KEY` isn't set, a keyword reader
@@ -190,12 +192,16 @@ per agent, because agent addresses come from the master seed and don't change.
 - **Public address.** `YARDSALE_PUBLIC_URL` sets the URL item agents advertise. It's untested:
   the server needs a hosted machine or a tunnel such as ngrok.
 - **ASI:One end to end.** The Market speaks the Chat Protocol, publishes it to Agentverse, and
-  has a mailbox, and tests cover selling and buying with fakes. Nobody has sent it a photo from
-  the real ASI:One app yet. Unknown: whether upload links download without authentication,
-  whether one chat keeps one session ID, and whether the planner routes "sell this" to it without
-  an @mention.
-- **Real keys.** The pipeline hasn't run with real Claude and Apify keys or a real photo, so
-  matching quality and Apify's response time are unproven.
+  has a mailbox, and tests cover selling and buying with fakes. On October 23 photos sent from
+  the real ASI:One app were priced: one was listed before seller approval was added, and one
+  became a proposal whose Approve card showed in ASI:One. Uploads came as Cloudinary links with
+  `mime_type` `"image"` and downloaded without authentication, and one chat kept one session ID
+  across messages. ASI:One's chat page sometimes shows a slow reply only after a reload.
+  Unknown: whether tapping a card reaches the Market, and whether the planner routes "sell this"
+  to it without an @mention.
+- **Real keys.** On October 23, with real Claude and Apify keys, a photo of Air Jordan 4s was
+  identified and priced from 20 eBay sales of the same product. Matching quality for other kinds
+  of items is unproven.
 - **Live buyer test needs the Market connected.** In live mode the Market's Almanac entry points
   at its Agentverse mailbox, so `buyer_test` without `--offline` only reaches it once it's
   connected to Agentverse.

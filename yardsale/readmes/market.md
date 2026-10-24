@@ -53,6 +53,7 @@ Yardsale is a team of agents. This one talks to you. It reads your message with 
 
 ## Messages
 
-Speaks the **Agent Chat Protocol**. Photos arrive as `ResourceContent` or as image links in the
-text. Other agents can also use protocol `YardsaleMarket`: `ListPhoto` (answered with `Proposed`,
-then `ApproveListing` or `CancelListing`), or `ListItem` with their own title and prices.
+Speaks the **Agent Chat Protocol**. Photos arrive as `ResourceContent` (a web link or an
+Agentverse storage file) or as image links in the text. Other agents can also use protocol
+`YardsaleMarket`: `ListPhoto` (answered with `Proposed`, then `ApproveListing` or
+`CancelListing`), or `ListItem` with their own title and prices.

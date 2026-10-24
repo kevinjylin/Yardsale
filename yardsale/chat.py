@@ -15,9 +15,10 @@ Proposals, search results, and counter-offers also carry Interactive Cards (Appr
 Accept buttons) from uagents_core's chat cards module. Tapping one does exactly what typing the
 command does, with the same checks; the text works on its own wherever cards don't show.
 
-ASI:One sends an upload as a web link, either in a ResourceContent or as a link in the text when
-its planner relays the message. The planner also repeats earlier links in later messages, so each
-conversation remembers which photos it has already priced.
+ASI:One sends an upload as a ResourceContent: either a web link, or an `agent-storage://` file in
+Agentverse storage that the Market downloads with its own identity. When its planner relays the
+message, the link can also be in the text. The planner repeats earlier links in later messages, so
+each conversation remembers which photos it has already priced.
 
 The planner stops waiting for a reply after about 60 seconds, and pricing can take longer (the
 eBay search alone can take a minute). So the Market answers within REPLY_WITHIN seconds of
@@ -80,7 +81,7 @@ from yardsale.models import (
     Offer,
     OfferRejected,
 )
-from yardsale.photos import PhotoError, prepare_photo
+from yardsale.photos import PhotoError, download_asset, prepare_photo
 from yardsale.pricing import PriceError, to_cents, usd
 from yardsale.search import search
 from yardsale.store import ACTIVE, PROPOSED, SOLD, Listing, Store
@@ -91,6 +92,12 @@ MAX_REMEMBERED = 200  # photo links per conversation, and message IDs overall
 log = logging.getLogger("yardsale.chat")
 
 FetchPhoto = Callable[[str], Awaitable[bytes]]
+# Downloads an Agentverse storage asset shared with the agent handling the message.
+FetchAsset = Callable[[Context, str], Awaitable[bytes]]
+
+
+async def download_attachment(ctx: Context, asset_id: str) -> bytes:
+    return await download_asset(ctx.agent.identity, asset_id)
 
 
 class Backend(Protocol):
@@ -178,8 +185,9 @@ def as_reply(answer: str | Reply) -> Reply:
 
 @dataclass(frozen=True)
 class Photo:
-    url: str
+    url: str  # a web link, or the agent-storage:// URI of an Agentverse file
     mime_type: str
+    asset_id: str | None = None  # set for Agentverse files, which are downloaded by ID
 
 
 @dataclass
@@ -240,10 +248,21 @@ def photos_in(msg: ChatMessage) -> list[Photo]:
         if not isinstance(item, ResourceContent):
             continue
         for resource in item.resource if isinstance(item.resource, list) else [item.resource]:
-            url = _resource_url(resource.uri, resource.metadata)
+            # ASI:One's mime_type isn't always a full "image/jpeg", so an image link is trusted
+            # whatever it says. Anything that isn't a photo is refused later, when it's opened.
             mime_type = resource.metadata.get("mime_type", "")
-            if url and (mime_type.startswith("image/") or not mime_type):
+            image_type = not mime_type or mime_type.lower().startswith("image")
+            url = _resource_url(resource.uri, resource.metadata)
+            if url and (image_type or _is_image_link(url)):
                 found.append(Photo(url=url, mime_type=mime_type or "image/*"))
+            elif not url and image_type and resource.uri.startswith("agent-storage://"):
+                found.append(
+                    Photo(
+                        url=resource.uri,
+                        mime_type=mime_type or "image/*",
+                        asset_id=str(item.resource_id),
+                    )
+                )
     text = msg.text()
     links = _MARKDOWN_LINK.findall(text) + [_trim(link) for link in _BARE_LINK.findall(text)]
     for link in links:
@@ -270,6 +289,19 @@ def text_message(
         # Tells ASI:One this agent accepts file uploads.
         content.append(MetadataContent(type="metadata", metadata={"attachments": "true"}))
     return ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=content)
+
+
+def attachments_summary(msg: ChatMessage) -> str:
+    """What each attachment looks like, for the log, so a photo that's missed can be diagnosed."""
+    parts = []
+    for item in msg.content:
+        if isinstance(item, ResourceContent):
+            for resource in item.resource if isinstance(item.resource, list) else [item.resource]:
+                mime_type = resource.metadata.get("mime_type")
+                parts.append(
+                    f"{resource.uri[:120]} mime_type={mime_type!r} keys={sorted(resource.metadata)}"
+                )
+    return "; ".join(parts) or "none"
 
 
 def card_choice(msg: ChatMessage) -> dict[str, SelectionValue] | None:
@@ -451,7 +483,12 @@ def deal_text(deal: Deal) -> str:
 # --- The protocol --------------------------------------------------------------------------------
 
 
-def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) -> AgentProtocol:
+def build_chat_protocol(
+    backend: Backend,
+    read: ReadMessage,
+    fetch: FetchPhoto,
+    fetch_asset: FetchAsset = download_attachment,
+) -> AgentProtocol:
     proto = AgentProtocol(spec=chat_protocol_spec)
     store = backend.store
     locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -489,7 +526,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         try:
             wanted = await read(text, True)
             asking, floor = to_cents(wanted.asking_usd), to_cents(wanted.floor_usd)
-            data = await fetch(photo.url)
+            if photo.asset_id:
+                data = await fetch_asset(ctx, photo.asset_id)
+            else:
+                data = await fetch(photo.url)
             image_b64, media_type = await asyncio.to_thread(prepare_photo, data)
             listing = await backend.propose(
                 ctx,
@@ -514,7 +554,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             )
         except (PhotoError, PipelineError, PriceError) as ex:
             # A PriceError's message can include the seller's floor, which stays out of logs.
-            detail = "prices didn't work" if isinstance(ex, PriceError) else str(ex)
+            if isinstance(ex, PriceError):
+                detail = "prices didn't work"
+            else:
+                detail = f"{ex} ({ex.__cause__})" if ex.__cause__ else str(ex)
             ctx.logger.warning(f"Chat photo for {key[:8]} failed: {detail}")
             reply = Reply(f"I couldn't price this. {ex} Send the photo again to retry.")
         except Exception:
@@ -893,7 +936,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 conv.greeted = True
                 save(conv)
         # Message text can include a seller's lowest price, so it isn't logged.
-        ctx.logger.info(f"Chat message in {key[:8]} ({len(photos_in(msg))} photo link(s))")
+        ctx.logger.info(
+            f"Chat message in {key[:8]} ({len(photos_in(msg))} photo link(s)), "
+            f"attachments: {attachments_summary(msg)}"
+        )
 
         job = asyncio.ensure_future(handle_safely(ctx, key, msg))
         left = REPLY_WITHIN - (asyncio.get_running_loop().time() - received)

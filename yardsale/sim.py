@@ -33,7 +33,7 @@ from uagents_core.contrib.protocols.chat.cards import (
 from yardsale import bureau_server, chat, fakes
 from yardsale.appraiser import Judge
 from yardsale.asione import ReadMessage
-from yardsale.chat import FetchPhoto
+from yardsale.chat import FetchAsset, FetchPhoto
 from yardsale.identifier import Identify
 from yardsale.researcher import Research
 from yardsale.store import Store
@@ -87,10 +87,18 @@ async def running_market(
     judge: Judge = fakes.judge,
     read: ReadMessage = fakes.read,
     fetch: FetchPhoto = fakes.fetch,
+    fetch_asset: FetchAsset = fakes.fetch_asset,
 ) -> AsyncIterator[Market]:
     """The Market and friends in offline mode, with the store's active listings restored."""
     _, market, services = bureau_server.build(
-        True, identify, research, judge, read=read, fetch=fetch, store=store
+        True,
+        identify,
+        research,
+        judge,
+        read=read,
+        fetch=fetch,
+        store=store,
+        fetch_asset=fetch_asset,
     )
     rt = bureau_server.runtime()
     start([market, *services, *rt.agents.values()])

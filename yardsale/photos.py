@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import io
@@ -15,6 +16,9 @@ from aiohttp.abc import ResolveResult
 from aiohttp.resolver import ThreadedResolver
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
+from uagents_core.config import AgentverseConfig
+from uagents_core.identity import Identity
+from uagents_core.storage import ExternalStorage
 from yarl import URL
 
 MAX_EDGE = 1280  # pixels; plenty for identification and keeps agent messages small
@@ -138,3 +142,22 @@ async def download_photo(url: str) -> bytes:
             raise PhotoError("The photo link redirected too many times.")
     except (aiohttp.ClientError, TimeoutError) as ex:
         raise PhotoError("I couldn't download the photo. Try sending it again.") from ex
+
+
+async def download_asset(identity: Identity, asset_id: str) -> bytes:
+    """Fetch a chat attachment that ASI:One put in Agentverse storage and shared with this agent.
+
+    The agent signs the request with its own identity. The storage address is passed in because
+    ExternalStorage's default reads a config field that uagents_core doesn't have.
+    """
+    storage = ExternalStorage(identity=identity, storage_url=AgentverseConfig().storage_api)
+    try:
+        asset = await asyncio.to_thread(storage.download, asset_id)
+        data = base64.b64decode(asset["contents"], validate=True)
+    except (OSError, RuntimeError, KeyError, TypeError, binascii.Error) as ex:
+        raise PhotoError(
+            "I couldn't download the photo from ASI:One. Try sending it again."
+        ) from ex
+    if len(data) > MAX_DOWNLOAD_BYTES:
+        raise PhotoError("That photo is over 25 MB. Send a smaller one.")
+    return data

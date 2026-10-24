@@ -317,6 +317,58 @@ def test_resource_link_can_be_in_metadata() -> None:
     assert [p.url for p in chat.photos_in(msg)] == [BIKE]
 
 
+def upload(uri: str, mime_type: str, resource_id: str | None = None) -> ResourceContent:
+    resource = Resource(uri=uri, metadata={"mime_type": mime_type, "role": "user"})
+    return ResourceContent(type="resource", resource_id=resource_id or uuid4(), resource=resource)
+
+
+# A Cloudinary upload like ASI:One's, which came with mime_type "image" on October 23. With no file
+# extension, only the mime_type or the Cloudinary path says it's a photo.
+ASI_ONE_UPLOAD = "https://res.cloudinary.com/fetch-ai/image/upload/v1/chat-images/kmzr0d8"
+
+
+@pytest.mark.parametrize("mime_type", ["image", "jpeg", "IMAGE/JPEG", "application/octet-stream"])
+def test_image_link_is_used_whatever_its_mime_type(mime_type: str) -> None:
+    msg = sim.chat_message("i wanna sell this")
+    msg.content.append(upload(ASI_ONE_UPLOAD, mime_type))
+    assert [p.url for p in chat.photos_in(msg)] == [ASI_ONE_UPLOAD]
+
+
+async def test_an_asi_one_upload_typed_image_is_priced(market: sim.Market) -> None:
+    msg = sim.chat_message("i wanna sell this")
+    msg.content.append(upload(ASI_ONE_UPLOAD, "image"))
+    assert "suggested listing" in (await market.user("seller").exchange(msg)).text()
+
+
+def stored_photo(text: str = "", asset_id: str | None = None) -> ChatMessage:
+    """An upload as a file in Agentverse storage, not a web link."""
+    asset_id = asset_id or str(uuid4())
+    msg = sim.chat_message(text)
+    uri = f"agent-storage://agentverse.ai/v1/storage/assets/{asset_id}"
+    msg.content.append(upload(uri, "image/jpeg", asset_id))
+    return msg
+
+
+def test_agentverse_stored_photo_is_found() -> None:
+    msg = stored_photo("sell these", "11111111-1111-4111-8111-111111111111")
+    (photo,) = chat.photos_in(msg)
+    assert photo.asset_id == "11111111-1111-4111-8111-111111111111"
+    assert photo.url.startswith("agent-storage://")
+    assert "agent-storage://" in chat.attachments_summary(msg)
+
+
+async def test_agentverse_stored_photo_becomes_a_proposal(market: sim.Market) -> None:
+    reply = await market.user("seller").exchange(stored_photo("sell these"))
+    assert "suggested listing" in reply.text()
+
+
+async def test_agentverse_photo_that_cannot_be_downloaded_is_explained(
+    market: sim.Market,
+) -> None:
+    reply = await market.user("seller").exchange(stored_photo("sell", fakes.BROKEN_ASSET))
+    assert reply.text().startswith("I couldn't price this. I couldn't download the photo from")
+
+
 async def test_photo_link_in_the_text_is_used(market: sim.Market) -> None:
     assert "suggested listing" in await market.user("seller").say(f"sell this ![photo]({BIKE})")
 

@@ -47,7 +47,7 @@ from yardsale import config
 from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
-from yardsale.chat import FetchPhoto, build_chat_protocol
+from yardsale.chat import FetchAsset, FetchPhoto, build_chat_protocol, download_attachment
 from yardsale.common import (
     BUREAU_PORT,
     MARKET_FILE,
@@ -726,6 +726,7 @@ def build(
     read: ReadMessage = read_seller_message,
     fetch: FetchPhoto = download_photo,
     store: Store | None = None,
+    fetch_asset: FetchAsset = download_attachment,
 ) -> tuple[Bureau, Agent, list[Agent]]:
     """Create the Bureau, the Market, the three service agents, and the agents of the store's
     active listings, inside a running loop. Without a store, state lives in memory."""
@@ -758,7 +759,8 @@ def build(
     market = service_agent("market", "Yardsale", MARKET_DESCRIPTION, offline)
     market.include(market_proto)
     market.include(
-        build_chat_protocol(MarketBackend(rt), read, fetch), publish_manifest=not offline
+        build_chat_protocol(MarketBackend(rt), read, fetch, fetch_asset),
+        publish_manifest=not offline,
     )
     rt.market = market.address
     for agent in (market, *services):
@@ -799,15 +801,23 @@ async def main(mode: str) -> None:
     judge: Judge = judge_with_claude
     read: ReadMessage = read_seller_message
     fetch: FetchPhoto = download_photo
+    fetch_asset: FetchAsset = download_attachment
     if mode == "demo":
         from yardsale import fakes
 
         identify, research, judge = fakes.identify, fakes.research, fakes.judge
-        read, fetch = fakes.read, fakes.fetch
+        read, fetch, fetch_asset = fakes.read, fakes.fetch, fakes.fetch_asset
 
     store = Store(config.db_path(mode))
     bureau, market, services = build(
-        offline, identify, research, judge, read=read, fetch=fetch, store=store
+        offline,
+        identify,
+        research,
+        judge,
+        read=read,
+        fetch=fetch,
+        store=store,
+        fetch_asset=fetch_asset,
     )
     if not offline:
         await connect_to_agentverse([market, *services])

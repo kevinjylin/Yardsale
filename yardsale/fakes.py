@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PIL import Image, ImageDraw
+from uagents import Context
 
 from yardsale.appraiser import Judgement
 from yardsale.asione import SellerMessage, read_locally
@@ -214,6 +215,16 @@ async def fetch(url: str) -> bytes:
     if "broken" in name:
         raise PhotoError("I couldn't download the photo (the link returned 404).")
     return photo_bytes(name if name in CATALOG else "bike")
+
+
+BROKEN_ASSET = "00000000-0000-4000-8000-000000000000"
+
+
+async def fetch_asset(ctx: Context, asset_id: str) -> bytes:
+    """An Agentverse storage download: always the bike photo, and BROKEN_ASSET fails."""
+    if asset_id == BROKEN_ASSET:
+        raise PhotoError("I couldn't download the photo from ASI:One. Try sending it again.")
+    return photo_bytes("bike")
 
 
 if __name__ == "__main__":

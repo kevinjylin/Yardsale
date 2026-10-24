@@ -82,8 +82,8 @@ money or reach Fetch's servers.
 
 Proposals, search results, and counter-offers also carry Interactive Cards from the installed
 `uagents_core` chat cards module: Approve or Cancel, Details, Accept. A tap does exactly what the
-typed command does, with the same checks. Whether ASI:One shows the cards is unverified, so the
-text always works on its own.
+typed command does, with the same checks. ASI:One showed the proposal card on October 23, but
+whether a tap reaches the Market is unverified, so the text always works on its own.
 
 Pricing can take over a minute, and ASI:One's planner gives up after about 60 seconds. So the
 Market acknowledges every message at once and replies within 40 seconds: with the result, or with
@@ -208,11 +208,11 @@ values.
    set `AGENTVERSE_API_KEY`, or open each Inspector link the server logs while signed in, click
    Connect, and choose Mailbox. Addresses don't change, so this is one-time.
 5. **ASI:One photo delivery.** From the real ASI:One app, chat with the Yardsale agent, attach a
-   photo, and check the server log shows it priced. Unverified: whether ASI:One's upload links
-   download without authentication, and whether the planner routes "sell this" to Yardsale
-   without an @mention.
-6. **Sessions.** Confirm that one ASI:One chat keeps one session ID across messages. Approval and
-   haggling rely on it to recognize the same person.
+   photo, and check the server log shows it priced. The log lists each attachment's link and
+   `mime_type`. Cloudinary uploads were priced this way on October 23. Unverified: whether the
+   planner routes "sell this" to Yardsale without an @mention.
+6. **Sessions.** One ASI:One chat kept the same session ID across messages on October 23.
+   Approval and haggling rely on it to recognize the same person.
 7. **Fetch Business.** Set up `@yardsale`, and test whether ASI:One finds it and whether it can
    hand off to the Market's address. No code depends on this; it's unverified.
 8. **Live buyer test.** `buyer_test` without `--offline` reaches the Market through its
