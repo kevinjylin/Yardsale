@@ -10,6 +10,8 @@ telling buyers to message the Market:
     POST /haggles/{id}/accept     buy at the haggled price; returns the payment link
     GET  /deals/{id}              whether a deal is paid
     GET  /openapi.json            this API's description (no key needed)
+    GET  /ebay/callback           where eBay sends a seller after connecting their account (no
+                                  key; its one-time `state` is checked instead). Not a tool.
 
 Every call except /openapi.json needs the X-Yardsale-Key header (or "Authorization: Bearer") to
 match YARDSALE_API_KEY. Without that key the API doesn't start. It listens on
@@ -26,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import html
 import logging
 import os
 import secrets
@@ -38,6 +41,7 @@ from uagents import Context
 
 from yardsale.chat import LOWEST_SHARE_REACH, STATUS_TEXT, Backend, haggle_text
 from yardsale.common import PipelineError
+from yardsale.ebay_seller import EbayError
 from yardsale.hosting import profile_url
 from yardsale.models import AcceptCounter, Counter, Deal, HaggleResult, OfferRejected
 from yardsale.payments import PaymentError
@@ -47,6 +51,7 @@ from yardsale.store import AGENTVERSE, PENDING, Listing
 
 DEFAULT_PORT = 8110
 KEY_HEADER = "X-Yardsale-Key"
+EBAY_CALLBACK = "/ebay/callback"  # eBay's redirect after a seller connects (ebay_seller.py)
 ANSWER_WITHIN = 25.0  # seconds POST /haggles waits before answering "still haggling"
 QUOTES_LAST = 24 * 3600  # seconds a haggled price can be accepted, like the item agents' counters
 BUYER_PREFIX = "api-"  # buyer_ref of an API buyer; its deals are "chat:api-..."
@@ -164,6 +169,7 @@ class BusinessApi:
         app.router.add_get("/haggles/{haggle_id}", self.get_haggle)
         app.router.add_post("/haggles/{haggle_id}/accept", self.accept)
         app.router.add_get("/deals/{deal_id}", self.get_deal)
+        app.router.add_get(EBAY_CALLBACK, self.ebay_callback)
         return app
 
     @web.middleware
@@ -186,7 +192,7 @@ class BusinessApi:
 
     @web.middleware
     async def _auth(self, request: web.Request, handler: Any) -> web.StreamResponse:
-        if request.path == "/openapi.json":
+        if request.path in ("/openapi.json", EBAY_CALLBACK):  # eBay's redirect sends no key
             return await handler(request)
         given = request.headers.get(KEY_HEADER, "")
         bearer = request.headers.get("Authorization", "")
@@ -488,6 +494,40 @@ class BusinessApi:
                 "payment_url": deal.payment_url if deal.payment_status == PENDING else None,
             }
         )
+
+    # --- eBay sign-in ------------------------------------------------------------------------
+
+    async def ebay_callback(self, request: web.Request) -> web.Response:
+        """Where eBay sends a seller back after its consent page (the RuName's accept URL, and
+        its decline URL too). The state must be one this server gave out, unused and recent."""
+        ebay = self.backend.ebay
+        if ebay is None:
+            return _page(404, "eBay isn't set up on this Yardsale server.")
+        state = request.query.get("state", "")
+        code = request.query.get("code", "")
+        if not code:
+            ebay.decline_connect(state)
+            return _page(
+                400,
+                'eBay wasn\'t connected. Go back to the chat and say "connect ebay" to try again.',
+            )
+        try:
+            await ebay.finish_connect(state, code)
+        except EbayError as ex:
+            log.warning(f"eBay sign-in failed: {ex}")
+            return _page(400, f"eBay wasn't connected. {ex}")
+        return _page(200, "eBay connected. Go back to the chat.")
+
+
+def _page(status: int, message: str) -> web.Response:
+    body = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Yardsale</title></head>"
+        "<body style='font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; "
+        f"padding: 0 1rem'><h1>Yardsale</h1><p>{html.escape(message)}</p></body></html>"
+    )
+    return web.Response(status=status, text=body, content_type="text/html")
 
 
 async def serve(api: BusinessApi, port: int) -> web.AppRunner:

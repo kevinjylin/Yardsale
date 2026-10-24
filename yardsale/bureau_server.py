@@ -69,6 +69,9 @@ from yardsale.common import (
     dollars,
     write_json,
 )
+from yardsale.ebay_seller import CHECK_EVERY as EBAY_CHECK_EVERY
+from yardsale.ebay_seller import EbaySeller
+from yardsale.ebay_seller import from_env as ebay_from_env
 from yardsale.hosting import HostingClient, HostingError, claim_handle, host_item, hosted_limit
 from yardsale.identifier import Identify, build_identifier, identify_with_claude
 from yardsale.models import (
@@ -156,6 +159,7 @@ class Runtime:
     hosting: HostingClient | None = None
     host_limit: int = 0  # how many item agents may be on Agentverse at once (0 = host none)
     pictures: ItemPictures | None = None  # draws and publishes hosted item agents' pictures
+    ebay: EbaySeller | None = None  # lists on sellers' own eBay and answers its Best Offers
     background: set[asyncio.Task[None]] = field(default_factory=set)  # kept until they finish
     deleting: asyncio.Lock = field(default_factory=asyncio.Lock)  # one delete sweep at a time
     round_timeout: float = 30.0  # the buyer agent's wait for one item agent's answer
@@ -815,6 +819,7 @@ class MarketBackend:
         self.store = rt.store
         self.offline = rt.offline
         self.boot_id = rt.boot_id
+        self.ebay = rt.ebay
 
     async def propose(self, ctx: Context, owner: str, photo: ListPhoto) -> Listing:
         async def log_progress(stage: str, text: str) -> None:
@@ -956,6 +961,7 @@ def build(
     host_limit: int = 0,
     round_timeout: float = 30.0,
     pictures: ItemPictures | None = None,
+    ebay: EbaySeller | None = None,
 ) -> tuple[Bureau, Agent, list[Agent]]:
     """Create the Bureau, the Market, the buyer agent and three service agents, and the agents
     of the store's active listings that run here, inside a running loop. Without a store, state
@@ -993,6 +999,7 @@ def build(
         host_limit=host_limit,
         round_timeout=round_timeout,
         pictures=pictures,
+        ebay=ebay,
     )
     # On Agentverse in live mode, so ASI:One can reach it. Handles messages concurrently, so a
     # photo listing waiting on a service doesn't block other messages.
@@ -1012,6 +1019,11 @@ def build(
     async def check_payments(ctx: Context) -> None:
         if rt.checkout.enabled:
             await rt.checkout.refresh_all()
+
+    @market.on_interval(period=EBAY_CHECK_EVERY)
+    async def check_ebay(ctx: Context) -> None:
+        if rt.ebay is not None:
+            await rt.ebay.poll()
 
     # Also runs on start, for agents whose listing closed while the server was down.
     @market.on_interval(period=RETRY_DELETES_EVERY)
@@ -1092,6 +1104,7 @@ async def main(mode: str) -> None:
         hosting=hosting,
         host_limit=hosted_limit() if hosting else 0,
         pictures=item_pictures_from_env() if hosting else None,
+        ebay=ebay_from_env(store),
     )
     if not offline:
         await connect_to_agentverse([market, *services])

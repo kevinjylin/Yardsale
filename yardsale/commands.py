@@ -28,6 +28,10 @@ Kind = Literal[
     "select",
     "help",
     "amount",
+    "ebay_connect",
+    "ebay_disconnect",
+    "ebay_zip",
+    "ebay_list",
 ]
 
 # $1,250.50 or 1250 or 40.5, not part of a longer number such as 40.999
@@ -114,6 +118,21 @@ _ACCEPTS = re.compile(
     r"complete\s+the\s+(?:purchase|deal|order)|"
     r"proceed\s+(?:with\s+)?(?:the\s+)?(?:purchase|deal|order|checkout))\b"
 )
+_ZIP = r"(\d{5})(?:-\d{4})?"
+_EBAY_DISCONNECT = re.compile(
+    r"\b(?:disconnect|unlink|remove|forget)\s+(?:my\s+)?ebay(?:\s+account)?\b"
+)
+_EBAY_CONNECT = re.compile(
+    r"\b(?:connect|link|hook\s+up|add|sign\s+in\s+(?:to|with)|log\s+in\s+(?:to|with))\s+"
+    r"(?:my\s+|to\s+)?ebay(?:\s+account)?\b(?:\D{0,20}?\b" + _ZIP + r"\b)?"
+)
+_EBAY_ZIP = re.compile(
+    r"^(?:my\s+)?(?:ebay\s+)?(?:zip|postal)(?:\s*code)?\s*(?:is\s+|:\s*|=\s*)?" + _ZIP + r"$"
+)
+_EBAY_LIST = re.compile(
+    r"^(?:list|post|put|sell)\s+(?:it\s+|them\s+|(?:my\s+)?(?:listings?|items?|stuff)\s+)?"
+    r"(?:on|to)\s+ebay(?:\s+too)?(?:\s+" + _PICK + r")?$"
+)
 _NOT_ACCEPTING = re.compile(
     r"\b(?:not|don'?t|doesn'?t|won'?t|never|decline[sd]?|reject(?:s|ed)?|cancel(?:s|led)?|"
     r"find|search|look(?:ing)?\s+for|show\s+me|another|instead|other)\b|n't\b"
@@ -130,6 +149,7 @@ class Command:
     approve: bool = False  # "approve at $350": change the price, then approve
     error: str = ""  # a price that couldn't be used
     text: str = ""  # the message, for commands that also search ("haggle for a road bike")
+    zip_code: str = ""  # a seller's ZIP code, for listing on eBay
 
 
 def _cents(match: re.Match[str] | None) -> tuple[int | None, str]:
@@ -168,6 +188,17 @@ def parse(text: str) -> Command | None:
     lowered = " ".join(text.lower().split()).rstrip(".!?")
     if not lowered:
         return None
+    if _EBAY_DISCONNECT.search(lowered):
+        return Command("ebay_disconnect")
+    ebay = _EBAY_CONNECT.search(lowered)
+    if ebay is not None:
+        return Command("ebay_connect", zip_code=ebay.group(1) or "")
+    ebay = _EBAY_ZIP.search(lowered)
+    if ebay is not None:
+        return Command("ebay_zip", zip_code=ebay.group(1))
+    ebay = _EBAY_LIST.search(lowered)
+    if ebay is not None:
+        return Command("ebay_list", pick=int(ebay.group(1)) if ebay.group(1) else None)
     offer = _OFFER.search(lowered)
     if offer is not None:
         amount, error = _cents(offer)

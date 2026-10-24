@@ -40,6 +40,7 @@ or cancel them, or accept its counter-offers.
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import json
@@ -96,6 +97,7 @@ from yardsale import commands
 from yardsale.asione import ReadMessage
 from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
+from yardsale.ebay_seller import EbayError, EbaySeller
 from yardsale.models import (
     AcceptCounter,
     Appraisal,
@@ -142,6 +144,7 @@ class Backend(Protocol):
     store: Store
     offline: bool
     boot_id: str
+    ebay: EbaySeller | None  # sellers' own eBay accounts; None when eBay isn't set up
 
     async def propose(self, ctx: Context, owner: str, photo: ListPhoto) -> Listing:
         """Price a photo and save the proposal. Raises PipelineError or UnpricedError."""
@@ -195,7 +198,7 @@ HELP = (
     "Hi, I'm Yardsale.\n"
     "To sell: attach a photo of the item. I'll work out what it is, price it from recent eBay "
     'sales, and suggest a listing for you to approve. You can add your own price, like "at '
-    'least $40".\n'
+    'least $40". Say "connect ebay" to also list on your own eBay account.\n'
     "To buy: tell me what you're looking for and your max, like \"find me a road bike, haggle "
     "for me, max $250\". My buyer agent haggles with every matching seller's agent at once and "
     "shows you the best price. You can also make your own offers."
@@ -224,6 +227,12 @@ ASK_MAX = (
     'sellers. Reply with an amount, like "$250".'
 )
 LOWEST_SHARE_REACH = (10, 7)  # haggle with items asking up to max * 10/7: floors are often 70%
+EBAY_LIST_WITHIN = 30.0  # seconds approval waits for eBay before replying without it
+EBAY_CONNECTED = (
+    "Your eBay account is connected. Listings you approve also go up on eBay, and my agent "
+    "answers their Best Offers with your lowest price, which eBay never sees.\n\n"
+)
+EBAY_OFF = "eBay isn't set up on this Yardsale server, so listings stay on Yardsale."
 RESTARTED = (
     "A photo you sent earlier didn't finish pricing because Yardsale restarted. Please send it "
     "again.\n\n"
@@ -268,6 +277,7 @@ class Conversation:
     awaiting: str | None = None  # "proposal", "counter", or "max": what a bare reply answers
     quotes: dict[str, int] = field(default_factory=dict)  # item ID -> price on offer to this buyer
     budget: int | None = None  # the buyer's max from their last search or haggle
+    ebay_zip: str | None = None  # the seller's ZIP code, for their eBay listings
 
     @property
     def owner(self) -> str:
@@ -885,11 +895,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         owner = f"asi1:{key}"
         listing: Listing | None = None
         unpriced: UnpricedError | None = None
+        prepared: tuple[str, str] | None = None
         try:
             wanted = await read(text, True)
             asking, floor = to_cents(wanted.asking_usd), to_cents(wanted.floor_usd)
             data = await fetch(ctx, photo)
-            image_b64, media_type = await asyncio.to_thread(prepare_photo, data)
+            image_b64, media_type = prepared = await asyncio.to_thread(prepare_photo, data)
             listing = await backend.propose(
                 ctx,
                 owner,
@@ -922,6 +933,11 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         except Exception:
             ctx.logger.exception(f"Chat photo for {key[:8]} failed")
             reply = Reply(SOMETHING_BROKE)
+        if backend.ebay is not None and prepared is not None:
+            # Kept for listing on eBay, which needs the photo itself.
+            photo_key = listing.item_id if listing is not None else f"pending:{owner}"
+            if listing is not None or unpriced is not None:
+                store.save_photo(photo_key, prepared[1], base64.b64decode(prepared[0]))
         async with locks[key]:
             conv = load(key)
             conv.pricing.pop(photo.url, None)
@@ -958,6 +974,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 asking,
                 floor,
             )
+            store.move_photo(f"pending:{conv.owner}", listing.item_id)
             conv.unpriced = None
         elif proposal is not None:
             changed = store.reprice(proposal.item_id, conv.owner, asking, floor)
@@ -977,7 +994,88 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         except PipelineError as ex:
             return f"I couldn't start the item agent. {ex}"
         conv.awaiting = None
-        return listed_text(listing, registered, backend.offline) + waiting_too(conv)
+        on_ebay = ""
+        if backend.ebay is not None and backend.ebay.connected(conv.owner):
+            on_ebay = "\n" + await list_on_ebay(conv, listing)
+        return listed_text(listing, registered, backend.offline) + on_ebay + waiting_too(conv)
+
+    async def list_on_ebay(conv: Conversation, listing: Listing) -> str:
+        """List one live listing on the seller's eBay too. Never raises: eBay failing doesn't
+        undo anything on Yardsale."""
+        assert backend.ebay is not None
+        try:
+            record = await asyncio.wait_for(
+                backend.ebay.list_item(listing, conv.ebay_zip), EBAY_LIST_WITHIN
+            )
+        except EbayError as ex:
+            return (
+                f"I couldn't list the {listing.title} on eBay: {ex} It's still for sale on "
+                'Yardsale; say "list on ebay" to try again.'
+            )
+        except TimeoutError:
+            return (
+                f"eBay didn't answer in time, so the {listing.title} isn't on eBay yet. It's "
+                'still for sale on Yardsale; say "list on ebay" to try again.'
+            )
+        return (
+            f"Also on eBay: {record.url} . My agent answers its Best Offers with the same rules, "
+            "and eBay never sees your lowest price."
+        )
+
+    async def ebay_command(conv: Conversation, command: commands.Command) -> str:
+        ebay = backend.ebay
+        if command.zip_code:
+            conv.ebay_zip = command.zip_code
+        if ebay is None:
+            return EBAY_OFF
+        if command.kind == "ebay_disconnect":
+            if not ebay.connected(conv.owner):
+                return "Your eBay account isn't connected."
+            ended, failed = await ebay.disconnect(conv.owner)
+            text = "Disconnected your eBay account; Yardsale deleted its access."
+            if ended:
+                text += f" I ended {ended} eBay listing(s) first."
+            if failed:
+                text += f" {failed} eBay listing(s) couldn't be ended; end them on eBay yourself."
+            return text
+        if command.kind == "ebay_connect":
+            if ebay.connected(conv.owner):
+                return 'Your eBay account is already connected. Say "disconnect ebay" to remove it.'
+            link = ebay.start_connect(conv.owner)
+            zip_line = (
+                f" I'll use ZIP code {conv.ebay_zip} for pickup."
+                if conv.ebay_zip
+                else ' Also tell me your ZIP code for eBay listings, like "ebay zip 94110".'
+            )
+            return (
+                f"[Connect your eBay account]({link}). You sign in on eBay's own page; Yardsale "
+                "never sees your password. The link works for 15 minutes. Then come back here, "
+                "and listings you approve also go up on eBay." + zip_line
+            )
+        if command.kind == "ebay_zip":
+            if ebay.connected(conv.owner):
+                return f"Got it: eBay listings use ZIP code {conv.ebay_zip}."
+            return f'Got it: ZIP code {conv.ebay_zip}. Say "connect ebay" to connect your account.'
+        # ebay_list: put live listings that aren't on eBay yet on it
+        if not ebay.connected(conv.owner):
+            return 'Connect your eBay account first: say "connect ebay".'
+        active = store.owned(conv.owner, ACTIVE)
+        if command.pick is not None:
+            if not 1 <= command.pick <= len(active):
+                return f"Pick a number from 1 to {len(active)}." if active else "Nothing's live."
+            active = [active[command.pick - 1]]
+        waiting = [
+            listing
+            for listing in active
+            if (record := store.ebay_listing(listing.item_id)) is None or record.status != "active"
+        ]
+        if not waiting:
+            return (
+                "Everything you have for sale is already on eBay."
+                if active
+                else "You have nothing for sale right now. Attach a photo to sell something."
+            )
+        return "\n".join([await list_on_ebay(conv, listing) for listing in waiting])
 
     def cancel_proposal(conv: Conversation, proposal: Listing) -> str:
         conv.awaiting = None
@@ -1003,6 +1101,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                     if listing.host == AGENTVERSE
                     else f"Agent: {listing.address}"
                 )
+                + ebay_line(listing)
                 for n, listing in enumerate(active, 1)
             ]
         for listing in listings:
@@ -1016,9 +1115,20 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             lines.append('Say "unlist 1" to take one down.')
         return "\n".join(lines)
 
+    def ebay_line(listing: Listing) -> str:
+        record = store.ebay_listing(listing.item_id)
+        if record is None or record.status != "active":
+            return ""
+        return f" On eBay: {record.url}"
+
     def sold_line(listing: Listing, deal: DealRecord | None) -> str:
         if deal is None:
             return f"Sold: {listing.title}"
+        if deal.buyer.startswith("ebay:"):
+            return (
+                f"Sold on eBay: {listing.title} for {usd(deal.price_cents)}. The buyer pays "
+                "through eBay."
+            )
         line = f"Sold: {listing.title} for {usd(deal.price_cents)}"
         if deal.payment_status == PAID and deal.payout_cents is not None:
             return (
@@ -1355,6 +1465,13 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         proposal = pending[0] if pending else None
         selling = proposal is not None or conv.unpriced is not None
 
+        if command is not None and kind in (
+            "ebay_connect",
+            "ebay_disconnect",
+            "ebay_zip",
+            "ebay_list",
+        ):
+            return await ebay_command(conv, command)
         if command is not None and kind == "edit" and selling:
             return await change_prices(
                 ctx, conv, proposal, command.asking_cents, command.floor_cents, command.approve
@@ -1465,6 +1582,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 for link in lost:
                     del conv.pricing[link]
                 notice = RESTARTED
+            if backend.ebay is not None and store.announce_ebay(conv.owner):
+                notice = EBAY_CONNECTED + notice  # the seller just came back from eBay
             attached = photos_in(msg)
             photos = [
                 photo
