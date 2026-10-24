@@ -15,6 +15,8 @@ from typing import Any
 from dotenv import load_dotenv
 from uagents.resolver import AlmanacApiResolver
 
+from yardsale.models import Appraisal, ItemDetails
+
 ROOT = Path(__file__).resolve().parents[1]
 # API keys and settings come from .env (gitignored); see .env.example.
 load_dotenv(ROOT / ".env")
@@ -85,3 +87,13 @@ async def almanac_endpoints(address: str) -> list[str]:
 
 class PipelineError(RuntimeError):
     """A photo listing failed; the message is shown to the seller."""
+
+
+class UnpricedError(PipelineError):
+    """The photo was identified, but nothing sold recently was close enough to price it and the
+    seller gave no price. Keeps what was found, so a price sent next can finish the listing."""
+
+    def __init__(self, message: str, item: ItemDetails, appraisal: Appraisal) -> None:
+        super().__init__(message)
+        self.item = item
+        self.appraisal = appraisal
