@@ -125,11 +125,43 @@ Rules learned from Maestro's live testing:
 - **A repeated photo that's still being priced** gets "I'm still pricing that photo" instead of
   the help text.
 
-Only the first photo in a message is used; the others count as seen, so a repeated link doesn't
-price them later. A photo link counts whatever its `mime_type` says, since ASI:One doesn't always
+A photo link counts whatever its `mime_type` says, since ASI:One doesn't always
 send a full `image/...`, and each message's attachments are logged (URI, type, metadata keys, never
 the text). A message ASI:One sends twice (same message ID) gets
 the same answer again instead of being acted on twice.
+
+### Several photos in one message
+
+For a student moving out, one item per message is too slow. A message can carry up to 8 photos
+(`chat.MAX_PHOTOS`), one item each; more than that, and the first 8 are priced and the reply asks
+for the rest in another message (the extras count as seen, so a repeated link doesn't price them
+later).
+
+- Each photo goes through the same Identifier → Researcher → Appraiser pipeline, 4 at a time
+  (`chat.PHOTOS_AT_ONCE`), and becomes its own proposal, numbered in the order the photos were
+  sent. Numbers continue across messages in a conversation and never shift, so `#2` stays `#2`
+  after `#1` is approved or canceled.
+- **Cost:** every photo is a separate paid run (Apify plus two Claude calls), so 8 photos cost 8
+  times one photo. Text in a message with several photos isn't sent to ASI:One, since it can't
+  say which item it's about.
+- **Prices:** a price typed with several photos ("at least $40") isn't used, and the reply says
+  so. The seller sets each one by number: `lowest 2 $40`, `ask 3 $60`, `#2: ask $60, lowest $45`,
+  or `approve 2 at $50`. A photo with no close sales doesn't stop the others; it waits for
+  `ask 3 $25`.
+- **Approving:** `approve all` lists everything waiting, `approve 2` or `approve 1, 3` lists
+  those, and `cancel 2` or `cancel all` drops them. With several proposals waiting, a plain
+  `approve` (or a price without a number) lists them and asks which one, rather than guessing;
+  with one waiting, it works as before. The Approve card on each proposal also still works.
+- **Timing:** the first reply waits up to 90% of `chat.REPLY_WITHIN` (36 s) and carries every
+  proposal ready by then. Each remaining one is sent as its own message as soon as it's priced,
+  never before the first reply, and a last message sums up where every photo stands. Batch
+  proposals don't send the eBay sales carousel (it would double the messages); the proposal text
+  still links the three closest sales.
+
+`approve all` starts item agents one after another, so with many hosted items it can take longer
+than 40 seconds; the chat then says "Working on it" and sends the result after. This hasn't been
+tried in the real ASI:One app yet, including how it shows several uploads in one message and
+several replies in a row.
 
 ## Buying in the ASI:One chat
 
