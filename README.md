@@ -203,6 +203,33 @@ Each order's status change can also be POSTed to `YARDSALE_ORDERS_WEBHOOK`, sign
 `@yardsale`'s Orders page on Fetch Business, though that page takes orders only from a
 connected Square or SumUp POS account.
 
+## Selling on the seller's own eBay
+
+A seller can also put approved listings on their own eBay account
+([ebay_seller.py](yardsale/ebay_seller.py)). **Not yet run against eBay**, sandbox or
+production; it's tested only against a local stand-in.
+
+- In the chat, `connect ebay` (optionally with a ZIP code: `connect ebay 94110`) gives a link to
+  eBay's own consent page. Sellers sign in on eBay; Yardsale never asks for or stores an eBay
+  password. eBay sends them back to `/ebay/callback` on the HTTP API, and the next chat reply says
+  eBay is connected. `ebay zip 94110` sets the pickup ZIP code, `list on ebay` retries or lists
+  older listings, and `disconnect ebay` ends the seller's eBay listings and deletes the tokens.
+- On `approve`, the listing also goes up on eBay through the Trading API (photo upload, a
+  suggested category, `AddFixedPriceItem`): the asking price, Best Offer on, local pickup, no
+  returns. The floor is never sent to eBay, so eBay's automatic accept and decline prices stay
+  unset. If eBay fails, the Yardsale listing is still live and the reply says why.
+- Every minute the Market answers new Best Offers with the same haggling rules as item agents
+  (`haggle.seller_move`): at or above the floor it accepts (a sale), below it counters with the
+  agent's note as the message the buyer reads. eBay allows 5 counters per side, so after 5 the
+  agent declines and says its last price stands. A sale on eBay marks the Yardsale listing sold;
+  a sale or take-down on Yardsale ends the eBay listing.
+
+Setup: one eBay developer keyset for Yardsale (`EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`,
+`EBAY_RUNAME`; sandbox unless `YARDSALE_EBAY_ENV=production`), plus `YARDSALE_API_KEY` and a
+tunnel, since the callback is on the HTTP API. In eBay's developer portal (User Tokens), set the
+RuName's auth accepted URL (and declined URL) to `<tunnel URL>/ebay/callback`; a new quick
+tunnel URL means updating it. Scopes requested: `api_scope`, `sell.inventory`, `sell.account`.
+
 ## `@yardsale` on Fetch Business
 
 `@yardsale` ([asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale)) is Yardsale's Fetch Business

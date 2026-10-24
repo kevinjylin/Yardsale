@@ -193,6 +193,42 @@ the default QUIC connection dropped on venue Wi-Fi). A quick tunnel gets a new U
 starts. Live on October 24, `@yardsale` searched, haggled, and accepted through it; see
 [calhacks-plan.md](calhacks-plan.md#what-fetch-business-offers).
 
+## Selling on the seller's own eBay
+
+Code: [ebay_seller.py](../yardsale/ebay_seller.py). Added October 24; **not yet run against
+eBay** (no keys), only against a local stand-in in the tests.
+
+Sellers aren't developers, so Yardsale holds one eBay developer keyset and each seller grants
+access on eBay's consent page (OAuth Authorization Code grant). Yardsale never sees an eBay
+password. `connect ebay` gives the link; its `state` is a random one-time token (stored hashed,
+15 minutes), not the conversation ID. eBay redirects to `GET /ebay/callback` on the HTTP API
+(no API key; the state is checked instead), the code becomes an access and refresh token stored
+per conversation, and the next chat reply says eBay is connected. The chat can't message a
+conversation unprompted, so the notice waits for the seller's next message.
+
+On `approve` the listing also goes up on eBay. The Trading API is used rather than the Inventory
+API: only the Trading API answers a buyer's Best Offer (`GetBestOffers`, `RespondToBestOffer`;
+the Negotiation API has no counters), it's undocumented whether those calls work on Inventory
+API listings, and `AddFixedPriceItem` needs no business-policy opt-in, policies, or merchant
+location first. The listing is local pickup, no returns, Best Offer on, at the asking price,
+with the seller's photo (saved in the store for this) and an eBay-suggested category. The seller
+gives a ZIP code (`ebay zip 94110`). The floor never goes to eBay: no automatic accept or decline
+price.
+
+Every minute the Market answers new Best Offers with `haggle.seller_move` and the listing's floor
+and private gap, keeping each eBay buyer's haggle like any other buyer's. At or above the floor
+it accepts, which is a sale on eBay, and the Yardsale listing is marked sold. Below, it counters
+with the agent's note as the seller message; after eBay's limit of 5 counters it declines and
+says its last price stands. A purchase on eBay (Buy It Now, or a buyer taking a counter) marks
+the Yardsale listing sold; a sale or take-down on Yardsale ends the eBay listing. The buyer pays
+through eBay, so these deals have no Yardsale payment link or commission.
+
+Unverified: every eBay call; whether `LocalPickup` and `ReturnsNotAccepted` inline details are
+accepted for sellers opted into business policies; whether Used (3000) is a valid condition in
+every suggested category; the multipart photo upload's format; and the scopes the Trading API
+needs from a user token. Two sales can still race: an offer accepted on eBay in the same moment
+as a Yardsale buyer's acceptance.
+
 ## Saved state
 
 [store.py](../yardsale/store.py) keeps listings (and whether each agent runs in the server or on
