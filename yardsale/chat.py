@@ -93,7 +93,7 @@ from uagents_core.contrib.protocols.chat.cards import (
     ListItem as CardListItem,
 )
 
-from yardsale import commands
+from yardsale import commands, craigslist_mail
 from yardsale.asione import ReadMessage
 from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
@@ -1111,8 +1111,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 )
             elif listing.status == SOLD:
                 lines.append(sold_line(listing, store.deal_for(listing.item_id)))
+        lines += craigslist_mail.seller_lines(store, listings)
         if active:
-            lines.append('Say "unlist 1" to take one down.')
+            lines.append('Say "unlist 1" to take one down, or "craigslist 1" to post it there.')
         return "\n".join(lines)
 
     def ebay_line(listing: Listing) -> str:
@@ -1457,6 +1458,11 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         )
 
     async def handle_text(ctx: Context, conv: Conversation, text: str) -> str | Reply:
+        posting = craigslist_mail.post_command(text)
+        if posting is not None:
+            answer = craigslist_mail.post_reply(store, conv.owner, posting)
+            if answer is not None:
+                return answer
         command = commands.parse(text)
         if command is not None and command.error:
             return command.error

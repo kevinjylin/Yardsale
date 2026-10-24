@@ -133,6 +133,7 @@ def readiness(mode: str) -> list[Check]:
     checks.append(_payments_check())
     checks.append(_business_api_check())
     checks.append(_ebay_check())
+    checks.append(_mail_check())
     checks.append(
         Check(
             "YARDSALE_ORDERS_WEBHOOK",
@@ -233,6 +234,28 @@ def _ebay_check() -> Check:
         True,
         f"sellers can connect eBay ({settings.env}); the RuName's accept URL must be "
         "<public API URL>/ebay/callback",
+        False,
+    )
+
+
+def _mail_check() -> Check:
+    from yardsale.craigslist_mail import MailConfigError, settings_from_env
+
+    try:
+        mail = settings_from_env()
+    except MailConfigError as ex:
+        return Check("YARDSALE_MAIL_ADDRESS", False, str(ex), True)
+    if mail is None:
+        return Check(
+            "YARDSALE_MAIL_ADDRESS",
+            False,
+            "not set: nobody answers Craigslist buyers' emails",
+            False,
+        )
+    return Check(
+        "YARDSALE_MAIL_ADDRESS",
+        True,
+        f"item agents answer Craigslist buyers' emails through {mail.imap_host}",
         False,
     )
 

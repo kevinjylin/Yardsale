@@ -230,6 +230,63 @@ tunnel, since the callback is on the HTTP API. In eBay's developer portal (User 
 RuName's auth accepted URL (and declined URL) to `<tunnel URL>/ebay/callback`; a new quick
 tunnel URL means updating it. Scopes requested: `api_scope`, `sell.inventory`, `sell.account`.
 
+## Craigslist by email
+
+A listing's own agent can also haggle with people who find it on Craigslist
+([craigslist_mail.py](yardsale/craigslist_mail.py)). The item's agent negotiates; email is only
+the channel. Craigslist bans automated posting and scraping, so Yardsale never touches
+craigslist.org: the seller posts by hand, and buyers' messages reach Yardsale's inbox through
+Craigslist's email relay.
+
+1. After approving a listing, the seller says `craigslist` (or `craigslist 2`, numbered as in
+   `my listings`) in the ASI:One chat. The reply is a ready-to-paste title, price, and
+   description, and the email to post with. The title is how a buyer's email is matched to the
+   listing, so it has to be pasted exactly.
+2. The seller posts it on Craigslist with Yardsale's inbox (`YARDSALE_MAIL_ADDRESS`) as the
+   posting's email.
+3. A buyer replies to the post. Craigslist's relay forwards it to the inbox from an anonymised
+   `@...craigslist.org` address.
+4. Every 10 seconds the Market reads new mail from Craigslist addresses (IMAP, without marking
+   other mail read), and sends the item's agent, in the server or hosted on Agentverse, the same
+   `Offer` or `AcceptCounter` a chat buyer's offer becomes, with `buyer_ref` `email-<hash of the
+   relay address>`. A dollar amount is an offer ("would you take $250?", "can you do 280");
+   "deal", "I'll take it", or "yes" while a price is on the table accepts it; anything else gets
+   the asking price. No price is worked out outside the item agent.
+5. The item agent's answer goes back through the relay (SMTP), in the buyer's thread: a
+   counter that never shows the floor, an agreement, or, once the buyer accepts, the deal with
+   its payment link (test mode). Closing uses the same conditional update as every sale, so two
+   buyers can't both buy. If the item agent doesn't answer in time, the buyer gets "let me check
+   and get back to you" once, and the email is tried again on the next check.
+6. The Market can't message the seller's ASI:One chat on its own, so `my listings` shows how many
+   Craigslist buyers have emailed, the highest offer, and a sale with its payment link.
+
+Logs name a buyer by a short hash. Email addresses, message text, prices, and the mail password
+never appear in them, and the password is only ever read from `.env`.
+
+**Setting it up before the demo:**
+
+1. Use a Gmail account made for this. Turn on 2-Step Verification, then create an app password
+   at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). IMAP is on
+   by default for Gmail accounts.
+2. In `.env`: `YARDSALE_MAIL_ADDRESS=<that Gmail address>` and `YARDSALE_MAIL_PASSWORD=<the app
+   password>` (spaces are fine). `YARDSALE_IMAP_HOST` and `YARDSALE_SMTP_HOST` default to
+   Gmail's.
+3. Check the login (it reads the inbox and logs in to SMTP; it sends nothing):
+   `uv run python -m yardsale.craigslist_mail --check`
+4. Start the server. Its log says `Craigslist email: answering buyers every 10 s`.
+5. List the item in ASI:One, approve it, say `craigslist`, and post the reply's title, price, and
+   description on Craigslist with that Gmail address. Craigslist emails a link to confirm the
+   post first.
+6. From a phone, reply to the post through Craigslist with an offer.
+
+**Unverified:** none of this has been run against real Craigslist. Unknown: whether the relay
+accepts replies only from the email the post was made with (Yardsale replies from that same
+address, so it should), whether relayed subjects keep the title as typed (matching ignores
+case and punctuation), how long the relay takes, what the relayed message body contains, and
+whether the relay strips links. If it strips the payment link, set `YARDSALE_MAIL_LINKS=0`: the
+reply then gives the amount and asks for a phone number, and the seller texts the link shown
+under `my listings`.
+
 ## `@yardsale` on Fetch Business
 
 `@yardsale` ([asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale)) is Yardsale's Fetch Business
@@ -423,6 +480,8 @@ agent can't accept a chat buyer's counter-offer.
   item agents hosted on Agentverse.
 - [photos.py](yardsale/photos.py): downloads (public addresses only, checked again after every
   redirect and at connect time; 25 MB cap), rotation, HEIC, and a 50-megapixel limit.
+- [craigslist_mail.py](yardsale/craigslist_mail.py): Craigslist buyers' emails, passed to the
+  item agents and answered through Craigslist's relay.
 - [business_api.py](yardsale/business_api.py): the HTTP API and OpenAPI description that
   `@yardsale` on Fetch Business calls.
 - [config.py](yardsale/config.py): settings, the public endpoint, and the readiness check.
