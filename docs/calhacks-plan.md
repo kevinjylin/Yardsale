@@ -478,47 +478,71 @@ and the required pieces; keep them.
 
 ## Pitch outline (draft, 3 minutes)
 
-The big screen shows two ASI:One chats: the seller's and the buyer's.
+The big screen shows two phones: the friend's (seller) and the presenter's (buyer). Steps are
+from "The demo, step by step" above.
 
-1. **0:00** A judge attaches a photo of an item in ASI:One. Pricing runs while we talk.
-2. **0:15** The problem: moving out, stuff gets thrown away because listing and haggling are
-   tedious.
-3. **0:45** The gap: Fetch Business makes a business shoppable by AIs, but only if it has a
-   catalog. Secondhand goods have none.
-4. **1:15** The proposal arrives with the sales behind the price. The seller approves, and the
-   item's own agent goes live: open its Agentverse profile.
-5. **1:45** A second judge asks ASI:One for it with a max price. The haggling card shows each
-   round, the judge accepts, the Visa link goes out, and the payment clears.
-6. **2:15** The reveal: ask `@yardsale`, Yardsale's Fetch Business agent, for a bike with a max.
-   It haggles and offers to buy in its own chat, through Yardsale's API. (The original plan was
-   a sale on its Orders page, which only takes Square or SumUp POS orders.)
-7. **2:35** What's real today, how Yardsale makes money, and what's next: power sellers move to
-   their own Fetch Business agent; eBay and Facebook listings later.
+1. **0:00** The problem. It's the week before finals and you're moving out: a mini fridge, a
+   desk, a bike, a lamp. You post them and 200 DMs come in. You can't answer them and study, and
+   if you're flying home out of state, whatever's left goes in the dumpster.
+2. **0:20** Product 1, live. The friend attaches a photo in ASI:One: "sell this, at least $40".
+   Pricing runs while we talk (under a minute): Claude identifies it, Apify finds what it sold
+   for on eBay, and code sets the price.
+3. **0:45** The proposal arrives with the sales behind the price. The friend approves, and the
+   item gets its own agent that knows the $40 minimum: show its address or Agentverse profile.
+   `craigslist` gives the post, already live on Craigslist.
+4. **1:05** The presenter emails the Craigslist post from their own phone: "would you take
+   $25?" The item's agent answers in the thread with a counter, never showing the minimum. Reply
+   "deal", get the payment link, pay with the test card. The friend's `my listings` shows it
+   sold. "The seller answered zero DMs."
+5. **1:45** Product 2. The presenter asks `@yardsale`, Yardsale's Fetch Business agent: "find me
+   a mini fridge, max $60". Nothing on Yardsale has one, which is the usual case for a new
+   marketplace.
+6. **2:00** The deal finder searches eBay, Craigslist, and OfferUp and lists the best deals under
+   $60. The presenter picks a Craigslist post, and the agent emails its seller an offer and
+   negotiates. (If this isn't done by the pitch, say it's in progress and show the results only.)
+7. **2:30** What's real, how Yardsale makes money, and what's next: item agents live on
+   Agentverse, buying through ASI:One and `@yardsale` live, Stripe test payments with a 5%
+   commission; several photos at once and the deal finder land next; then listing on the seller's
+   own eBay once eBay approves our developer keys.
 
 ## Questions judges will ask
 
-- **"Isn't it your agent talking to your agent?"** The haggling protocol is published, so any
-  agent can take the buyer's seat. Our buyer agent stands in for the ASI:One personal AI.
-- **"Is the payment real?"** It runs on Stripe's test mode (Visa's sandbox once we have keys).
-  Going live is a change of credentials. Don't call it real money.
-- **"How does Yardsale make money?"** A commission on each sale, taken before the seller's
-  payout. Pricing a photo is free.
-- **"Why one agent per item instead of a database?"** The item agent holds the seller's floor
-  itself and haggles with several buyer agents at once, so the floor never leaves it. Each one
-  is a live Agentverse agent that can be found and dealt with directly, and it can move to the
-  seller's own Fetch Business later. Items beyond our Agentverse slots run Almanac-only in our
-  server, which handled 40 in an offline test. Without real haggling, an item agent would be a
-  database row with an address, which is why the haggling rebuild matters.
+- **"Isn't it your agent talking to your agent?"** Not on Craigslist: there the buyer is a person
+  emailing, and in the deal finder the seller is a person. Between agents, the haggling protocol
+  is published, so any agent can take the buyer's seat; our buyer agent stands in for the ASI:One
+  personal AI.
+- **"Do you post to Craigslist automatically?"** No. Craigslist bans automated posting, so the
+  seller pastes a post Yardsale writes. Buyers' replies reach Yardsale's inbox through
+  Craigslist's own email relay, and the item agent answers them.
+- **"Are you scraping eBay and Craigslist?"** Yardsale doesn't fetch their pages itself. Sold
+  prices come from the Apify Actor `caffein.dev/ebay-sold-listings`, and the deal finder's
+  listings from `charitable_trousseau/ebay-search-scraper` and `logiover/craigslist-scraper`.
+- **"What if nothing is on Yardsale?"** That's the deal finder. It's useful with nothing listed,
+  because it searches where listings already are.
+- **"Will Craigslist sellers mind an agent emailing them?"** Check the finished feature before
+  answering. The intent is one email thread per post the buyer picked, making the buyer's offer.
+- **"Why not list it on eBay for the seller?"** Built: the seller connects their own eBay and the
+  item agent's rules answer Best Offers. It's tested only against a local stand-in and waits on
+  eBay approving our developer account.
+- **"Is the payment real?"** It runs on Stripe's test mode (Visa's sandbox is built but hasn't
+  been run). Going live is a change of credentials. Don't call it real money.
+- **"How does Yardsale make money?"** 5% of each sale Yardsale collects payment for, taken before
+  the seller's payout. Pricing a photo is free, and the deal finder has no fee yet.
+- **"Why one agent per item instead of a database?"** The item agent holds the seller's minimum
+  and haggles with every buyer, from ASI:One, `@yardsale`, or Craigslist email, so the minimum
+  never leaves it. Each one is an agent that can be found and dealt with directly, and hosted
+  ones have their own Agentverse profile. Items beyond our Agentverse slots run in our server,
+  which handled 40 in an offline test.
 - **"Does ASI:One read the photos?"** No. Claude reads photos, `asi1-mini` reads typed text, and
   ASI:One finds and routes to the agents. The README and Devpost say the same.
 - **"What if ASI:One doesn't pick Yardsale?"** Use the rehearsed query. If routing misses on
-  stage, @mention the Market directly.
-- **"Which part is the Payment Protocol, and which is Visa?"** The Payment Protocol is the
-  messages between agents: the item agent requests payment and gets the confirmation. Visa Pay By
-  Link is the page where the buyer pays.
+  stage, @mention the Market (`@ys-orchestrator`) or ask `@yardsale`.
+- **"Which part is the Payment Protocol?"** The messages between agents: an agent buyer that
+  closes a deal gets a `RequestPayment` with the payment link and answers `CommitPayment`. The
+  payment link is the page where a person pays.
 - **"Why not give each seller their own Fetch Business agent?"** Fetch Business is one agent per
-  business, and casual sellers shouldn't have to set up and verify a business to sell a lamp.
-  Sellers who keep listing graduate to their own.
+  business, and a student shouldn't have to set up and verify a business to sell a lamp. Sellers
+  who keep listing can graduate to their own.
 
 ## Questions to ask tonight
 
