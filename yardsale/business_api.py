@@ -201,24 +201,36 @@ def _external_json(listing: ExternalListing) -> dict[str, Any]:
     return data
 
 
-def _deal_json(deal: ScoredDeal) -> dict[str, Any]:
-    """A scored deal: the listing plus why it's a good one (deals.py)."""
-    data = _external_json(deal.listing)
+def _deal_json(deal: ScoredDeal, budget_cents: int | None = None) -> dict[str, Any]:
+    """A scored deal: the listing, how it compares with the budget, what the site didn't say,
+    and why it's a good one (deals.py)."""
+    listing = deal.listing
+    data = _external_json(listing)
+    under = deals.under_budget_cents(listing, budget_cents)
+    data["under_budget_usd"] = dollars(under) if under is not None else None
+    data["shipping_known"] = deals.shipping_known(listing)
+    data["shipping"] = deals.shipping_phrase(listing)
+    data["missing"] = deals.missing_fields(listing)
     data["versus_market_pct"] = deal.versus_market_pct
     data["score"] = deal.score
-    data["reason"] = deals.reason(deal, site_name(deal.listing.source))
+    data["reason"] = deals.reason(deal, site_name(listing.source), budget_cents)
     data["flags"] = list(deal.flags)
     return data
 
 
 def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
     failed = [site_name(name) for name in found.failed]
+    # Read defensively: Found gains fields as the deal finder grows.
+    budget = getattr(found, "budget_cents", None)
     if found.deals:
         next_step = (
-            "Show the buyer these deals with their links and each one's reason. They aren't "
-            "Yardsale listings: Yardsale's agents can't haggle for them or take payment, so the "
-            "buyer opens the link to buy from the seller. Craigslist sellers usually take offers "
-            "by email."
+            "Start your answer with headline, word for word, keeping its link. Then show each "
+            "listing with its url as a link and its reason, which says the price, shipping, how "
+            "far under or over the budget it is, condition, location, and what the site didn't "
+            "list. Say plainly which are over_budget or have no_price. They aren't Yardsale "
+            "listings: Yardsale's agents can't haggle for them or take payment, so the buyer "
+            "opens the link to buy from the seller. Craigslist sellers usually take offers by "
+            "email."
         )
     else:
         next_step = "Nothing fits on other sites either. Try other words or a higher max."
@@ -233,8 +245,9 @@ def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
         against = "No recent eBay sales matched, so prices are compared with each other."
     return {
         "status": "done",
+        "headline": deals.headline(found.deals, budget, found.market, site_name),
         "count": len(found.deals),
-        "listings": [_deal_json(deal) for deal in found.deals],
+        "listings": [_deal_json(deal, budget) for deal in found.deals],
         "searched": [site_name(name) for name in found.searched],
         "failed": failed,
         "typical_sold_usd": dollars(market.typical_cents) if market else None,
@@ -951,18 +964,47 @@ _EXTERNAL = {
                 "shipping included; negative means above it; null when no sales matched"
             ),
         },
+        "under_budget_usd": {
+            "type": "number",
+            "nullable": True,
+            "description": (
+                "How far under max_usd the total is; negative means over it; null without a "
+                "max or a price. When shipping_known is false it's the price alone"
+            ),
+        },
+        "shipping_known": {
+            "type": "boolean",
+            "description": (
+                "True when the total is what the buyer pays (shipping given, or pickup on "
+                "Craigslist, OfferUp, Facebook); false means shipping isn't listed: say so"
+            ),
+        },
+        "shipping": {
+            "type": "string",
+            "description": '"+ $12 shipping", "free shipping", "pickup only", "shipping unknown"',
+        },
+        "missing": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["price", "photo", "condition", "location"]},
+            "description": "What the site didn't list; tell the buyer, don't guess it",
+        },
         "score": {"type": "number", "description": "Higher is better; the list is sorted by it"},
         "reason": {
             "type": "string",
             "description": (
-                'One line to show the buyer: "$120 on Craigslist, 35% under the $185 typical '
-                'sold price, like new, 6 photos"'
+                'One line to show the buyer with the link: "$180 on Craigslist, pickup only, '
+                "$120 under budget. Used, Oakland, CA, posted 2 days ago. 42% under the $310 "
+                'typical sold price, 6 photos. (no photo)"'
             ),
         },
         "flags": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "parts, accessory, missing_words, or far_under: reasons for caution",
+            "description": (
+                "parts, accessory, missing_words, or far_under: reasons for caution. "
+                "over_budget: shown because fewer than 3 fit the max. no_price: the seller "
+                "didn't list a price (always last)"
+            ),
         },
     },
 }
@@ -1157,9 +1199,13 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                         "Yardsale's Deal Finder agent searches eBay, Craigslist, OfferUp, and "
                         "other sites once, prices each listing against what the item typically "
                         "sold for on eBay in the last 90 days, and returns the best few at or "
-                        "under max_usd (price plus shipping), best first. Each listing has its "
-                        "site, title, price, total with shipping, url, a score (higher is "
-                        "better), and a one-line reason; show the buyer the reasons and links. "
+                        "under max_usd (price plus shipping), best first; when fewer than 3 fit, "
+                        "the closest over it follow, flagged over_budget. Open your answer with "
+                        "headline word for word, with its link. Each listing has its site, "
+                        "title, price, shipping, total, url, how far under the max it is, what "
+                        "the site didn't list, a score (higher is better), and a one-line "
+                        "reason; show the buyer each url as a link with its reason, and never "
+                        "claim a saving the numbers don't show. "
                         "These are NOT Yardsale listings: no haggling or payment through "
                         "Yardsale. Answers within about "
                         "25 seconds; if status is running, call it again with the same q and "
@@ -1186,6 +1232,16 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                                 "type": "object",
                                 "properties": {
                                     "status": {"type": "string", "enum": ["running", "done"]},
+                                    "headline": {
+                                        "type": "string",
+                                        "description": (
+                                            "One sentence about the best deal with its link, "
+                                            'like "Found it: [Trek FX 2](url) on Craigslist '
+                                            "for $180, $120 under your $300 budget (Oakland, "
+                                            'pickup)." Repeat it to the buyer word for word, '
+                                            "link included"
+                                        ),
+                                    },
                                     "count": {"type": "integer"},
                                     "listings": {"type": "array", "items": _EXTERNAL},
                                     "searched": {"type": "array", "items": {"type": "string"}},
