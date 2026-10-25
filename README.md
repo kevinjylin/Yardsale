@@ -55,6 +55,7 @@ Yardsale was started during [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/
 | [yardsale-researcher](https://agentverse.ai/agents/details/agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2/profile) | `@ys-researcher` | `agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2` | Finds what that product sold for on eBay in the last 90 days, through Apify. |
 | [yardsale-appraiser](https://agentverse.ai/agents/details/agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k/profile) | `@ys-appraiser` | `agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k` | Claude picks which sales are the same product; code sets the asking price and the floor. |
 | [yardsale-shopper](https://agentverse.ai/agents/details/agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs/profile) | `@ys-shopper` | `agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs` | The buyer agent: haggles with several item agents at once for a shopper, never above their max. New; it connects to Agentverse the next time the server starts live. |
+| yardsale-scout | `@ys-scout` | logged on the next live start | The Market Scout: finds what similar items are listed for right now on Craigslist, OfferUp, Facebook Marketplace, and eBay (Apify), so the price is checked against live competition, not only past sales. New; it connects to Agentverse the next time the server starts live. |
 
 Every approved listing also gets its own **item agent**, which holds the seller's private floor
 and haggles with buyers. By default item agents run in the Bureau and register on Fetch's Almanac
@@ -140,11 +141,17 @@ money or reach Fetch's servers.
    least $40, small dent". `asi1-mini` reads the text into prices and a note (without
    `ASI_ONE_API_KEY`, a keyword reader does). The Market downloads the photo, turns it upright,
    and shrinks it to a 1280 px JPEG.
-2. **Pricing.** The Identifier (Claude) names the item and writes an eBay search. The Researcher
-   (Apify) finds up to 20 sold listings from the last 90 days. The Appraiser (Claude) marks which
-   are the same product, and code sets the price from those ([pricing rules](#pricing-rules)).
+2. **Pricing.** The Identifier (Claude) names the item and writes an eBay search. Then, at the
+   same time, the Researcher (Apify) finds up to 20 sold listings from the last 90 days and the
+   Market Scout (Apify) finds what similar items are listed for right now on Craigslist, OfferUp,
+   Facebook Marketplace, and eBay. The Appraiser (Claude) marks which sales are the same product,
+   and code sets the price from those ([pricing rules](#pricing-rules)); the live asking prices
+   only inform the fair range and the advice.
 3. **Proposal.** The reply shows the item, the asking and lowest prices and where each came from,
-   and the three closest sales as links. It's saved as `proposed`; nothing is for sale yet.
+   the three closest sales as links, what similar items are listed for right now, and a fair
+   asking range. If the seller's own price is far off the market (35% or more under or over what
+   it sells for), the reply says so plainly, with the numbers, and suggests a price; the
+   seller's price still wins. It's saved as `proposed`; nothing is for sale yet.
 4. **Approval.** The seller replies `approve`, changes a price (`ask $360`, `lowest $280`, or both),
    or `cancel`. With no close sales, there's no suggestion; the seller's own price makes the
    proposal instead.
@@ -416,7 +423,7 @@ uv run python -m yardsale.hosting --cleanup   # delete the ones whose listing is
 `--cleanup` does the same deletes by hand, for when the server isn't running.
 
 Agentverse's agent limits (reportedly 8 on the free plan and 25 on Premium; not checked against
-our account) count the five mailbox agents too. Hosting was run live on October 24: a hosted
+our account) count the six mailbox agents too. Hosting was run live on October 24: a hosted
 agent starts in about 3 seconds and answers a haggle round through Agentverse in a few seconds.
 Agentverse shows only 32 characters of a name, so each hosted agent is named after its item.
 
@@ -483,6 +490,25 @@ Plain code in [pricing.py](yardsale/pricing.py) and `appraise()` in
   the suggestion if it's higher, or else the floor. A floor above the asking price is refused.
 - Valid prices are $0.01 to $1,000,000.
 
+**The market view** (`market_view()` in pricing.py) puts the sold prices beside what competitors
+are asking right now, from the Market Scout ([scout.py](yardsale/scout.py)). Asking prices never
+set the price on their own:
+
+- The sold side is the appraisal above: its rounded median is what the item sells for, and its
+  quartiles are the usual spread.
+- The asking side pools every live listing the Scout kept across sites (a listing counts when
+  at least half the search words are in its title, it isn't a part or an add-on, and it has a
+  real price), and takes the median and quartiles of their asking prices.
+- The fair asking range runs from the lower of the two medians to the higher: list between
+  what it sells for and what competitors ask. With sold prices only it's their quartiles; with
+  asking prices only it's from their lower quartile to their median. Rounded like every price.
+- A price the seller gives is judged against the sold median (or, without one, the asking
+  median): 35% or more under it is "far under", 35% or more over is "far over", and the proposal
+  says so with the numbers and a suggested price. The seller's price still wins.
+- The market line ("similar ones sold for about $340 on eBay recently, and locals are asking
+  $310 to $380 right now") is built from those numbers only, never from a floor, so item agents
+  cite it in counters and Craigslist posts carry it.
+
 ## How it works
 
 All agents run inside one uAgents `Bureau`: one process, one port (8100).
@@ -493,6 +519,7 @@ All agents run inside one uAgents `Bureau`: one process, one port (8100).
 | Identifier | Claude names the item in a photo | mailbox |
 | Researcher | Apify finds eBay sold listings | mailbox |
 | Appraiser | Claude matches sales; code sets the price | mailbox |
+| Market Scout | Apify finds what similar items are listed for right now on other sites | mailbox |
 | Shopper | the buyer agent: haggles with several item agents at once | mailbox |
 | Item agents, one per listing | hold the private floor, haggle, close deals | none (Almanac only), or hosted on Agentverse |
 
@@ -580,7 +607,7 @@ keys are set; it never prints values.
    to that URL. Without it, item agents advertise `127.0.0.1`.
 3. **Start live:** `uv run python -m yardsale.bureau_server`. This registers agents on Fetch's
    public Almanac (free, no wallet).
-4. **Mailboxes.** Connect the Market, Identifier, Researcher, and Appraiser to Agentverse once:
+4. **Mailboxes.** Connect the Market, Identifier, Researcher, Appraiser, Shopper, and Scout to Agentverse once:
    set `AGENTVERSE_API_KEY`, or open each Inspector link the server logs while signed in, click
    Connect, and choose Mailbox. Addresses don't change, so this is one-time.
 5. **ASI:One photo delivery.** From the real ASI:One app, chat with the Yardsale agent, attach a
