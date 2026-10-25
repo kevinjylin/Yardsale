@@ -5,7 +5,8 @@ its own chat. Fetch reads /openapi.json and makes one tool per operation, so the
 below are written for the model that picks between them. The two products come first: deals for
 buyers (Yardsale's listings, then the best deals on other sites) and prices for sellers (what
 something is worth, from real eBay sales). Haggling and buying stay available but are marked
-"advanced", so @yardsale reaches for search and price checks first:
+"advanced" and say to use them only when the buyer explicitly asks to haggle with a Yardsale
+seller, so @yardsale searches (Yardsale and other sites) for "the best deal" or "the best price":
 
     GET  /listings                search what's for sale on Yardsale (asking prices only)
     GET  /other-sites             the best deals on eBay, Craigslist, OfferUp... under a max,
@@ -482,8 +483,10 @@ class BusinessApi:
                 "count": len(found),
                 "listings": [_listing_json(listing) for listing in found],
                 "next_step": (
-                    "To get a lower price, call startHaggle with what the buyer wants and the most "
-                    "they'll pay."
+                    "Show the buyer these with their asking prices, then call searchOtherSites "
+                    "with the same q and max_usd so they can compare real listings elsewhere. "
+                    "Call startHaggle only if the buyer explicitly asks Yardsale to haggle with "
+                    "a Yardsale seller."
                     if found
                     else "Nothing on Yardsale matches right now. Call searchOtherSites with the "
                     "same q and max_usd to find deals on other sites, or try other words."
@@ -1095,9 +1098,10 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                 "takes no photos. Each listed item has its own agent that holds the seller's "
                 "private lowest price. Advanced: Yardsale's buyer agent can haggle with every "
                 "matching item's agent at once under the buyer's max and buy with a payment "
-                "link (startHaggle, acceptDeal); use those only when the buyer asks to haggle "
-                "or buy. Never invent listings, prices, or sales: every number comes from a "
-                "call. Prices are in US dollars."
+                "link (startHaggle, acceptDeal); use those only when the buyer explicitly asks "
+                "Yardsale to haggle with a Yardsale seller, never for a buyer who just wants a "
+                "good deal or the best price (search for those). Never invent listings, "
+                "prices, or sales: every number comes from a call. Prices are in US dollars."
             ),
         },
         "servers": [{"url": base_url}],
@@ -1113,10 +1117,9 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     "description": (
                         "Start here when a buyer wants something. Searches Yardsale's own "
                         "listings by words, optionally under a budget, and shows asking prices "
-                        "(never a seller's lowest price). Each result has its own agent, so a "
-                        "buyer can haggle (startHaggle) and pay through Yardsale. When count is "
-                        "0, call searchOtherSites with the same words and max for deals on "
-                        "other sites."
+                        "(never a seller's lowest price). Then call searchOtherSites with the "
+                        "same words and max, whatever the count, so the buyer compares real "
+                        "listings with links. Don't haggle unless the buyer asks to."
                     ),
                     "parameters": [
                         {
@@ -1153,7 +1156,8 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     "operationId": "searchOtherSites",
                     "summary": "Find the best deals on eBay, Craigslist, OfferUp and Facebook",
                     "description": (
-                        "Use it when searchListings or startHaggle finds nothing on Yardsale. "
+                        "Use it for every shopping request, with searchListings: a buyer "
+                        "asking for the best deal or price wants these compared. "
                         "Yardsale's Deal Finder agent searches eBay, Craigslist, OfferUp, and "
                         "other sites once, prices each listing against what the item typically "
                         "sold for on eBay in the last 90 days, and returns the best few at or "
@@ -1263,8 +1267,10 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     "operationId": "startHaggle",
                     "summary": "Advanced: haggle for the buyer with every matching Yardsale seller",
                     "description": (
-                        "Advanced. Use it only when the buyer asks Yardsale to haggle or to get "
-                        "a lower price on a Yardsale listing, after searchListings found some. "
+                        "Advanced. Use it only when the buyer explicitly asks Yardsale to haggle "
+                        "with the seller of a Yardsale listing that searchListings returned. "
+                        'Wanting "the best deal", "the best price", or something cheap is not '
+                        "a request to haggle: search instead. "
                         "Yardsale's buyer agent haggles over several rounds with every matching "
                         "item's agent at once and never offers more than max_usd or tells the "
                         "sellers the max. Answers within about 25 seconds. If status is running, "
