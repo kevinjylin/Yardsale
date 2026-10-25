@@ -165,6 +165,8 @@ def item_readme(listing: Listing) -> str:
         if listing.item.details:
             parts.append("Details: " + "; ".join(listing.item.details) + ".")
         details = " ".join(parts) + "\n\n"
+    if listing.market_line:  # sold and asking prices, never the floor
+        details += f"Priced from the market: {listing.market_line}.\n\n"
     return (
         f"# {listing.title}\n\n{BADGES}\n"
         f"For sale on **Yardsale** at **{usd(listing.asking_cents)}**. {details}"
@@ -309,6 +311,9 @@ async def host_item(
         limits = json.dumps({"floor_cents": listing.floor_cents, "gap_cents": gap_cents})
         await client.set_secret(address, "YARDSALE_LIMITS", limits)
         await client.set_storage(address, "limits", limits)
+        if listing.market_line:
+            # Market evidence for its counters: sold and asking prices, never the floor.
+            await client.set_storage(address, "market_line", listing.market_line)
         await client.upload_code(
             address,
             item_agent_code(

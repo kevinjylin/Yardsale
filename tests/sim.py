@@ -106,6 +106,7 @@ async def running_market(
     mail: MailSettings | None = None,
     mailbox: Mailbox | None = None,
     sources: dict[str, Source] | None = None,
+    scout_sources: dict[str, Source] | None = None,
 ) -> AsyncIterator[Market]:
     """The Market and friends in offline mode, with the store's active listings restored."""
     _, market, services = bureau_server.build(
@@ -125,6 +126,7 @@ async def running_market(
         mail=mail,
         mailbox=mailbox,
         sources=sources,
+        scout_sources=scout_sources,
     )
     rt = bureau_server.runtime()
     start([market, *services, *rt.agents.values()])

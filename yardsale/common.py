@@ -15,7 +15,7 @@ from typing import Any
 from dotenv import load_dotenv
 from uagents.resolver import AlmanacApiResolver
 
-from yardsale.models import Appraisal, ItemDetails
+from yardsale.models import Appraisal, ItemDetails, MarketView
 
 ROOT = Path(__file__).resolve().parents[1]
 # API keys and settings come from .env (gitignored); see .env.example.
@@ -93,7 +93,14 @@ class UnpricedError(PipelineError):
     """The photo was identified, but nothing sold recently was close enough to price it and the
     seller gave no price. Keeps what was found, so a price sent next can finish the listing."""
 
-    def __init__(self, message: str, item: ItemDetails, appraisal: Appraisal) -> None:
+    def __init__(
+        self,
+        message: str,
+        item: ItemDetails,
+        appraisal: Appraisal,
+        market: MarketView | None = None,
+    ) -> None:
         super().__init__(message)
         self.item = item
         self.appraisal = appraisal
+        self.market = market  # live asking prices, if the Scout found any: kept for the proposal

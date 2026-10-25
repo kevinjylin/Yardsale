@@ -99,7 +99,7 @@ from uagents_core.contrib.protocols.chat.cards import (
     ListItem as CardListItem,
 )
 
-from yardsale import commands, craigslist_buyer, craigslist_mail, deals, watches
+from yardsale import advice, commands, craigslist_buyer, craigslist_mail, deals, watches
 from yardsale.asione import ReadMessage
 from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
@@ -115,6 +115,7 @@ from yardsale.models import (
     HaggleResult,
     ItemDetails,
     ListPhoto,
+    MarketView,
     Offer,
     OfferRejected,
 )
@@ -176,6 +177,7 @@ class Backend(Protocol):
         appraisal: Appraisal,
         asking_cents: int | None,
         floor_cents: int | None,
+        market: MarketView | None = None,
     ) -> Listing: ...
 
     async def activate(self, ctx: Context, listing: Listing) -> tuple[Listing, bool]:
@@ -464,7 +466,9 @@ def _link(title: str, url: str) -> str:
     return f"[{title}]({url})" if url else title
 
 
-def proposal_text(listing: Listing) -> str:
+def proposal_text(listing: Listing, n: int | None = None) -> str:
+    """The proposal, with what the market says and a plain word when the seller's own price is
+    far off it. `n` is the proposal's number when the seller has several."""
     appraisal = listing.appraisal
     condition = f" ({listing.item.condition} condition)" if listing.item else ""
     asking_note = SOURCES[listing.asking_from]
@@ -487,6 +491,10 @@ def proposal_text(listing: Listing) -> str:
             f"- {_link(match.comp.title, match.comp.url)}: {usd(match.comp.price_cents)}"
             for match in appraisal.matches[:3]
         ]
+    lines += advice.market_lines(listing)
+    feedback = advice.price_feedback(listing, n)
+    if feedback:
+        lines.append(feedback)
     lines.append(APPROVE_PROMPT)
     return "\n".join(lines)
 
@@ -497,7 +505,29 @@ def numbered_proposal_text(listing: Listing, n: int) -> str:
         f'Reply "approve {n}" to put it up for sale, "ask {n} $X" or "lowest {n} $X" to change a '
         f'price, or "cancel {n}".'
     )
-    return f"#{n}: " + proposal_text(listing).removesuffix(APPROVE_PROMPT) + prompt
+    return f"#{n}: " + proposal_text(listing, n).removesuffix(APPROVE_PROMPT) + prompt
+
+
+def unpriced_hint(market: MarketView | None) -> str:
+    """What the Scout found when no sold listing was close enough: live asking prices, if any,
+    so the seller's own price has something to go on."""
+    if market is None or market.asking_median_cents is None:
+        return ""
+    lines = advice.market_lines(_unpriced_listing(market))
+    return ("\n" + "\n".join(lines)) if lines else ""
+
+
+def _unpriced_listing(market: MarketView) -> Listing:
+    return Listing(
+        item_id="", owner="", seller_id="", listing_ref="", status=PROPOSED, title="",
+        asking_cents=1, floor_cents=1, market=market,
+    )  # fmt: skip
+
+
+def saved_market(saved: dict[str, Any]) -> MarketView | None:
+    """The market view kept with an unpriced photo, if the Scout found anything."""
+    data = saved.get("market")
+    return MarketView.model_validate(data) if data else None
 
 
 def pending_photo_key(owner: str, n: int) -> str:
@@ -1130,7 +1160,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             reply = Reply(
                 f"This looks like {ex.item.title}, but no recent eBay sales were close enough to "
                 'suggest a price. Tell me your price, like "ask $40" or "at least $30", and I\'ll '
-                'set up the listing for you to approve. Or say "cancel".'
+                'set up the listing for you to approve. Or say "cancel".' + unpriced_hint(ex.market)
             )
         except (PhotoError, PipelineError, PriceError) as ex:
             # A PriceError's message can include the seller's floor, which stays out of logs.
@@ -1162,6 +1192,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 conv.unpriced = {
                     "item": unpriced.item.model_dump(),
                     "appraisal": unpriced.appraisal.model_dump(),
+                    "market": unpriced.market.model_dump() if unpriced.market else None,
                 }
             save(conv)
         return reply
@@ -1224,6 +1255,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 conv.needs_price[str(n)] = {
                     "item": unpriced.item.model_dump(),
                     "appraisal": unpriced.appraisal.model_dump(),
+                    "market": unpriced.market.model_dump() if unpriced.market else None,
                 }
             save(conv)
         return reply
@@ -1328,6 +1360,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 Appraisal.model_validate(conv.unpriced["appraisal"]),
                 asking,
                 floor,
+                saved_market(conv.unpriced),
             )
             store.move_photo(f"pending:{conv.owner}", listing.item_id)
             conv.unpriced = None
@@ -1447,6 +1480,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                     Appraisal.model_validate(saved["appraisal"]),
                     command.asking_cents,
                     command.floor_cents,
+                    saved_market(saved),
                 )
             except UnpricedError:
                 return f'I need an asking price for #{n} too, like "ask {n} $40".'

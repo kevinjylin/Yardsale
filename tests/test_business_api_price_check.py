@@ -186,7 +186,7 @@ async def test_price_check_uses_the_researcher_and_caches(
     assert check["suggested_asking_usd"] == 340
     assert len(check["examples"]) == 3
     assert all(e["url"].startswith("https://www.ebay.com/itm/") for e in check["examples"])
-    assert "local" not in check  # no Scout agent in this repo's tests
+    assert "local" not in check  # the Scout has no live sources in tests
     assert "real eBay sales" in check["next_step"] and "@ys-orchestrator" in check["next_step"]
     assert "Claude reads the photo" in check["next_step"]
     text = json.dumps(check)

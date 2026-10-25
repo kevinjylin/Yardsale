@@ -12,8 +12,11 @@ The Market takes listings three ways:
   Proposed. ApproveListing makes it live; CancelListing drops it.
 - ListItem: a title and the seller's own prices. Nothing is suggested, so it goes live at once.
 
-For a photo, the Market asks the Identifier what it is, the Researcher for recent eBay sold
-listings, and the Appraiser which of those match and what to charge. It saves the proposal
+For a photo, the Market asks the Identifier what it is, then the Researcher for recent eBay sold
+listings and the Market Scout for what similar items are listed for right now (both at once), and
+the Appraiser which sales match and what to charge. Sold prices set the price; the Scout's asking
+prices give the seller a fair range and a warning when their own price is far off, and give the
+item agent reasons to cite while haggling (pricing.market_view, advice.py). It saves the proposal
 (store.py), and spawns the item agent only once the seller approves.
 
 Item agents hold a private floor price and haggle with buyers over the published YardsaleHaggle
@@ -21,8 +24,9 @@ protocol (haggle.py, negotiation.py). Most run in this Bureau and register on th
 with its endpoint. With hosting on (hosting.py), approved items get an agent hosted on
 Agentverse instead, up to YARDSALE_HOST_ITEMS of them, each with a handle made from its title
 and, with YARDSALE_ITEM_AVATARS=1, a picture ASI:One draws (avatars.py). The Market, the buyer
-agent (shopper.py), the Identifier, Researcher, Appraiser, and Deal Finder (dealfinder.py, other
-sites' deals scored for a buyer) use Agentverse mailboxes in live mode.
+agent (shopper.py), the Identifier, Researcher, Appraiser, Market Scout (scout.py), and Deal
+Finder (dealfinder.py, other sites' deals scored for a buyer) use Agentverse mailboxes in
+live mode.
 
 When a buyer accepts, the deal is recorded and the Market's checkout (checkout.py) sends a payment
 link through the Agent Payment Protocol, or in the chat for chat buyers.
@@ -106,11 +110,14 @@ from yardsale.models import (
     ListingUpdate,
     ListItem,
     ListPhoto,
+    MarketView,
     Offer,
     OfferRejected,
     Proposed,
     ResearchRequest,
     ResearchResult,
+    ScoutReport,
+    ScoutRequest,
     ServiceError,
 )
 from yardsale.negotiation import answer_accept, answer_offer, buyer_key, gap_cents
@@ -123,8 +130,9 @@ from yardsale.offline import (
 )
 from yardsale.payments import PaymentConfigError, PaymentProvider, provider_from_env
 from yardsale.photos import PhotoError, check_prepared_photo
-from yardsale.pricing import NoSuggestedPrice, PriceError, listing_prices, valid_cents
+from yardsale.pricing import NoSuggestedPrice, PriceError, listing_prices, market_view, valid_cents
 from yardsale.researcher import Research, build_researcher, search_ebay_sold
+from yardsale.scout import build_scout, seller_zip
 from yardsale.shopper import Shopper, build_shopper, haggle_timeout
 from yardsale.sources import Source
 from yardsale.store import ACTIVE, AGENTVERSE, BUREAU, PROPOSED, DealRecord, Listing, Store
@@ -138,6 +146,7 @@ Progress = Callable[[str, str], Awaitable[None]]  # (stage, text) -> tell the se
 IDENTIFY_TIMEOUT = 180.0
 RESEARCH_TIMEOUT = 240.0
 APPRAISE_TIMEOUT = 240.0
+SCOUT_TIMEOUT = 240.0  # runs beside the Researcher; a slow or failed Scout never blocks a proposal
 NEGOTIATE_TIMEOUT = 15.0  # item agents in this Bureau answer in milliseconds
 HOSTED_NEGOTIATE_TIMEOUT = 60.0  # hosted ones answer through Agentverse mailboxes
 RETRY_DELETES_EVERY = 60.0  # seconds between tries to delete closed listings' hosted agents
@@ -152,6 +161,7 @@ class Services:
     researcher: str
     appraiser: str
     dealfinder: str = ""  # the Deal Finder (dealfinder.py): other sites' deals, scored
+    scout: str = ""  # the Market Scout: live asking prices on other sites
 
 
 @dataclass
@@ -486,7 +496,7 @@ async def request_reply(
 async def call_service(
     ctx: Context,
     service: str,
-    request: IdentifyRequest | ResearchRequest | AppraiseRequest | FindDeals,
+    request: IdentifyRequest | ResearchRequest | AppraiseRequest | FindDeals | ScoutRequest,
     reply_type: type[R],
     wait_seconds: float,
 ) -> R:
@@ -520,6 +530,11 @@ async def on_research(ctx: Context, sender: str, msg: ResearchResult) -> None:
 
 @market_proto.on_message(Appraisal)
 async def on_appraisal(ctx: Context, sender: str, msg: Appraisal) -> None:
+    _resolve(ctx, sender, msg.request_id, msg)
+
+
+@market_proto.on_message(ScoutReport)
+async def on_scout_report(ctx: Context, sender: str, msg: ScoutReport) -> None:
     _resolve(ctx, sender, msg.request_id, msg)
 
 
@@ -641,10 +656,31 @@ async def haggle_for(
 # --- Photo listings ------------------------------------------------------------------------------
 
 
+async def scout_quietly(ctx: Context, run: str, query: str, zip_code: str) -> ScoutReport | None:
+    """Ask the Market Scout for live asking prices. None if it fails or runs late: the Scout
+    informs a proposal, it never blocks one."""
+    rt = runtime()
+    if not rt.services.scout:
+        return None
+    try:
+        return await call_service(
+            ctx,
+            rt.services.scout,
+            ScoutRequest(request_id=f"{run}-scout", query=query, zip_code=zip_code),
+            ScoutReport,
+            SCOUT_TIMEOUT,
+        )
+    except PipelineError as ex:
+        ctx.logger.warning(f"No live asking prices for photo {run}: {ex}")
+        return None
+
+
 async def price_photo(
     ctx: Context, msg: ListPhoto, progress: Progress
-) -> tuple[ItemDetails, Appraisal]:
-    """Identifier -> Researcher -> Appraiser. Raises PipelineError if any of them fails."""
+) -> tuple[ItemDetails, Appraisal, MarketView | None]:
+    """Identifier -> (Researcher and Scout at once) -> Appraiser. Raises PipelineError if the
+    Identifier, Researcher, or Appraiser fails; a Scout failure only leaves the market view
+    without live asking prices."""
     rt = runtime()
     run = uuid4().hex[:12]
     started = time.monotonic()
@@ -669,16 +705,19 @@ async def price_photo(
         f"This looks like: {item.title} ({item.condition}). "
         f'Searching recent eBay sales for "{item.search_query}".',
     )
-    research = await call_service(
-        ctx,
-        rt.services.researcher,
-        ResearchRequest(
-            request_id=f"{run}-research",
-            query=item.search_query,
-            condition="new" if item.condition == "new" else "used",
+    research, report = await asyncio.gather(
+        call_service(
+            ctx,
+            rt.services.researcher,
+            ResearchRequest(
+                request_id=f"{run}-research",
+                query=item.search_query,
+                condition="new" if item.condition == "new" else "used",
+            ),
+            ResearchResult,
+            RESEARCH_TIMEOUT,
         ),
-        ResearchResult,
-        RESEARCH_TIMEOUT,
+        scout_quietly(ctx, run, item.search_query, msg.zip_code or seller_zip()),
     )
     researched_at = time.monotonic()
 
@@ -697,11 +736,13 @@ async def price_photo(
         APPRAISE_TIMEOUT,
     )
     done = time.monotonic()
+    live = sum(p.count for p in report.sources) if report is not None else "no"
     ctx.logger.info(
         f"Priced photo {run} in {done - started:.1f}s: identify {identified_at - started:.1f}s, "
-        f"eBay research {researched_at - identified_at:.1f}s, appraise {done - researched_at:.1f}s"
+        f"eBay research and scouting {researched_at - identified_at:.1f}s ({live} live listings), "
+        f"appraise {done - researched_at:.1f}s"
     )
-    return item, appraisal
+    return item, appraisal, market_view(appraisal, report)
 
 
 def save_proposal(
@@ -712,6 +753,7 @@ def save_proposal(
     appraisal: Appraisal,
     asking_cents: int | None,
     floor_cents: int | None,
+    market: MarketView | None = None,
 ) -> Listing:
     """Save a listing waiting for approval. Prices the seller gave win over the appraisal's.
 
@@ -727,6 +769,7 @@ def save_proposal(
             "it. Send it again with your own asking price.",
             item,
             appraisal,
+            market,
         ) from None
     return runtime().store.add_listing(
         Listing(
@@ -744,6 +787,7 @@ def save_proposal(
             suggested_floor_cents=appraisal.floor_cents,
             item=item,
             appraisal=appraisal,
+            market=market,
         )
     )
 
@@ -781,7 +825,7 @@ async def handle_list_photo(ctx: Context, sender: str, msg: ListPhoto) -> None:
 
     rt.in_progress.add(key)
     try:
-        item, appraisal = await price_photo(ctx, msg, update)
+        item, appraisal, market = await price_photo(ctx, msg, update)
         await ctx.send(
             sender, Appraised(listing_ref=msg.listing_ref, item=item, appraisal=appraisal)
         )
@@ -794,6 +838,7 @@ async def handle_list_photo(ctx: Context, sender: str, msg: ListPhoto) -> None:
             appraisal,
             msg.asking_cents,
             msg.floor_cents,
+            market,
         )
         await ctx.send(sender, _proposed(listing))
     except (PipelineError, PriceError) as ex:
@@ -854,7 +899,7 @@ class MarketBackend:
         async def log_progress(stage: str, text: str) -> None:
             ctx.logger.info(f"Chat listing {photo.listing_ref[:8]}: {stage}")
 
-        item, appraisal = await price_photo(ctx, photo, log_progress)
+        item, appraisal, market = await price_photo(ctx, photo, log_progress)
         return self.save_proposal(
             owner,
             photo.seller_id,
@@ -863,6 +908,7 @@ class MarketBackend:
             appraisal,
             photo.asking_cents,
             photo.floor_cents,
+            market,
         )
 
     def save_proposal(
@@ -874,9 +920,10 @@ class MarketBackend:
         appraisal: Appraisal,
         asking_cents: int | None,
         floor_cents: int | None,
+        market: MarketView | None = None,
     ) -> Listing:
         return save_proposal(
-            owner, seller_id, listing_ref, item, appraisal, asking_cents, floor_cents
+            owner, seller_id, listing_ref, item, appraisal, asking_cents, floor_cents, market
         )
 
     async def activate(self, ctx: Context, listing: Listing) -> tuple[Listing, bool]:
@@ -994,12 +1041,15 @@ def build(
     mail: MailSettings | None = None,
     mailbox: Mailbox | None = None,
     sources: dict[str, Source] | None = None,
+    scout_sources: dict[str, Source] | None = None,
 ) -> tuple[Bureau, Agent, list[Agent]]:
-    """Create the Bureau, the Market, the buyer agent and three service agents, and the agents
+    """Create the Bureau, the Market, the buyer agent and four service agents, and the agents
     of the store's active listings that run here, inside a running loop. Without a store, state
     lives in memory. Without `payments`, deals get no payment link; without `hosting`, every
     item agent runs here; without `pictures`, hosted item agents get no picture; without `mail`,
-    nobody answers Craigslist buyers' emails. The returned services include the buyer agent."""
+    nobody answers Craigslist buyers' emails; without `scout_sources`, the Market Scout finds no
+    live asking prices (each site it searches is a paid Apify run per photo). The returned
+    services include the buyer agent."""
     global RUNTIME
     registration: BatchRegistrationPolicy = (
         NoBatchRegistration() if offline else BatchAlmanacApiRegistrationPolicy(logger=log)
@@ -1019,6 +1069,7 @@ def build(
         build_researcher(research, offline),
         build_appraiser(judge, offline),
         build_dealfinder(deal_finder, offline),
+        build_scout(scout_sources or {}, offline),
     ]
     shopper: Shopper = build_shopper(offline, round_timeout)
     store = store or Store()
@@ -1189,6 +1240,7 @@ async def main(mode: str) -> None:
         # Standing searches scrape other sites, which costs money per poll, so they're off in
         # demo mode. --offline still has them: it only skips Fetch's servers.
         sources=None if mode == "demo" else other_sites(),
+        scout_sources=None if mode == "demo" else other_sites(),
     )
     if not offline:
         await connect_to_agentverse([market, *services])

@@ -55,10 +55,10 @@ That's the visual proof judges will remember.
    sold or canceled, which frees its slot.
 4. **Graduation pitch:** power sellers can later move to their own Fetch Business agent that they
    own.
-5. **Photo work is split across three agents on Agentverse.** The Identifier, Researcher, and
-   Appraiser each do one job, and each has its own Agentverse profile, so there's more than one
-   Yardsale agent on Agentverse. With the Market and the buyer agent they take 5 mailbox slots in
-   total, plus any hosted item agents.
+5. **Photo work is split across four agents on Agentverse.** The Identifier, Researcher,
+   Market Scout, and Appraiser each do one job, and each has its own Agentverse profile, so
+   there's more than one Yardsale agent on Agentverse. With the Market and the buyer agent they
+   take 6 mailbox slots in total, plus any hosted item agents.
 6. **Sellers use the ASI:One chat. Claude reads photos, ASI:One reads text.** A seller attaches a
    photo in ASI:One, so the ASI:One app is our phone upload page. ASI:One's docs don't list image
    input for its models, so Claude does the photo work, and ASI:One's `asi1-mini` reads what the
@@ -84,6 +84,7 @@ That's the visual proof judges will remember.
 | Identifier                  | Our Bureau server, Agentverse mailbox       | 1                      |
 | Researcher                  | Our Bureau server, Agentverse mailbox       | 1                      |
 | Appraiser                   | Our Bureau server, Agentverse mailbox       | 1                      |
+| Market Scout (`@ys-scout`)  | Our Bureau server, Agentverse mailbox       | 1                      |
 | Shopper (the buyer agent, `@ys-shopper`) | Our Bureau server, Agentverse mailbox | 1             |
 | Deal Finder (`@ys-dealfinder`) | Our Bureau server, Agentverse mailbox. Searches other sites and scores the deals. | 1 |
 | Item agents (one per item)  | Our Bureau server, Almanac only; or hosted on Agentverse (`YARDSALE_HOST_ITEMS`) | 0 in the server; 1 each hosted |
@@ -93,8 +94,8 @@ Buyer flow: ASI:One → Market agent (found by ASI:One) → Shopper → item age
 ASI:One → `@yardsale` → Yardsale's HTTP API → Shopper → item agents. The Market relays the result back, then passes the buyer's acceptance to the
 chosen item agent and sends a payment link.
 
-Seller flow: ASI:One chat (photo + text) → Market → Identifier → Researcher → Appraiser →
-Market → proposal in the chat → seller approves → new item agent → address in the chat. The next
+Seller flow: ASI:One chat (photo + text) → Market → Identifier → (Researcher and Market Scout
+at once) → Appraiser → Market → proposal in the chat → seller approves → new item agent → address in the chat. The next
 sections cover it.
 
 ## Selling in the ASI:One chat
@@ -454,8 +455,9 @@ they come with an optional note and the seller's own asking or lowest price.
 | ---- | ----- | ---- | ---- |
 | 1 | Identifier | Claude looks at the photo and returns brand, model, condition, details, and an eBay search query. It flags generic items, like an unbranded mug. | [identifier.py](../yardsale/identifier.py) |
 | 2 | Researcher | Searches eBay **sold** listings from the last 90 days through the Apify actor `caffein.dev/ebay-sold-listings`, up to 20 results. It returns each sale's title, price, condition, date, link, and photo. | [researcher.py](../yardsale/researcher.py) |
+| 2b | Market Scout | At the same time as the Researcher: searches what similar items are **listed for right now** on Craigslist, OfferUp, Facebook Marketplace (with `YARDSALE_FACEBOOK=1`), and eBay, through the same Apify-backed sources buyers' searches use, scoped to `YARDSALE_ZIP` where a source takes one. It returns, per site, the count, low, median, and high asking price and the 3 closest listings with links. A failure or a slow answer is logged and the proposal goes on without it. | [scout.py](../yardsale/scout.py) |
 | 3 | Appraiser | Claude compares the seller's photo with each sale's title and photo (up to 10 photos), and marks each sale as the same product or not, plus a 0–1 similarity score. The price is then worked out in code, not by Claude. | [appraiser.py](../yardsale/appraiser.py) |
-| 4 | Market | Saves a proposal with the prices and sends it to the seller. Spawns the item agent once the seller approves. | [bureau_server.py](../yardsale/bureau_server.py) |
+| 4 | Market | Combines the sold prices and the live asking prices into a market view (`pricing.market_view`): the fair asking range, the market line item agents cite while haggling, and a plain warning when the seller's own price is 35% or more off what it sells for ([advice.py](../yardsale/advice.py)). Saves a proposal with the prices and sends it to the seller. Spawns the item agent once the seller approves. | [bureau_server.py](../yardsale/bureau_server.py) |
 
 **How "is this the same item?" is decided.** Claude judges each eBay sale against the photo.
 "Same product" means same brand, model, and any variant or size that changes the price. Bundles,
@@ -479,9 +481,10 @@ reason, and the seller sees which sales the price came from.
   instead. [README](../README.md#pricing-rules) has the full rules.
 
 **Agent messages.** The Market tags each request with an ID and waits for the reply with the same
-ID: up to 180 s for the Identifier and 240 s each for the Researcher and Appraiser. If a service
-fails or times out, the seller gets a `ListingRejected` with the reason, for example "APIFY_TOKEN
-is not set". Agents other than the chat send `ListPhoto`, get `Proposed`, and answer with
+ID: up to 180 s for the Identifier and 240 s each for the Researcher, Scout, and Appraiser. If
+the Identifier, Researcher, or Appraiser fails or times out, the seller gets a `ListingRejected`
+with the reason, for example "APIFY_TOKEN is not set"; a Scout failure only leaves the proposal
+without live asking prices. Agents other than the chat send `ListPhoto`, get `Proposed`, and answer with
 `ApproveListing` or `CancelListing`; only the agent that sent the photo can. All three services handle requests concurrently, so several photos can be in
 progress at once. Message types are in [models.py](../yardsale/models.py), and each agent's
 Agentverse profile text is in [yardsale/readmes/](../yardsale/readmes/).
@@ -534,7 +537,10 @@ per agent, because agent addresses come from the master seed and don't change.
   other kinds of items is unproven.
 - **A seller's lowest price far under the appraisal.** On October 24 a seller set "at least
   $40" on shoes appraised at $190 (lowest $180), and the buyer agent's opening offer of $123 was
-  agreed at once. That follows the rules, but nothing warned the seller.
+  agreed at once. That follows the rules, but nothing warned the seller. Since October 24 the
+  proposal (and every `ask $X` or `lowest $X` reply) says so plainly when a seller's price is
+  35% or more off what the item sells for, with the numbers and a suggested price
+  (`advice.price_feedback`); the seller's price still wins.
 - **Apify credit.** The team has $200 of Apify credit (October 24), about 2,500 photos at
   $0.08 each.
 - **Probing the floor with new identities.** One buyer can't find a floor from counters or

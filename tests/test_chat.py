@@ -513,3 +513,24 @@ def test_storage_download_refuses_garbled_base64(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(photos, "ExternalStorage", GarbledStorage)
     with pytest.raises(photos.PhotoError):
         photos.download_from_storage(object(), "3f2a")
+
+
+async def test_a_minimum_far_under_the_market_gets_a_plain_warning(market: sim.Market) -> None:
+    """The October 24 case: "at least $40" on an item that sells for far more."""
+    seller = market.user("seller")
+    reply = await seller.say("sell this, at least $40", BIKE)
+    assert "Lowest price you'll take: $40 (your price; buyers never see it)" in reply
+    assert (
+        "Your $40 minimum is far under what these sell for: the last 6 sales were around $340. "
+        'You\'ll likely give it away at $40. Keep it, or say "lowest $310".'
+    ) in reply
+    assert "A fair asking price is $310 to $370." in reply
+    reply = await seller.say("ask $900")
+    assert "Your $900 asking price is far over what these sell for" in reply
+    assert 'Buyers will likely pass at $900. Keep it, or say "ask $340".' in reply
+    reply = await seller.say("ask $360, lowest $300")
+    assert (
+        "Your $360 asking price and $300 minimum are in line with the market: the last 6 sales "
+        "were around $340."
+    ) in reply
+    assert "is for sale at $360" in await seller.say("approve")  # the seller's price still wins

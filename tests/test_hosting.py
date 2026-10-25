@@ -626,3 +626,61 @@ async def test_the_command_pictures_hosted_items_and_redraws_by_handle(store: St
             assert agentverse.avatars[listing.address or ""] != first  # a new URL
         finally:
             await agentverse.stop_all()
+
+
+# --- The market line ---------------------------------------------------------------------------
+
+LINE = "similar ones sold for about $340 on eBay recently, and locals are asking $310 to $380"
+
+
+def priced_bike() -> Listing:
+    from yardsale.models import MarketView
+
+    listing = bike()
+    listing.market = MarketView(
+        sold_count=6,
+        sold_median_cents=34000,
+        sold_low_cents=31000,
+        sold_high_cents=37000,
+        asking_count=5,
+        asking_median_cents=34000,
+        asking_low_cents=31000,
+        asking_high_cents=38000,
+        range_low_cents=34000,
+        range_high_cents=34000,
+        sources=[],
+        line=LINE,
+    )
+    return listing
+
+
+async def test_a_hosted_agent_cites_the_market_line_from_its_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("YARDSALE_LIMITS", json.dumps({"floor_cents": 30000, "gap_cents": 1500}))
+    agent, _ = run_hosted(item_agent_code(SETTINGS), uuid4().hex, {"market_line": LINE})
+    bob = Peer("bob", *BUYER_KINDS)
+    try:
+        low = await bob.ask(agent.address, Offer(item_id="bike", offer_cents=1000), Counter)
+        assert low.note == f"That's well under what it's worth. I'm at $360. S{LINE[1:]}."
+        counter = await bob.ask(agent.address, Offer(item_id="bike", offer_cents=25000), Counter)
+        assert counter.note.startswith("I can come down to $") and LINE[1:] in counter.note
+        assert "300" not in counter.note and "300" not in low.note
+    finally:
+        await sim.stop([agent, bob.agent])
+
+
+async def test_host_item_stores_the_market_line_beside_the_limits() -> None:
+    agentverse = FakeAgentverse()
+    try:
+        address = await host_item(
+            agentverse, priced_bike(), 1500, "agent1qmarket", "agent1qshopper"
+        )
+        entry = agentverse.hosted[address]
+        assert entry["storage"]["market_line"] == LINE
+        assert f"Priced from the market: {LINE}." in entry["readme"]
+        assert "$300" not in entry["readme"] and "30000" not in entry["code"]
+        plain = await host_item(agentverse, bike("bike-2"), 1500, "agent1qmarket", "agent1qshopper")
+        assert "market_line" not in agentverse.hosted[plain]["storage"]
+    finally:
+        await agentverse.stop_all()

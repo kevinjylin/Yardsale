@@ -337,7 +337,11 @@ async def scout_local(query: str, zip_code: str) -> dict[str, Any] | None:
     except Exception as ex:  # a scout failure never fails the price check
         log.warning(f"Price check: the Scout couldn't answer ({type(ex).__name__})")
         return None
-    return dict(answer) if isinstance(answer, dict) and answer else None
+    if not isinstance(answer, dict) or not answer:
+        return None
+    if not answer.get("count") and not answer.get("failed"):
+        return None  # no live sources set up: nothing to say about local asking prices
+    return dict(answer)
 
 
 def _amount(value: Any) -> int | None:
