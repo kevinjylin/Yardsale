@@ -164,24 +164,25 @@ what that item actually sells for (eBay sold comps, the same data that prices se
 ranks them by price and quality, and says why each one is a good deal. For a Craigslist post the
 buyer picks, the agent emails the seller and negotiates within the max.
 
-**What's built** (October 24, evening; "in progress" means being built now, not on the branch):
+**What's built** (October 24, night; "tested offline" means it runs in the tests with fake
+Apify, Claude, and ASI:One answers and hasn't been run live yet):
 
 | Piece | Product | Status |
 | --- | --- | --- |
 | Photo → item identified (Claude) and priced from eBay sold listings (Apify) | Sellers | Built. Run live from the ASI:One app October 23–24; one photo took 36 seconds. |
 | Up to 8 photos in one message, numbered proposals | Sellers | Built, tested with fakes |
 | Minimum read from the seller's own words (`asi1-mini`) | Sellers | Built |
-| Market Scout: live local asking prices (Craigslist, OfferUp, Facebook) added to the pricing | Sellers | In progress. The sources exist ([sources.py](../yardsale/sources.py)); the agent and its place in the pipeline don't yet. |
-| Telling the seller when their minimum is far off | Sellers | In progress. Today a $40 minimum on $190 shoes is accepted without a word. |
+| Market Scout: live asking prices (Craigslist, OfferUp, Facebook Marketplace, eBay) beside the sold comps | Sellers | Built ([scout.py](../yardsale/scout.py)), tested offline. Runs alongside the Researcher; the price still comes from sold comps, and the asking prices set the fair range and the advice. The agent (`@ys-scout`) is on Agentverse since October 24; no photo has been priced live with it yet. |
+| Telling the seller when their minimum is far off | Sellers | Built ([advice.py](../yardsale/advice.py)), tested offline: a price 35% or more off what it sells for gets a plain warning with the numbers and a suggested price; the seller's price still wins. |
 | Approve → item agent with its own address | Sellers | Built. Hosted on Agentverse with its own profile, live October 24. |
 | Craigslist post text (`craigslist`), pasted by the seller | Sellers | Built |
 | Item agent haggles with Craigslist buyers by email, payment link on a deal | Sellers | Built; tested with a fake inbox only, not yet run against real Craigslist or Gmail |
-| Counters with reasons | Sellers | Today each counter carries a one-line note ("That's well under what it's worth"). Counters that cite the comps are in progress. |
+| Counters with reasons | Sellers | Built, tested offline: each counter cites the market line the Market worked out from sold and asking prices ("Similar ones sold for about $340 on eBay recently"), never the floor. |
 | Search on eBay, Craigslist, OfferUp, and Facebook Marketplace, best five under the max | Buyers | Built ([elsewhere.py](../yardsale/elsewhere.py)): in the chat, and in `@yardsale` as `searchOtherSites`. eBay and Craigslist tried on real results; OfferUp and Facebook parse the Actors' documented output. Not yet run from the chat with real keys. |
-| Score against eBay sold comps, "why it's a deal" | Buyers | In progress. Today's ranking is word match, then parts and accessories last, then cheapest with shipping. |
+| Deal Finder agent: score against eBay sold comps, "why it's a deal" | Buyers | Built ([dealfinder.py](../yardsale/dealfinder.py), [deals.py](../yardsale/deals.py)), tested offline: price against the typical sold price, then quality, then fit, with a one-line reason each. One live probe October 24: all four sources parsed; OfferUp ignored the result cap and bike parts ranked too high (fixes in progress). The agent (`@ys-dealfinder`) is on Agentverse since October 24. |
 | Standing searches (`watch for it`, every 6 hours for a week) | Buyers | Built |
 | Agent emails a Craigslist seller and negotiates for the buyer | Buyers | Built ([craigslist_buyer.py](../yardsale/craigslist_buyer.py)); tested through a fake relay, both agents haggling through it to a deal |
-| `@yardsale` on Fetch Business with OpenAPI tools | Both | Built, live October 24 (Plus trial, Cloudflare tunnel): `searchListings`, `searchOtherSites`, and the haggle and buy calls. A price check tool is in progress. |
+| `@yardsale` on Fetch Business with OpenAPI tools | Both | Built, live October 24 (Plus trial, Cloudflare tunnel): `searchListings`, `searchOtherSites`, and the haggle and buy calls. `priceCheck` is built and tested offline; the Business Tool has to be re-imported for it ([fetch-business.md](fetch-business.md)). |
 
 **Also built, not pitched:**
 
@@ -257,16 +258,16 @@ thing really sells for, with an agent that emails the seller.
   Yardsale writes the text. Buyers' emails reach Yardsale through Craigslist's relay. Yardsale
   doesn't fetch eBay, Craigslist, OfferUp, or Facebook pages itself: listings come from Apify
   Actors.
-- **Be exact about what's in progress.** The Market Scout, the seller price feedback, deal
-  scores against sold comps, counters that cite comps, and the price check tool. Say so if they
-  aren't done by the pitch, and show only what's on the branch at the freeze.
+- **Be exact about what's been run live.** The Market Scout, the seller price feedback, deal
+  scores, counters that cite comps, and `priceCheck` are built and tested offline; the Scout and
+  Deal Finder agents are on Agentverse, and the Deal Finder has had one live probe. Show only
+  what's worked live by the freeze.
 - **Don't dwell on outside services.** Relying on Apify and Claude is fine, as long as the flow
   works inside ASI:One and can be demoed there. Show the flow; explain the services when asked.
 - **The agent count.** The submission asks how many agents there are, and a typical entry has
-  about ten plus an orchestrator. Ours today is five service agents on Agentverse (the Market,
-  Identifier, Researcher, Appraiser, and Shopper) plus one per listed item; the Market Scout and
-  Deal Finder join them when they're agents (today the deal finder is code inside the Market).
-  Don't add agents just to raise the number.
+  about ten plus an orchestrator. Ours is seven service agents on Agentverse (the Market,
+  Identifier, Researcher, Appraiser, Shopper, Market Scout, and Deal Finder, all mailbox agents
+  as of October 24) plus one per listed item. Don't add agents just to raise the number.
 
 ## What Fetch Business offers
 
@@ -361,14 +362,14 @@ ASI:One; the Craigslist email is a second channel the same item agent answers.
 | Step | Phone | What happens | Sponsor | Built? |
 | --- | --- | --- | --- | --- |
 | 1. Snap | Seller | The friend attaches a photo in ASI:One (`@ys-orchestrator`) and types "sell this, at least $40". Claude identifies the item; `asi1-mini` reads the minimum. | Claude, Fetch (ASI:One) | Yes, up to 8 photos per message |
-| 2. Price | Seller | The Researcher finds eBay sold listings and the Market Scout finds live local asking prices, both through Apify. Code sets the asking price and floor. | Apify | Sold listings yes (`caffein.dev/ebay-sold-listings`; our own Actor is blocked by eBay). Market Scout in progress. |
-| 3. Feedback | Seller | If the $40 minimum is far under what it sells for, the reply says so with the numbers before anything is listed, and the friend can change it. | | In progress |
+| 2. Price | Seller | The Researcher finds eBay sold listings and the Market Scout finds live local asking prices, both through Apify. Code sets the asking price and floor. | Apify | Sold listings yes (`caffein.dev/ebay-sold-listings`; our own Actor is blocked by eBay). Market Scout built, tested offline; not yet run live in the pipeline. |
+| 3. Feedback | Seller | If the $40 minimum is far under what it sells for, the reply says so with the numbers before anything is listed, and the friend can change it. | | Built, tested offline (35% or more off the market) |
 | 4. Approve | Seller | The proposal card shows the sales behind the price. The friend approves, and the item's agent goes live with its address and, when hosted, an Agentverse profile. | Fetch (Interactive Cards, Agentverse) | Yes. Approve card seen in ASI:One; hosting run live October 24. |
 | 5. Post | Seller | `craigslist` gives the post text. The friend has already pasted it on Craigslist with Yardsale's inbox as the email; show the live post. | | Yes; posted by hand. Not yet tried on real Craigslist. |
 | 6. Email | Buyer | From the presenter's phone, reply to the Craigslist post with a low offer. | | Yes; relay unverified |
-| 7. Haggle back | Buyer | The item agent answers in the email thread with a counter and a reason, never showing the floor. The presenter replies "deal", gets a payment link, and pays with Stripe's test card. The friend's `my listings` shows the item sold and the payout after 5%. | Fetch (uAgents), Stripe (test mode) | Yes; tested with a fake inbox only. Counters that cite the comps are in progress; today's carry a one-line note. |
+| 7. Haggle back | Buyer | The item agent answers in the email thread with a counter and a reason, never showing the floor. The presenter replies "deal", gets a payment link, and pays with Stripe's test card. The friend's `my listings` shows the item sold and the payout after 5%. | Fetch (uAgents), Stripe (test mode) | Yes; tested with a fake inbox only. Counters cite the market line ("Similar ones sold for about $X on eBay recently"), tested offline. |
 | 8. Ask | Buyer | Ask `@yardsale`: "find me a mini fridge, max $60". Yardsale's listings come first (none match); then the other sites. | Fetch Business | Yes: `searchListings`, then `searchOtherSites` |
-| 9. Find | Buyer | The Deal Finder lists the best eBay, Craigslist, OfferUp, and Facebook Marketplace results under $60, each with a score against what mini fridges sell for and a line on why it's a deal. | Apify | Search and ranking built; not yet run from `@yardsale` with real keys. Scores against sold comps are in progress. |
+| 9. Find | Buyer | The Deal Finder lists the best eBay, Craigslist, OfferUp, and Facebook Marketplace results under $60, each with a score against what mini fridges sell for and a line on why it's a deal. | Apify | Built: the Deal Finder agent scores against sold comps with a reason each. One live probe: all four sources parsed, OfferUp ignored the result cap, bike parts ranked too high (fixes in progress). Not yet run from `@yardsale`. |
 | 10. Negotiate | Buyer | The presenter picks a Craigslist post, taps Reply on it, and pastes the relay address into the chat. The agent emails the seller an offer and negotiates within the max. | | Built; tested through a fake relay. Needs `@ys-orchestrator` today; `@yardsale` has no tool for it. |
 
 Before the pitch:
@@ -377,31 +378,33 @@ Before the pitch:
   and how long the relay takes to deliver a buyer's email is unknown.
 - Rehearse steps 5–7 and 10 on real Craigslist and time them. If the relay is slow, keep a
   recording of them as the fallback.
-- Run the demo search (step 9) once with real keys the day before, and check the OfferUp and
-  Facebook results, which have only been parsed from the Actors' documented output. Results are
-  cached for 10 minutes, so run it again right before the pitch.
+- Run the demo search (step 9) with real keys the day before, after the OfferUp cap and
+  parts-ranking fixes land, and check the scores and reasons read right. Results are cached for
+  10 minutes, so run it again right before the pitch.
+- Price one real photo end to end with the Scout in the pipeline, and time it: the Scout adds
+  Apify runs to the 36 seconds a photo took before it.
 - Keep agent-to-agent buying out of the video, or give it one line under "also built". The
   video is judged on its own, so it has to show the two products end to end.
 
 ## How close the code is
 
-State of the `seller-channels` branch on Saturday, October 24, evening (live runs noted; "in
-progress" means another teammate is building it now and it isn't on the branch):
+State of the `seller-channels` branch on Saturday, October 24, night (live runs noted; "tested
+offline" means it runs in the tests with fake services and hasn't been run live yet):
 
 | Piece | Status |
 | --- | --- |
 | Photo → price from sold listings | Built. With real keys, a photo of Air Jordan 4s was priced from 20 matching eBay sales on October 23. Each step's time is logged. Up to 8 photos per message. |
-| Market Scout (live local asking prices in the seller's price) | In progress. The Craigslist, OfferUp, and Facebook sources exist for the Deal Finder; the agent and the pricing rule don't yet. |
-| Seller price feedback ("your minimum is far under what it sells for") | In progress. |
+| Market Scout (live asking prices beside the sold comps) | Built ([scout.py](../yardsale/scout.py)), tested offline. The Market asks it and the Researcher at once after the Identifier; asking prices set the fair range, the market line counters cite, and the seller's warning, never the price itself. On Agentverse as `@ys-scout` since October 24; not yet run live in the pipeline. |
+| Seller price feedback ("your minimum is far under what it sells for") | Built ([advice.py](../yardsale/advice.py), `pricing.price_verdict`), tested offline: 35% or more off the market gets a plain warning with the numbers and a suggested price. |
 | One agent per item, with its own address | Built. Registered on the Almanac by default. |
 | Item agents hosted on Agentverse | Built: `YARDSALE_HOST_ITEMS=N` hosts up to N through the Hosting API, falling back to the server. Run live October 24: two hosted test bikes got public profiles, haggled, and sold. |
 | Seller approval, cards | Built: Approve card, sales carousel, prices form. The Approve card showed in the real ASI:One app. |
 | Craigslist post text; item agent answers Craigslist buyers by email | Built ([craigslist_mail.py](../yardsale/craigslist_mail.py)); tested with a fake inbox and a fake relay only. Not yet run against real Craigslist or Gmail. |
-| Haggling within the seller's limits | Built: several rounds, agree-then-accept, counters stop a private gap above the floor, each with a one-line note. Counters that give the comps as the reason are in progress. |
-| Deal Finder: eBay, Craigslist, OfferUp, Facebook Marketplace under the max | Built ([elsewhere.py](../yardsale/elsewhere.py), [sources.py](../yardsale/sources.py)), in the chat and in `@yardsale` as `searchOtherSites`, with a carousel card and `watch for it`. eBay and Craigslist tried on real Actor results; OfferUp and Facebook not run live. Not yet run from the chat with real keys. |
-| Deal scores against sold comps, "why it's a deal" | In progress. Today: word match, parts and accessories last, cheapest with shipping. |
+| Haggling within the seller's limits | Built: several rounds, agree-then-accept, counters stop a private gap above the floor, and each counter cites the market line (`haggle.with_reason`), never the floor. Tested offline. |
+| Deal Finder: eBay, Craigslist, OfferUp, Facebook Marketplace under the max | Built ([dealfinder.py](../yardsale/dealfinder.py), [elsewhere.py](../yardsale/elsewhere.py), [sources.py](../yardsale/sources.py)) as its own agent, in the chat and in `@yardsale` as `searchOtherSites`, with a carousel card and `watch for it`. One live probe October 24: all four sources parsed; OfferUp ignored the result cap (fix in progress). On Agentverse as `@ys-dealfinder` since October 24. |
+| Deal scores against sold comps, "why it's a deal" | Built ([deals.py](../yardsale/deals.py)), tested offline: price against the typical eBay sold price, then quality (condition, photos, seller rating, title, age), then fit; parts, repairs, lots, and accessories sink. In the live probe, bike parts still ranked too high (fix in progress). |
 | Agent emails a Craigslist seller for the buyer | Built ([craigslist_buyer.py](../yardsale/craigslist_buyer.py)): `negotiate <relay address> "<title>" max $250 asking $300`; at most 4 offers, the max never emailed. Tested through a fake relay, including Yardsale's buyer and seller agents haggling through it. |
-| `@yardsale` on Fetch Business | Set up October 24: a description, a knowledge entry, a skill, and (on the Plus trial) an OpenAPI Integration with Yardsale's HTTP API. Live October 24 through a Cloudflare quick tunnel. Tools today: `searchListings`, `searchOtherSites`, `startHaggle`, `getHaggle`, `acceptDeal`, `getDeal`. A price check tool, and the skill rewritten for the Deal Finder, are in progress. Sellers still go to `@ys-orchestrator`. |
+| `@yardsale` on Fetch Business | Set up October 24: a description, a knowledge entry, a skill, and (on the Plus trial) an OpenAPI Integration with Yardsale's HTTP API. Live October 24 through a Cloudflare quick tunnel. Tools: `searchListings`, `searchOtherSites`, `priceCheck` (built October 24, tested offline), `startHaggle`, `getHaggle`, `acceptDeal`, `getDeal`. The Business Tool has to be re-imported for `priceCheck` and the skill text updated; the steps are in [fetch-business.md](fetch-business.md). Sellers' photos still go to `@ys-orchestrator`. |
 | Agent-to-agent buying (the Shopper, haggling card, Payment Protocol) | Built and live October 24, in ASI:One and through `@yardsale`. Not pitched. |
 | Payment links, commission | Built for test mode: Visa Pay By Link sandbox or Stripe test checkout, 5% commission. Stripe run live October 24: a $295 deal was paid with a test card and recorded with its commission. Visa not yet run (no sandbox keys). |
 | Selling on the seller's own eBay | Built ([ebay_seller.py](../yardsale/ebay_seller.py)); tested against a local stand-in only; needs eBay developer keys. |
@@ -416,20 +419,26 @@ read.
 
 ## Known problems
 
-- **The pitch is ahead of the branch.** The Market Scout, the seller price feedback, deal
-  scores against sold comps, counters that cite comps, and the price check tool are being built
-  now. At the code freeze, cut from the pitch whatever isn't on the branch and working.
-- **Nothing on the other sites has been run from the chat with real keys.** eBay and Craigslist
-  were tried on real Actor results in isolation; OfferUp and Facebook Marketplace parse the
-  Actors' documented sample output only. Run the demo search end to end the day before.
+- **Most of the pitch is tested offline only.** The Market Scout, the seller price feedback,
+  deal scores, counters that cite comps, and `priceCheck` are on the branch and pass the tests
+  with fake services. The Scout and Deal Finder agents are on Agentverse, but no photo has been
+  priced with the Scout in the pipeline and no seller has seen the warning or a cited counter
+  in the real app. At the code freeze, cut from the pitch whatever hasn't worked live.
+- **The Deal Finder's one live probe found two problems.** All four sources parsed real Actor
+  results, but OfferUp ignored the result cap (a bigger paid run than asked for) and bike parts
+  ranked too high for a bike search. Fixes are in progress; run the demo search end to end once
+  they land, and the day before.
+- **`priceCheck` isn't in `@yardsale` yet.** The endpoint is built, but Fetch only sees it after
+  the Business Tool is re-imported from the tunnel's `/openapi.json` and the skill names it
+  ([fetch-business.md](fetch-business.md)).
 - **Craigslist's relay is unverified.** Nothing has been run against real Craigslist: whether
   the relay accepts replies from the posting email, keeps the subject, how long it takes, and
   whether it strips links (if it does, `YARDSALE_MAIL_LINKS=0` gives the amount and asks for a
   phone number). Rehearse early and keep a recording.
-- **A seller's minimum far under the appraisal gets no warning today.** On October 24 "at least
+- **A seller's minimum far under the appraisal got no warning** until October 24: "at least
   $40" on shoes appraised at $190 was taken as is, and a buyer's opening offer of $123 was
-  agreed at once. The seller feedback in progress is the fix; until it lands, set demo minimums
-  near the appraisal.
+  agreed at once. The seller feedback ([advice.py](../yardsale/advice.py)) now warns at 35% or
+  more off the market; it's tested offline and hasn't been seen in the real ASI:One app.
 - **Lowballs revealed the floor** until the October 24 rebuild: a $1 offer used to get a
   counter at exactly the floor. Now counters stop a private gap above it, and lowballs get no
   concession. A buyer making many identities could still narrow a floor down.
@@ -453,8 +462,8 @@ read.
 - **`@yardsale` depends on the tunnel.** Its Business Tool calls Yardsale's API through a
   Cloudflare quick tunnel, which gets a new URL every time `cloudflared` restarts; the Business
   Tool then has to be pointed at the new URL. Keep the tunnel running from before the demo to
-  after it, and check `curl <tunnel>/openapi.json` first. Every new tool (price check) means
-  re-reading the OpenAPI description in the workbench.
+  after it, and check `curl <tunnel>/openapi.json` first. Every new tool (`priceCheck`) means
+  re-importing the OpenAPI description in the workbench.
 - **The Orders page can't show our sales.** On the Plus trial, orders come only from a connected
   Square or SumUp POS account.
 - **The Plus trial ends November 7.** Started October 24; it's $75 a month after that.
@@ -579,8 +588,11 @@ from "The demo, step by step" above.
   listings from `charitable_trousseau/ebay-search-scraper`, `logiover/craigslist-scraper`,
   `igolaizola/offerup-scraper`, and `apify/facebook-marketplace-scraper`.
 - **"How do you score a deal?"** Against what the same item sold for on eBay in the last 90
-  days, the comps that price sellers' items too, with condition and shipping counted. Check the
-  finished scoring before answering in detail.
+  days, the comps that price sellers' items too: price against that typical sold price first
+  (shipping included), then quality (condition, photos, seller rating, title, how recently it
+  was posted), then how well the title fits the search. Parts, repairs, lots, and accessories
+  sink, and something far under the market is flagged to check. Plain code, no model call
+  ([deals.py](../yardsale/deals.py)).
 - **"Will Craigslist sellers mind an agent emailing them?"** Every email says it's from the
   buyer's Yardsale assistant, an AI agent. It's one thread per post the buyer picked, at most
   four offers, and the buyer pastes the reply address themselves, so Yardsale never collects it.
@@ -601,7 +613,7 @@ from "The demo, step by step" above.
   ASI:One finds and routes to the agents. The README and Devpost say the same.
 - **"How is this linked to Fetch Business?"** `@yardsale` is Yardsale's Fetch Business agent
   (Plus trial). It calls Yardsale's HTTP API through an OpenAPI Integration, one tool per call
-  (search listings, search other sites, price check in progress), and the API runs the same
+  (search listings, search other sites, price check), and the API runs the same
   agents the ASI:One chat does. Sellers' photos go to `@ys-orchestrator`, because a photo has
   to reach Claude.
 - **"What if ASI:One doesn't pick Yardsale?"** Use the rehearsed query. If routing misses on
