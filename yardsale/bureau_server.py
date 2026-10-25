@@ -148,7 +148,7 @@ RESEARCH_TIMEOUT = 240.0
 APPRAISE_TIMEOUT = 240.0
 SCOUT_TIMEOUT = 20.0  # seconds the Scout's sites get beside the Researcher; slower ones left out
 NEGOTIATE_TIMEOUT = 15.0  # item agents in this Bureau answer in milliseconds
-HOSTED_NEGOTIATE_TIMEOUT = 60.0  # hosted ones answer through Agentverse mailboxes
+HOSTED_NEGOTIATE_TIMEOUT = 25.0  # hosted ones answer through mailboxes; then the Market does
 RETRY_DELETES_EVERY = 60.0  # seconds between tries to delete closed listings' hosted agents
 # How often to look for a standing search that's due. Far more often than watches.WATCH_EVERY,
 # so a watch is polled near its due time; finding none due is two cheap queries.
@@ -597,8 +597,25 @@ async def negotiate(
     if listing is None or address is None:
         return OfferRejected(item_id=item_id, reason="not for sale", code="unavailable")
     request = request.copy(update={"request_id": uuid4().hex})
-    wait = HOSTED_NEGOTIATE_TIMEOUT if listing.host == AGENTVERSE else NEGOTIATE_TIMEOUT
-    reply = await request_reply(ctx, address, request, request.request_id, wait)
+    if listing.host == AGENTVERSE:
+        buyer = buyer_key(rt.market, request.buyer_ref, rt.market)
+        if rt.store.counter(item_id, buyer) is not None:
+            # This buyer's haggle already moved here when the hosted agent went quiet; keep it
+            # here so their rounds and price stay in one place.
+            return answer_here(ctx, rt, listing, buyer, request)
+        try:
+            reply = await request_reply(
+                ctx, address, request, request.request_id, HOSTED_NEGOTIATE_TIMEOUT
+            )
+        except PipelineError as ex:
+            # A buyer waiting on a reply matters more than where the rules run: the Market has
+            # the same floor, gap, and market line it gave the hosted agent.
+            ctx.logger.warning(
+                f"Hosted item {item_id} didn't answer ({ex}); answering with its rules here"
+            )
+            return answer_here(ctx, rt, listing, buyer, request)
+    else:
+        reply = await request_reply(ctx, address, request, request.request_id, NEGOTIATE_TIMEOUT)
     if not isinstance(reply, Counter | Deal | OfferRejected):
         raise PipelineError(f"The item agent sent {type(reply).__name__}.")
     if isinstance(reply, Deal) and listing.host == AGENTVERSE:
@@ -606,6 +623,24 @@ async def negotiate(
         if record_hosted_deal(rt, listing, buyer, reply) is None:
             ctx.logger.warning(f"Hosted item {item_id} sold, but the store had it as unavailable")
     return reply
+
+
+def answer_here(
+    ctx: Context, rt: Runtime, listing: Listing, buyer: str, request: Offer | AcceptCounter
+) -> Counter | Deal | OfferRejected:
+    """A hosted item's haggle, answered by the Market with the same rules (negotiation.py) and
+    limits. A sale here deletes the hosted agent, as a sale it reported would."""
+    if isinstance(request, Offer):
+        return answer_offer(
+            rt.store, listing.item_id, buyer, request.offer_cents, request.request_id
+        )
+    deal = answer_accept(
+        rt.store, listing.item_id, buyer, request.counter_cents, request.request_id
+    )
+    if isinstance(deal, Deal):
+        ctx.logger.info(f"Hosted item {listing.item_id} sold here, its agent being quiet")
+        delete_closed_hosted_soon(rt)
+    return deal
 
 
 @market_proto.on_message(ItemSold)

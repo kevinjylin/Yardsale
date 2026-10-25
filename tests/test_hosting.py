@@ -686,3 +686,32 @@ async def test_host_item_stores_the_market_line_beside_the_limits() -> None:
         assert "market_line" not in agentverse.hosted[plain]["storage"]
     finally:
         await agentverse.stop_all()
+
+
+async def test_a_quiet_hosted_agent_is_answered_for_with_its_rules(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seen live: a Craigslist buyer's offer to a hosted item got "let me check" and nothing
+    after. When the hosted agent doesn't answer, the Market answers with the same rules, and
+    keeps that buyer's haggle here."""
+    monkeypatch.setattr(bureau_server, "HOSTED_NEGOTIATE_TIMEOUT", 0.3)
+    agentverse = FakeAgentverse()
+    async with sim.running_market(store, hosting=agentverse, host_limit=1) as market:
+        try:
+            await approve_bike(market)
+            (listing,) = store.active()
+            assert listing.host == AGENTVERSE
+            await agentverse.stop_all()  # the hosted agent goes quiet
+
+            buyer = market.user("buyer")
+            await buyer.say("hybrid bike")
+            assert "agreed to $360" in await buyer.say("offer $360 on 1")
+            assert "Deal!" in await buyer.say("accept")
+            sold = store.get(listing.item_id)
+            assert sold is not None and sold.status == SOLD
+            (deal,) = store.deals()
+            assert deal.price_cents == 36000
+            await asyncio.gather(*bureau_server.runtime().background)
+            assert agentverse.deleted == [listing.address]  # sold here, so it's deleted
+        finally:
+            await agentverse.stop_all()
