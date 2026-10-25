@@ -77,9 +77,12 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 from uagents_core.contrib.protocols.chat.cards import (
+    META_CARD_KIND,
+    META_CARD_PAYLOAD,
     SelectionValue,
     extract_card_response,
 )
+from uagents_core.types import DeliveryStatus
 
 from yardsale import (
     advice,
@@ -290,12 +293,16 @@ SOURCES = {
 class Reply(NamedTuple):
     text: str
     card: MetadataContent | None = None  # an Interactive Card shown with the text
-    # Messages sent right after this one, such as the eBay sales behind a proposal's price.
+    # Messages sent right after this one, such as each proposal of several photos.
     more: tuple[tuple[str, MetadataContent | None], ...] = ()
     # (search, budget, ZIP code or ""): search other sites, outside the conversation's lock,
     # and add the best deals to this text before it's sent. The ZIP is the place the buyer
     # named ("in Berkeley"); "" searches the server's default place.
     elsewhere: tuple[str, int | None, str] | None = None
+    # More cards in this same message, after `card`, such as the eBay sales behind a proposal's
+    # price. One message per answer: ASI:One folds a turn's messages together, and a second
+    # message showed every card of the turn twice.
+    extra: tuple[MetadataContent, ...] = ()
 
 
 def as_reply(answer: str | Reply) -> Reply:
@@ -424,12 +431,25 @@ def attachments_summary(msg: ChatMessage) -> str:
 UPLOADS_WELCOME = MetadataContent(type="metadata", metadata={"attachments": "true"})
 
 
+def card_key(card: MetadataContent) -> str:
+    """What a card shows: its kind and payload, without its random ID. Two cards with the same
+    key look the same in the chat."""
+    return card.metadata.get(META_CARD_KIND, "") + card.metadata.get(META_CARD_PAYLOAD, "")
+
+
 def text_message(
-    text: str, offer_uploads: bool = False, card: MetadataContent | None = None
+    text: str,
+    offer_uploads: bool = False,
+    card: MetadataContent | None = None,
+    extra: tuple[MetadataContent, ...] = (),
 ) -> ChatMessage:
+    """One chat message: the text, then its cards, each card once."""
     content: list[TextContent | MetadataContent] = [TextContent(type="text", text=text)]
-    if card is not None:
-        content.append(card)
+    seen: set[str] = set()
+    for one in (card, *extra):
+        if one is not None and card_key(one) not in seen:
+            seen.add(card_key(one))
+            content.append(one)
     if offer_uploads:
         content.append(UPLOADS_WELCOME)  # tells ASI:One this agent accepts file uploads
     return ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=content)
@@ -592,15 +612,23 @@ def batch_notes(count: int, text: str) -> str:
 
 
 def proposal_reply(listing: Listing) -> Reply:
-    """The proposal with its card, then the eBay sales behind the price."""
+    """The proposal: one message with its text, its card, and the eBay sales behind the price
+    as a carousel in the same message. The proposal card has the only Approve button."""
     comps = cards.comps(listing)
-    more = ((comps_text(listing), comps),) if comps is not None else ()
-    return Reply(proposal_text(listing), proposal_card(listing), more)
+    if comps is None:
+        return Reply(proposal_text(listing), proposal_card(listing))
+    text = f"{proposal_text(listing)}\n\n{comps_text(listing)}"
+    return Reply(text, proposal_card(listing), extra=(comps,))
 
 
 def comps_text(listing: Listing) -> str:
+    """The line about the sales carousel, counting what it shows against what the price used."""
     count = len(listing.appraisal.matches) if listing.appraisal else 0
-    return f"Here are the {min(count, 6)} closest eBay sales behind that price."
+    shown = min(count, cards.COMPS_SHOWN)
+    sales = f"{count} eBay sale{'s' if count != 1 else ''}"
+    if shown < count:
+        return f"The cards show the {shown} closest of the {sales} behind that price."
+    return f"The cards show the {sales} behind that price."
 
 
 def unpriced_reply(title: str, n: int | None, market: MarketView | None) -> Reply:
@@ -990,6 +1018,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     store = backend.store
     locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
     answered: OrderedDict[str, Reply | None] = OrderedDict()  # message ID -> reply, for resends
+    delivered: set[str] = set()  # message IDs whose answer reached ASI:One
+    # Conversation key -> (pricing job, photo count): a new student's first photos, answered once
+    # they've signed up.
+    held: OrderedDict[str, tuple[asyncio.Future[Reply], int]] = OrderedDict()
     follow_ups: set[asyncio.Task[None]] = set()  # keeps background replies from being collected
     fields = {f.name for f in dataclasses.fields(Conversation)} - {"key"}
     finder = backend.finder
@@ -2157,13 +2189,11 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         sites = finder.site_names()
         card = await deals_card(key, found)
         if reply.card is not None and card is not None:
-            return Reply(
-                reply.text, reply.card, (*reply.more, (elsewhere_text(found, sites), card))
-            )
+            return reply._replace(more=(*reply.more, (elsewhere_text(found, sites), card)))
         headline = deals_headline(found) if found.deals else ""
         rest = elsewhere_text(found, sites, headline=not headline)
         text = f"{headline}\n\n{reply.text}\n\n{rest}" if headline else f"{reply.text}\n\n{rest}"
-        return Reply(text, card or reply.card, reply.more)
+        return reply._replace(text=text, card=card or reply.card)
 
     async def deals_reply(key: str, found: Found) -> Reply:
         text = elsewhere_text(found, finder.site_names())
@@ -2899,7 +2929,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             notes = batch_notes(len(photos), text)
             return await price_batch(ctx, key, numbered, notice, notes, deadline, deliver)
         reply = await price_photo(ctx, key, photos[0], text)
-        return Reply(notice + reply.text, reply.card, reply.more)
+        return reply._replace(text=notice + reply.text)
 
     async def handle_safely(
         ctx: Context,
@@ -2918,19 +2948,102 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             ctx.logger.exception(f"Chat message in {key[:8]} failed")
             return Reply(SOMETHING_BROKE)
 
-    async def send_reply(
-        ctx: Context, sender: str, reply: Reply, offer_uploads: bool = False
+    async def with_held_photos(
+        ctx: Context, key: str, reply: Reply, deadline: float | None, deliver: Deliver | None
+    ) -> Reply:
+        """Once a new student has signed up, the photos they sent before it, in this answer:
+        the sign-up line, then the proposal and its cards (not the menu). If pricing is still
+        running at the deadline, the answer says so and the proposal follows when it's ready."""
+        found = held.get(key)
+        if found is None or store.student(f"asi1:{key}") is None:
+            return reply
+        del held[key]
+        job, count = found
+        if not job.done():
+            timeout = None if deadline is None else max(0.0, deadline - loop_time())
+            await asyncio.wait({job}, timeout=timeout)
+        if job.done():
+            if job.cancelled():
+                return reply
+            priced = job.result()  # handle_safely never raises
+            return priced._replace(text=f"{reply.text}\n\n{priced.text}")
+        if deliver is not None:
+            in_background(send_held(ctx, key, job, deliver))
+        return Reply(f"{reply.text}\n\n{ALREADY_WORKING}", cards.pricing(count))
+
+    async def send_held(
+        ctx: Context, key: str, job: asyncio.Future[Reply], deliver: Deliver
     ) -> None:
-        # Anything that got here without a card gets a plain one, so every reply is a card.
-        card = reply.card or cards.notice(reply.text, [cards.SELL, cards.BUY])
-        await ctx.send(sender, text_message(reply.text, offer_uploads=offer_uploads, card=card))
-        for text, more_card in reply.more:
-            more_card = more_card or cards.notice(text, [cards.SELL, cards.BUY])
-            await ctx.send(sender, text_message(text, card=more_card))
+        try:
+            await deliver(await job)
+        except Exception:
+            ctx.logger.exception(f"Sending a held photo's proposal in {key[:8]} failed")
+
+    def hold(ctx: Context, key: str, msg: ChatMessage) -> None:
+        """Start pricing a new student's first photos now, and keep the answer until they've
+        signed up, so the sign-up cards are the only thing they see first."""
+        job = asyncio.ensure_future(handle_safely(ctx, key, msg))
+        held[key] = (job, min(len(photos_in(msg)), MAX_PHOTOS))
+        while len(held) > MAX_REMEMBERED:
+            held.popitem(last=False)
+
+    async def answer_message(
+        ctx: Context, key: str, msg: ChatMessage, deadline: float, deliver: Deliver
+    ) -> Reply:
+        """The answer to one message, with a new student's held photos once they've joined."""
+        reply = await handle_safely(ctx, key, msg, deadline, deliver)
+        try:
+            return await with_held_photos(ctx, key, reply, deadline, deliver)
+        except Exception:
+            ctx.logger.exception(f"Held photos in {key[:8]} failed")
+            return reply
+
+    def loop_time() -> float:
+        return asyncio.get_running_loop().time()
+
+    async def send_reply(
+        ctx: Context,
+        sender: str,
+        reply: Reply,
+        offer_uploads: bool = False,
+        sent: set[str] | None = None,
+    ) -> bool:
+        """Send an answer: one message with its text and cards, then any later messages
+        (`more`). A card this turn already sent (`sent`, by card_key) isn't sent again. Returns
+        whether the first message was delivered."""
+        sent = set() if sent is None else sent
+        messages = [(reply.text, reply.card, reply.extra)]
+        messages += [(text, card, ()) for text, card in reply.more]
+        delivered = True
+        for n, (text, card, extra) in enumerate(messages):
+            # Anything that got here without a card gets a plain one, so every reply is a card.
+            card = card or cards.notice(text, [cards.SELL, cards.BUY])
+            fresh = [one for one in (card, *extra) if card_key(one) not in sent]
+            sent.update(card_key(one) for one in fresh)
+            first = fresh[0] if fresh else None
+            message = text_message(text, offer_uploads and n == 0, first, tuple(fresh[1:]))
+            status = await ctx.send(sender, message)
+            if n == 0:
+                delivered = status.status != DeliveryStatus.FAILED
+        return delivered
+
+    def remember(msg_id: str, reply: Reply | None) -> None:
+        answered[msg_id] = reply
+        while len(answered) > MAX_REMEMBERED:
+            forgotten, _ = answered.popitem(last=False)
+            delivered.discard(forgotten)
+
+    async def resend(ctx: Context, sender: str, msg_id: str, earlier: Reply) -> None:
+        """ASI:One sent a message again. Its cards already went out with the first answer, so
+        the same text goes again without them; ASI:One showed resent cards twice."""
+        if msg_id in delivered:
+            await ctx.send(sender, text_message(earlier.text))
+        elif await send_reply(ctx, sender, earlier):
+            delivered.add(msg_id)
 
     @proto.on_message(ChatMessage)
     async def on_chat(ctx: Context, sender: str, msg: ChatMessage) -> None:
-        received = asyncio.get_running_loop().time()
+        received = loop_time()
         await ctx.send(
             sender, ChatAcknowledgement(timestamp=datetime.now(UTC), acknowledged_msg_id=msg.msg_id)
         )
@@ -2938,55 +3051,58 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if msg_id in answered:  # a resend: answer it again rather than act twice
             earlier = answered[msg_id]
             if earlier is not None:
-                await send_reply(ctx, sender, earlier)
+                await resend(ctx, sender, msg_id, earlier)
             return
-        answered[msg_id] = None
-        while len(answered) > MAX_REMEMBERED:
-            answered.popitem(last=False)
+        remember(msg_id, None)
 
         key = conversation_key(ctx, sender)
+        choice = card_choice(msg)
         async with locks[key]:
             conv = load(key)
             first_message = not conv.greeted
             new_student = (
-                first_message and onboarding.campus_mode() and store.student(conv.owner) is None
+                first_message
+                and onboarding.campus_mode()
+                and store.student(conv.owner) is None
+                and not onboarding.signing_up(choice)
             )
             if first_message:
                 conv.greeted = True
                 save(conv)
-        if new_student:
-            # Same-school only, so the first thing to settle is which school. The card goes out
-            # before any slow work, and whatever else was in the message is still answered.
-            await ctx.send(
-                sender,
-                text_message(
-                    onboarding.ARE_YOU_A_STUDENT,
-                    offer_uploads=True,
-                    card=onboarding.student_welcome(),
-                ),
-            )
-            first_message = False  # uploads were offered with the welcome
-        if any(isinstance(item, StartSessionContent) for item in msg.content):
-            await ctx.send(sender, uploads_welcome())
-            first_message = False  # the welcome already offered uploads
-            if not clean_text(msg) and not photos_in(msg) and card_choice(msg) is None:
-                answered[msg_id] = None
-                return  # ASI:One opening the session; nothing to answer yet
         # Message text can include a seller's lowest price, so it isn't logged.
         ctx.logger.info(
             f"Chat message in {key[:8]} ({len(photos_in(msg))} photo link(s)), "
             f"attachments: {attachments_summary(msg)}"
         )
+        # Every card this message's answers carry, so none goes out twice for it.
+        sent: set[str] = set()
+        if new_student:
+            # Same-school only, so the first thing to settle is which school. The welcome is the
+            # whole answer, and it offers uploads. A photo sent with it is priced now, and its
+            # proposal comes with the sign-up confirmation.
+            if photos_in(msg):
+                hold(ctx, key, msg)
+            welcome = Reply(onboarding.ARE_YOU_A_STUDENT, onboarding.student_welcome())
+            remember(msg_id, welcome)
+            if await send_reply(ctx, sender, welcome, True, sent):
+                delivered.add(msg_id)
+            return
+        starting = any(isinstance(item, StartSessionContent) for item in msg.content)
+        if starting and not clean_text(msg) and not photos_in(msg) and choice is None:
+            await ctx.send(sender, uploads_welcome())
+            return  # ASI:One opening the session; nothing to answer yet
+        # The first answer offers uploads, in the same message, so the turn stays one message.
+        offer_uploads = first_message or starting
 
         answer_sent = asyncio.Event()
 
         async def deliver(later: Reply) -> None:
             await answer_sent.wait()  # proposals priced later never overtake the answer
-            await send_reply(ctx, sender, later)
+            await send_reply(ctx, sender, later, sent=sent)
 
         deadline = received + REPLY_WITHIN * BATCH_WAIT_SHARE
-        job = asyncio.ensure_future(handle_safely(ctx, key, msg, deadline, deliver))
-        left = REPLY_WITHIN - (asyncio.get_running_loop().time() - received)
+        job = asyncio.ensure_future(answer_message(ctx, key, msg, deadline, deliver))
+        left = REPLY_WITHIN - (loop_time() - received)
         done, _ = await asyncio.wait({job}, timeout=max(0.0, left))
         if done:
             reply = job.result()
@@ -2999,15 +3115,17 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
             async def send_when_done() -> None:
                 result = await job
-                answered[msg_id] = result
-                await send_reply(ctx, sender, result)
+                remember(msg_id, result)
+                if await send_reply(ctx, sender, result, sent=sent):
+                    delivered.add(msg_id)
                 answer_sent.set()
 
             follow_up = asyncio.ensure_future(send_when_done())
             follow_ups.add(follow_up)
             follow_up.add_done_callback(follow_ups.discard)
-        answered[msg_id] = reply
-        await send_reply(ctx, sender, reply, first_message)
+        remember(msg_id, reply)
+        if await send_reply(ctx, sender, reply, offer_uploads, sent):
+            delivered.add(msg_id)
         if done:
             answer_sent.set()
 

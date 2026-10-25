@@ -202,11 +202,11 @@ async def test_other_conversations_cannot_see_your_payment(
 
 async def test_the_sales_behind_a_price_follow_the_proposal(market: sim.Market) -> None:
     seller = market.user("seller")
-    await seller.say("sell this", BIKE)
-    follow_up = seller.follow_ups[0] if seller.follow_ups else await seller.next_reply()
-    assert "closest eBay sales" in follow_up.text()
-    card = card_in(follow_up)
-    assert card is not None and isinstance(card.payload, CarouselCardPayload)
+    proposal = await seller.exchange(sim.chat_message("sell this", BIKE))
+    assert "eBay sales behind that price" in proposal.text()
+    # The sales come in the proposal's own message, after its card.
+    _, card = sim.cards_of(proposal)
+    assert isinstance(card.payload, CarouselCardPayload)
     first = card.payload.items[0]
     assert first.primary_cta is not None
     why = await seller.tap(first.primary_cta.selection)
