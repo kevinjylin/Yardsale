@@ -15,8 +15,10 @@ Agentverse, with buyer_ref "email-<hash of the relay address>":
   counters without showing it; its Counter becomes the reply.
 - "deal", "I'll take it", "yes" and the like, while a price is on the table, become an
   AcceptCounter at that price. The item agent closes the deal with the store's conditional
-  update (so two buyers can't both buy), and the reply carries the payment link (checkout.py,
-  test mode).
+  update (so two buyers can't both buy), and the reply sets up the handoff: the buyer pays the
+  seller in person, at a public spot on the seller's campus when the seller gave a school. No
+  payment link: live on October 25, Craigslist's relay delivered a counter but silently dropped
+  the reply carrying a Stripe link.
 - Anything else gets the asking price and an invitation to make an offer.
 
 If the item agent doesn't answer in time, the buyer gets "let me check and get back to you"
@@ -79,12 +81,12 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from uagents import Context
 
+from yardsale import campus, students
 from yardsale.advice import listing_description
-from yardsale.checkout import Checkout
 from yardsale.common import PipelineError
 from yardsale.models import AcceptCounter, Counter, Deal, Offer, OfferRejected
 from yardsale.pricing import PriceError, parse_usd, usd, valid_cents
-from yardsale.store import ACTIVE, NOT_COLLECTED, PAID, PENDING, PROPOSED, SOLD, Listing, Store
+from yardsale.store import ACTIVE, PROPOSED, SOLD, Listing, Store
 
 if TYPE_CHECKING:
     from yardsale.craigslist_buyer import Step as BuyerStep
@@ -116,7 +118,6 @@ class MailSettings:
     password: str = field(repr=False)  # an app password, never the account's own
     imap_host: str = DEFAULT_IMAP_HOST
     smtp_host: str = DEFAULT_SMTP_HOST
-    links: bool = True  # False: don't put payment links in replies (if Craigslist strips them)
 
 
 def settings_from_env() -> MailSettings | None:
@@ -130,13 +131,11 @@ def settings_from_env() -> MailSettings | None:
         raise MailConfigError("YARDSALE_MAIL_ADDRESS must be the inbox's email address")
     if not password:
         raise MailConfigError("YARDSALE_MAIL_PASSWORD (an app password) isn't set")
-    links = os.getenv("YARDSALE_MAIL_LINKS", "1").strip().lower() not in ("0", "false", "no")
     return MailSettings(
         address=address,
         password=password,
         imap_host=os.getenv("YARDSALE_IMAP_HOST", "").strip() or DEFAULT_IMAP_HOST,
         smtp_host=os.getenv("YARDSALE_SMTP_HOST", "").strip() or DEFAULT_SMTP_HOST,
-        links=links,
     )
 
 
@@ -581,8 +580,8 @@ def post_text(listing: Listing, title: str, settings: MailSettings | None) -> st
         "Description:",
         *description(listing).splitlines(),
         "When a buyer emails, I answer within seconds: I haggle with your prices (never below "
-        'your lowest), and send a payment link once they say deal. Say "my listings" to see '
-        "Craigslist buyers.",
+        "your lowest), and once they say deal I set up where to meet; they pay you in person. Say "
+        '"my listings" to see Craigslist buyers.',
         "Once it's up, paste the post's link here, so I know it's yours even when a buyer "
         "writes their own subject.",
     ]
@@ -609,6 +608,20 @@ def post_reply(store: Store, owner: str, command: PostCommand) -> str | None:
     except MailConfigError:
         settings = None
     return post_text(listing, title, settings)
+
+
+def meeting_place(store: Store, listing: Listing) -> str:
+    """Where a Craigslist buyer and the seller meet: the best public spot on the seller's campus,
+    as plain words ("Rivera Library, University of California Riverside"), or "" when the seller
+    gave no school or the campus isn't mapped. No map link: Craigslist's relay may drop it."""
+    school = students.school_of(store, listing.owner)
+    if not school:
+        return ""
+    try:
+        spot = students.where_to_meet(store, school).spot
+    except students.StudentError:
+        return ""
+    return ", ".join(part for part in (spot.name, campus.school_label_for(school)) if part)
 
 
 def seller_lines(store: Store, listings: list[Listing]) -> list[str]:
@@ -643,14 +656,13 @@ def seller_lines(store: Store, listings: list[Listing]) -> list[str]:
             deal = store.deal_for(listing.item_id)
             if deal is None or not deal.buyer.startswith("chat:email-"):
                 continue
-            line = f"The {listing.title} went to a Craigslist buyer by email"
-            if deal.payment_status == PAID:
-                line += ", paid. Arrange pickup by replying to their email."
-            elif deal.payment_status == PENDING and deal.payment_url:
-                line += f". Their payment link, if you'd rather text it to them: {deal.payment_url}"
-            else:
-                line += "."
-            lines.append(line)
+            place = meeting_place(store, listing)
+            where = f" at {place}" if place else " at the public place they suggest"
+            lines.append(
+                f"The {listing.title} went to a Craigslist buyer by email for "
+                f"{usd(deal.price_cents)}. They pay you in person when you meet{where}; I've "
+                "asked them for a time, and their answer shows below."
+            )
     return lines
 
 
@@ -898,38 +910,33 @@ class CraigslistAgent:
     """Turns one buyer's email into a message to the item's agent, and its answer into the
     reply. No price is worked out here: the item agent agrees, counters, or sells."""
 
-    def __init__(
-        self, store: Store, checkout: Checkout, settings: MailSettings, negotiate: Negotiate
-    ) -> None:
+    def __init__(self, store: Store, settings: MailSettings, negotiate: Negotiate) -> None:
         self.store = store
-        self.checkout = checkout
         self.settings = settings
         self.negotiate = negotiate
 
-    def _payment_text(self, price_cents: int, url: str | None, status: str) -> str:
-        if status == PAID:
-            return "Payment received, thanks! Reply here to set up pickup."
-        if url and self.settings.links:
-            return (
-                f"Great, it's yours for {usd(price_cents)}. Pay here to lock it in (secure "
-                f"checkout): {url}\n\nOnce it's paid, reply here to set up pickup."
-            )
-        if url:
-            return (
-                f"Great, it's yours for {usd(price_cents)}. Craigslist doesn't always pass links "
-                "along, so reply with a phone number and the seller will text you the payment "
-                "link."
-            )
+    def _handoff(self, listing: Listing, price_cents: int) -> str:
+        """The reply that closes a deal: where to meet, and that they pay in person."""
+        place = meeting_place(self.store, listing)
+        where = (
+            f"How about {place}? It's public and easy to find."
+            if place
+            else "Suggest a public place near you, like a coffee shop or a library."
+        )
         return (
-            f"Great, it's yours for {usd(price_cents)}. Reply here and we'll sort out payment "
-            "and pickup."
+            f"Deal! The {listing.title} is yours for {usd(price_cents)}. You'll pay the seller "
+            f"in person when you pick it up (cash or Venmo). {where} Reply with a day and time "
+            "that work for you."
         )
 
-    async def _settle(self, deal_id: str) -> str:
-        record = await self.checkout.start(deal_id) or self.store.deal(deal_id)
-        if record is None:
-            return "Something went wrong closing the deal. Please reply again in a minute."
-        return self._payment_text(record.price_cents, record.payment_url, record.payment_status)
+    def _meeting(self, listing: Listing) -> str:
+        """Every later email from the buyer who bought it: their words go to the seller."""
+        place = meeting_place(self.store, listing)
+        at = f" at {place}" if place else ""
+        return (
+            f"Thanks! I've passed that on to the seller, who'll meet you{at} to hand over the "
+            f"{listing.title}. Bring cash or Venmo."
+        )
 
     def _now_closed(self, listing: Listing) -> tuple[str, str]:
         return _closed(self.store.get(listing.item_id) or listing)
@@ -941,10 +948,7 @@ class CraigslistAgent:
         item_id, title = listing.item_id, listing.title
         deal = self.store.deal_for(item_id)
         if deal is not None and deal.buyer == f"chat:{buyer_ref}":  # this buyer bought it
-            if deal.payment_status == NOT_COLLECTED and self.checkout.enabled:
-                return "paying", await self._settle(deal.deal_id)
-            status = deal.payment_status
-            return "paying", self._payment_text(deal.price_cents, deal.payment_url, status)
+            return "meeting", self._meeting(listing)
         if listing.status != ACTIVE:
             return _closed(listing)
 
@@ -957,7 +961,7 @@ class CraigslistAgent:
                 AcceptCounter(item_id=item_id, counter_cents=price, buyer_ref=buyer_ref),
             )
             if isinstance(accepted, Deal):
-                return "deal", await self._settle(accepted.deal_id)
+                return "deal", self._handoff(listing, accepted.price_cents)
             if isinstance(accepted, OfferRejected) and accepted.code == "unavailable":
                 return self._now_closed(listing)
             price = None  # the price lapsed: fall through to the asking price
@@ -982,7 +986,7 @@ class CraigslistAgent:
                         ),
                     )
                     if isinstance(accepted, Deal):
-                        return "deal", await self._settle(accepted.deal_id)
+                        return "deal", self._handoff(listing, accepted.price_cents)
                     if isinstance(accepted, OfferRejected) and accepted.code == "unavailable":
                         return self._now_closed(listing)
                 if reply.agreed:
@@ -1193,7 +1197,6 @@ class CraigslistMail:
     def __init__(
         self,
         store: Store,
-        checkout: Checkout,
         settings: MailSettings,
         negotiate: Negotiate,
         mailbox: Mailbox | None = None,
@@ -1201,7 +1204,7 @@ class CraigslistMail:
     ) -> None:
         from yardsale.craigslist_buyer import CraigslistBuyer  # it imports this module
 
-        self.agent = CraigslistAgent(store, checkout, settings, negotiate)
+        self.agent = CraigslistAgent(store, settings, negotiate)
         # Yardsale's buyer agent, emailing other people's Craigslist posts from the same inbox.
         self.buyer = CraigslistBuyer(store, settings)
         self.mailbox: Mailbox = mailbox or ImapSmtpMailbox(settings)

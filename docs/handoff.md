@@ -157,10 +157,10 @@ a deal search about $0.10 ($0.16 with Facebook).
    buyers' emails are matched to the item.
 3. **Buyer on Craigslist, from a phone:** reply to the post with a lowball ("would you take $40?"),
    then a closer offer, then "deal". Expect counters that cite the market and never show the floor,
-   and a Stripe test link at the end (card `4242 4242 4242 4242`, any future date, any CVC). Then
-   `my listings` in the seller's chat should show it sold.
-   - If the payment link never arrives, Craigslist's relay may strip links: set
-     `YARDSALE_MAIL_LINKS=0` and restart.
+   and, after "deal", a reply that it's yours, to pay the seller in person, with a meeting spot
+   on the seller's campus (or a request for a public place). There's no payment link: on October
+   25 Craigslist's relay dropped the email that carried one. Then `my listings` in the seller's
+   chat should show it sold.
 4. **`@yardsale`** (asi1.ai/ai/yardsale), after the Fetch Business re-import:
    - "What's my Breville Bambino Plus worth?" → `priceCheck`.
    - "Best deal on a road bike under $300" → `searchListings` and `searchOtherSites`, with a score,

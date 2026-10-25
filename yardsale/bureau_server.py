@@ -1231,7 +1231,7 @@ def build(
 
     if mail is not None:
         # Craigslist buyers' emails go to the item agents as offers, like chat buyers' do.
-        craigslist = rt.craigslist = CraigslistMail(store, rt.checkout, mail, negotiate, mailbox)
+        craigslist = rt.craigslist = CraigslistMail(store, mail, negotiate, mailbox)
 
         @market.on_interval(period=MAIL_POLL_EVERY)
         async def answer_craigslist_mail(ctx: Context) -> None:

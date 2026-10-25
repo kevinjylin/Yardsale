@@ -218,7 +218,7 @@ async def test_a_buyer_finds_haggles_and_buys(market: sim.Market, store: Store) 
     replies.append(await buyer.say("yes"))  # a bare yes answers the counter-offer
     price = f"${second // 100}"
     assert f"Deal! The Trek FX 2 Disc hybrid bike, medium is yours for {price}" in replies[-1]
-    assert "payments aren't set up" in replies[-1]
+    assert "pay the seller in person" in replies[-1]
     for reply in replies:  # the floor never reaches a buyer
         assert "$300" not in reply and "lowest" not in reply.lower()
     (listing,) = store.owned(proposal_owner(store))

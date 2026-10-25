@@ -593,8 +593,11 @@ writes through Craigslist's relay. Every 10 seconds the Market reads new mail fr
 addresses, matches it to a post (by the post link in Craigslist's footer; see below), and sends
 the item's agent (in the server or hosted on Agentverse) the same `Offer` or `AcceptCounter` a chat buyer's offer becomes, with
 `buyer_ref` `email-<hash of the relay address>`. The item agent's counter, agreement, or deal
-becomes the email reply, sent through the relay in the buyer's thread with a payment link once
-they accept. A dollar amount is an offer, and "deal", "I'll take it", or "yes" while a price is
+becomes the email reply, sent through the relay in the buyer's thread. Once they accept, the
+reply sets up the handoff instead of sending a payment link: they pay the seller in person, at
+the best public spot on the seller's campus when the seller gave a school (never a dorm), or a
+public place they suggest. On October 25 the relay delivered a counter but silently dropped
+the reply that carried a Stripe link, so no email reply carries a link. A dollar amount is an offer, and "deal", "I'll take it", or "yes" while a price is
 on the table accepts it; both are read with patterns, not a model ("10 dollars and 50 cents" is
 $10.50). If the item agent doesn't answer in time, the buyer gets "let me check" once and the
 email is tried again; the seller's chat shows the waiting offer right away.
@@ -833,8 +836,7 @@ per agent, because agent addresses come from the master seed and don't change.
   or Gmail. Unknown: whether the relay takes replies only from the posting's own email (we reply
   from it), whether relayed subjects keep the title (matching ignores case and punctuation),
   what the relayed body contains (a quoted price in it could be read as an offer), relay
-  delays, and whether links are stripped (if so, `YARDSALE_MAIL_LINKS=0` asks the buyer for a
-  phone number and the seller texts the link from `my listings`).
+  delays. Links are dropped: seen October 25 with a Stripe link, so deals end with a meetup.
 - **Negotiating with Craigslist sellers.** Tested only with a fake inbox and relay. Unknown:
   whether the relay keeps our Message-IDs and subjects (the ref in the subject and signature is
   the fallback), whether it accepts mail from Yardsale's address for posts made by someone else,

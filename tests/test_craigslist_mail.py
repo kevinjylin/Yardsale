@@ -17,8 +17,7 @@ import pytest
 from uagents import Context
 
 from tests import fakes, sim
-from yardsale import bureau_server, craigslist_mail
-from yardsale.checkout import Checkout
+from yardsale import bureau_server, craigslist_mail, students
 from yardsale.common import PipelineError
 from yardsale.craigslist_mail import (
     CraigslistMail,
@@ -30,8 +29,9 @@ from yardsale.craigslist_mail import (
     offer_cents,
     post_command,
 )
+from yardsale.meetup import Spot
 from yardsale.models import AcceptCounter, Counter, Deal, Offer, OfferRejected
-from yardsale.store import ACTIVE, PENDING, PROPOSED, SOLD, Listing, Store
+from yardsale.store import ACTIVE, PROPOSED, SOLD, Listing, Store
 
 BIKE = fakes.photo_url("bike")
 INBOX = "yardsale.test@example.test"
@@ -232,23 +232,39 @@ async def test_lowballs_get_counters_from_the_item_agent_that_never_show_the_flo
     assert "Craigslist email from buyer" in logs
 
 
-async def test_an_offer_at_the_floor_is_agreed_and_deal_sends_the_payment_link(
+async def test_an_offer_at_the_floor_is_agreed_and_deal_sets_up_the_meetup(
     shop: Shop,
 ) -> None:
     agreed = body(await shop.buyer_says("I can do $300 cash"))
     assert "$300 works for me" in agreed
     assert shop.bike().status == ACTIVE  # agreed isn't sold
-    paid = body(await shop.buyer_says("Deal! I'll take it."))
-    assert "it's yours for $300" in paid
+    sold = body(await shop.buyer_says("Deal! I'll take it."))
+    assert "is yours for $300" in sold and "pay the seller in person" in sold
+    assert "public place near you" in sold  # the seller gave no school
+    # Live October 25, Craigslist's relay dropped the reply that carried a payment link.
+    assert "http" not in sold
     deal = shop.market.store.deal_for(shop.bike().item_id)
     assert deal is not None and deal.buyer.startswith("chat:email-")
-    assert deal.payment_status == PENDING and deal.payment_url
-    assert deal.payment_url in paid
     assert shop.bike().status == SOLD
-    # Writing again resends the link rather than buying twice.
-    assert deal.payment_url in body(await shop.buyer_says("Where do I pay?"))
+    # Writing again passes their answer on rather than buying twice.
+    later = body(await shop.buyer_says("Saturday at 2 works"))
+    assert "passed that on to the seller" in later
+    assert len(shop.market.store.deals()) == 1
     listings = await shop.seller.say("my listings")
-    assert "went to a Craigslist buyer by email" in listings
+    assert "went to a Craigslist buyer by email for $300" in listings
+    assert "pay you in person" in listings
+
+
+async def test_a_deal_names_a_spot_on_the_sellers_campus(shop: Shop) -> None:
+    owner = shop.bike().owner
+    students.join(shop.market.store, owner, "sam@berkeley.edu")
+    shop.market.store.save_campus(
+        "berkeley.edu", [Spot("Unit 1 Residence Hall", kind="dormitory"), Spot("Sproul Plaza")]
+    )
+    sold = body(await shop.buyer_says("$300, deal"))
+    assert "How about Sproul Plaza" in sold and "Unit 1" not in sold  # never a dorm
+    assert "http" not in sold
+    assert "Sproul Plaza" in body(await shop.buyer_says("tomorrow at noon?"))
 
 
 @pytest.mark.parametrize("words", ["deal ill take the bike for 360", "I'll take it"])
@@ -257,10 +273,10 @@ async def test_deal_with_an_acceptable_price_closes_on_the_first_email(
 ) -> None:
     """Seen live: "deal ill take the bottle for 11" got "let me check", and even an agreement
     would have asked them to say deal again. An agreed price with deal words is a sale."""
-    paid = body(await shop.buyer_says(words))
-    assert "it's yours for $360" in paid
+    sold = body(await shop.buyer_says(words))
+    assert "is yours for $360" in sold
     deal = shop.market.store.deal_for(shop.bike().item_id)
-    assert deal is not None and deal.price_cents == 36000 and deal.payment_url in paid
+    assert deal is not None and deal.price_cents == 36000
     assert shop.bike().status == SOLD
 
 
@@ -280,7 +296,7 @@ async def test_yes_accepts_a_counter_at_its_price(shop: Shop) -> None:
 async def test_two_buyers_cant_both_buy(shop: Shop) -> None:
     assert "works for me" in body(await shop.buyer_says("$300", sender=ANN))
     assert "works for me" in body(await shop.buyer_says("$310", sender=BOB))
-    assert "it's yours" in body(await shop.buyer_says("deal", sender=BOB))
+    assert "is yours" in body(await shop.buyer_says("deal", sender=BOB))
     assert "has sold" in body(await shop.buyer_says("deal", sender=ANN))
     deals = shop.market.store.deals()
     assert len(deals) == 1 and deals[0].price_cents == 31000
@@ -364,7 +380,7 @@ async def test_a_slow_item_agent_gets_one_holding_reply_and_a_retry() -> None:
         return Counter(item_id=item_id, counter_cents=33000, note="", expires_at="x")
 
     mailbox = FakeMailbox()
-    mail = CraigslistMail(store, Checkout(store, None), SETTINGS, negotiate, mailbox)
+    mail = CraigslistMail(store, SETTINGS, negotiate, mailbox)
     ctx = cast(Context, None)
     mailbox.deliver(email("would you take $280", "Trek FX 2 - $360"))
     assert await mail.poll(ctx) == 1
@@ -434,7 +450,7 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("YARDSALE_MAIL_PASSWORD", "abcd efgh ijkl mnop")
     settings = craigslist_mail.settings_from_env()
     assert settings is not None and settings.password == PASSWORD
-    assert settings.imap_host == "imap.gmail.com" and settings.links
+    assert settings.imap_host == "imap.gmail.com"
     assert PASSWORD not in repr(settings)
 
 
@@ -585,9 +601,7 @@ def inbox_for(
 ) -> tuple[CraigslistMail, FakeMailbox, Agent]:
     mailbox, agent = FakeMailbox(), Agent()
     now = clock if clock is not None else [0.0]
-    mail = CraigslistMail(
-        store, Checkout(store, None), SETTINGS, agent.negotiate, mailbox, clock=lambda: now[0]
-    )
+    mail = CraigslistMail(store, SETTINGS, agent.negotiate, mailbox, clock=lambda: now[0])
     return mail, mailbox, agent
 
 

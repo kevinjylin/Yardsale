@@ -15,7 +15,6 @@ from uagents import Context
 from tests import fakes, sim
 from tests.test_craigslist_mail import INBOX, PASSWORD, SETTINGS, FakeMailbox, Shop, body, email
 from yardsale import bureau_server, craigslist_buyer, haggle
-from yardsale.checkout import Checkout
 from yardsale.craigslist_buyer import (
     AGREED,
     EMAIL_ROUNDS,
@@ -238,7 +237,7 @@ async def unused_negotiate(
 
 async def test_the_opening_email_goes_out_once_in_its_own_thread(store: Store) -> None:
     mailbox = FakeMailbox()
-    mail = CraigslistMail(store, Checkout(store, None), SETTINGS, unused_negotiate, mailbox)
+    mail = CraigslistMail(store, SETTINGS, unused_negotiate, mailbox)
     n = fresh(store)
     ctx = cast(Context, None)
     assert await mail.poll(ctx) == 1
@@ -273,7 +272,7 @@ async def test_the_opening_email_goes_out_once_in_its_own_thread(store: Store) -
 
 async def test_the_ref_finds_the_thread_when_the_relay_rewrites_message_ids(store: Store) -> None:
     mailbox = FakeMailbox()
-    mail = CraigslistMail(store, Checkout(store, None), SETTINGS, unused_negotiate, mailbox)
+    mail = CraigslistMail(store, SETTINGS, unused_negotiate, mailbox)
     n = fresh(store)
     ctx = cast(Context, None)
     await mail.poll(ctx)

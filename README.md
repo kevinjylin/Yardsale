@@ -363,9 +363,10 @@ never appear in them, and the password is only ever read from `.env`.
 accepts replies only from the email the post was made with (Yardsale replies from that same
 address, so it should), whether relayed subjects keep the title as typed (matching ignores
 case and punctuation), how long the relay takes, what the relayed message body contains, and
-whether the relay strips links. If it strips the payment link, set `YARDSALE_MAIL_LINKS=0`: the
-reply then gives the amount and asks for a phone number, and the seller texts the link shown
-under `my listings`.
+whether the relay strips links. On October 25 it delivered a counter but silently dropped the
+reply that carried a Stripe link, so a Craigslist deal now ends with a meetup instead: the buyer
+pays the seller in person, at a public spot on the seller's campus when the seller gave a
+school. No email reply carries a link.
 
 ### Negotiating with Craigslist sellers
 

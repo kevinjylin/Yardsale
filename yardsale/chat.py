@@ -818,10 +818,8 @@ def deal_text(deal: DealRecord, title: str, provider_label: str | None) -> str:
             "and I'll confirm it."
         )
     if provider_label is None:
-        return (
-            f"{head}\nNo payment was taken: payments aren't set up on this Yardsale server, so "
-            "this is an agreed price only."
-        )
+        # Payments off (no YARDSALE_PAYMENTS): the buyer pays the seller when they meet.
+        return f"{head}\nYou'll pay the seller in person when you pick it up (cash or Venmo)."
     return f'{head}\nI couldn\'t make the payment link just now. Say "pay" to try again.'
 
 
