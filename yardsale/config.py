@@ -193,7 +193,7 @@ def _payments_check() -> Check:
 
 
 def _business_api_check() -> Check:
-    from yardsale.business_api import ApiConfigError, api_key, api_port
+    from yardsale.business_api import ApiConfigError, api_key, api_port, haggle_tools_enabled
 
     try:
         key, port = api_key(), api_port()
@@ -206,10 +206,15 @@ def _business_api_check() -> Check:
             "not set: no HTTP API for @yardsale's Fetch Business OpenAPI integration",
             False,
         )
+    tools = (
+        "with the haggle and deal tools (YARDSALE_API_HAGGLE)"
+        if haggle_tools_enabled()
+        else "without the haggle and deal tools (YARDSALE_API_HAGGLE=1 adds agent-to-agent buying)"
+    )
     return Check(
         "YARDSALE_API_KEY",
         True,
-        f"@yardsale's HTTP API listens on 127.0.0.1:{port}; tunnel it to make it public",
+        f"@yardsale's HTTP API listens on 127.0.0.1:{port}, {tools}; tunnel it to make it public",
         False,
     )
 

@@ -1229,9 +1229,14 @@ async def start_business_api(market: Agent) -> web.AppRunner | None:
         market._build_context,
         key,
         os.getenv("YARDSALE_API_URL", "").strip() or None,
+        haggle=business_api.haggle_tools_enabled(),
     )
     runner = await business_api.serve(api, port)
-    log.info(f"Fetch Business API on http://127.0.0.1:{port} (its description: /openapi.json)")
+    tools = "with" if api.haggle else "without"
+    log.info(
+        f"Fetch Business API on http://127.0.0.1:{port} (its description: /openapi.json), "
+        f"{tools} the haggle and deal tools"
+    )
     return runner
 
 

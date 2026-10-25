@@ -43,6 +43,8 @@ PROVIDER_KEYS = (
     "YARDSALE_HOST_ITEMS",
     "YARDSALE_ITEM_AVATARS",
     "YARDSALE_ORDERS_WEBHOOK",
+    "YARDSALE_CAMPUS",  # .env switches that change what the chat says, so tests stay the same
+    "YARDSALE_API_HAGGLE",
     "YARDSALE_ORDERS_SECRET",
     "YARDSALE_ZIP",  # searches use each site's default place unless a test sets one
 )

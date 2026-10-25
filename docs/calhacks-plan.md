@@ -182,7 +182,7 @@ Apify, Claude, and ASI:One answers and hasn't been run live yet):
 | Deal Finder agent: score against eBay sold comps, "why it's a deal" | Buyers | Built ([dealfinder.py](../yardsale/dealfinder.py), [deals.py](../yardsale/deals.py)), tested offline: price against the typical sold price, then quality, then fit, with a one-line reason each. One live probe October 24: all four sources parsed; OfferUp ignored the result cap and bike parts ranked too high (fixes in progress). The agent (`@ys-dealfinder`) is on Agentverse since October 24. |
 | Standing searches (`watch for it`, every 6 hours for a week) | Buyers | Built |
 | Agent emails a Craigslist seller and negotiates for the buyer | Buyers | Built ([craigslist_buyer.py](../yardsale/craigslist_buyer.py)); tested through a fake relay, both agents haggling through it to a deal |
-| `@yardsale` on Fetch Business with OpenAPI tools | Both | Built, live October 24 (Plus trial, Cloudflare tunnel): `searchListings`, `searchOtherSites`, and the haggle and buy calls. `priceCheck` is built and tested offline; the Business Tool has to be re-imported for it ([fetch-business.md](fetch-business.md)). |
+| `@yardsale` on Fetch Business with OpenAPI tools | Both | Built, live October 24 (Plus trial, Cloudflare tunnel): `searchListings`, `searchOtherSites`, and the haggle and buy calls. `priceCheck` (October 24) and `startNegotiation` with `getNegotiation` (October 25: the Craigslist email negotiation, so the buyer product finishes in one chat) are built and tested offline; the Business Tool has to be re-imported for them ([fetch-business.md](fetch-business.md)). The haggle and buy calls are off unless `YARDSALE_API_HAGGLE=1`. |
 
 **Also built, not pitched:**
 
@@ -190,7 +190,8 @@ Apify, Claude, and ASI:One answers and hasn't been run live yet):
   item agent at once over the published `YardsaleHaggle` protocol, with a card showing every
   round; `accept` buys; the buyer gets a payment link and an agent buyer a Payment Protocol
   request. Live October 24 from the ASI:One app, through ASI:One's planner with no @mention,
-  and through `@yardsale` (`startHaggle`, `acceptDeal`). Dropped from the pitch, not the code,
+  and through `@yardsale` (`startHaggle`, `acceptDeal`; since October 25 in its API only with
+  `YARDSALE_API_HAGGLE=1`). Dropped from the pitch, not the code,
   and out of the default flow: "best deal", "best price", and planner prose are searches, and
   the Shopper runs only on an explicit request after a search ("haggle with the seller on 1,
   max $300").
@@ -406,7 +407,7 @@ ASI:One; the Craigslist email is a second channel the same item agent answers.
 | 7. Haggle back | Buyer | The item agent answers in the email thread with a counter and a reason, never showing the floor. The presenter replies "deal", gets a payment link, and pays with Stripe's test card. The friend's `my listings` shows the item sold and the payout after 5%. | Fetch (uAgents), Stripe (test mode) | Yes; tested with a fake inbox only. Counters cite the market line ("Similar ones sold for about $X on eBay recently"), tested offline. |
 | 8. Ask | Buyer | Ask `@yardsale`: "find me the best deal on a mini fridge, max $60". It searches Yardsale's listings (none match) and the other sites, and haggles with no one. | Fetch Business | Yes: `searchListings`, then `searchOtherSites`; no `startHaggle` |
 | 9. Find | Buyer | The Deal Finder lists the best eBay, Craigslist, OfferUp, and Facebook Marketplace results under $60, each with a score against what mini fridges sell for and a line on why it's a deal. | Apify | Built: the Deal Finder agent scores against sold comps with a reason each. One live probe: all four sources parsed, OfferUp ignored the result cap, bike parts ranked too high (fixes in progress). Not yet run from `@yardsale`. |
-| 10. Negotiate | Buyer | The presenter picks a Craigslist post, taps Reply on it, and pastes the relay address into the chat. The agent emails the seller an offer and negotiates within the max. | | Built; tested through a fake relay. Needs `@ys-orchestrator` today; `@yardsale` has no tool for it. |
+| 10. Negotiate | Buyer | The presenter picks a Craigslist post, taps Reply on it, and pastes the relay address into the chat. The agent emails the seller an offer and negotiates within the max. | | Built; tested through a fake relay. In `@yardsale` since October 25 (`startNegotiation`, once the Business Tool is re-imported) and in `@ys-orchestrator`'s chat. |
 
 Before the pitch:
 
@@ -440,7 +441,7 @@ offline" means it runs in the tests with fake services and hasn't been run live 
 | Deal Finder: eBay, Craigslist, OfferUp, Facebook Marketplace under the max | Built ([dealfinder.py](../yardsale/dealfinder.py), [elsewhere.py](../yardsale/elsewhere.py), [sources.py](../yardsale/sources.py)) as its own agent, in the chat and in `@yardsale` as `searchOtherSites`, with a carousel card and `watch for it`. One live probe October 24: all four sources parsed; OfferUp ignored the result cap (fix in progress). On Agentverse as `@ys-dealfinder` since October 24. |
 | Deal scores against sold comps, "why it's a deal" | Built ([deals.py](../yardsale/deals.py)), tested offline: price against the typical eBay sold price, then quality (condition, photos, seller rating, title, age), then fit; parts, repairs, lots, and accessories sink. In the live probe, bike parts still ranked too high (fix in progress). |
 | Agent emails a Craigslist seller for the buyer | Built ([craigslist_buyer.py](../yardsale/craigslist_buyer.py)): `negotiate <relay address> "<title>" max $250 asking $300`; at most 4 offers, the max never emailed. Tested through a fake relay, including Yardsale's buyer and seller agents haggling through it. |
-| `@yardsale` on Fetch Business | Set up October 24: a description, a knowledge entry, a skill, and (on the Plus trial) an OpenAPI Integration with Yardsale's HTTP API. Live October 24 through a Cloudflare quick tunnel. Tools: `searchListings`, `searchOtherSites`, `priceCheck` (built October 24, tested offline), `startHaggle`, `getHaggle`, `acceptDeal`, `getDeal`. The Business Tool has to be re-imported for `priceCheck` and the skill text updated; the steps are in [fetch-business.md](fetch-business.md). Sellers' photos still go to `@ys-orchestrator`. |
+| `@yardsale` on Fetch Business | Set up October 24: a description, a knowledge entry, a skill, and (on the Plus trial) an OpenAPI Integration with Yardsale's HTTP API. Live October 24 through a Cloudflare quick tunnel. Tools: `searchListings`, `searchOtherSites`, `priceCheck` (built October 24, tested offline), `startNegotiation` and `getNegotiation` (October 25, tested offline), and only with `YARDSALE_API_HAGGLE=1` `startHaggle`, `getHaggle`, `acceptDeal`, `getDeal`. The Business Tool has to be re-imported for `priceCheck` and `startNegotiation` and the skill text updated; the steps are in [fetch-business.md](fetch-business.md). Sellers' photos still go to `@ys-orchestrator`. |
 | Agent-to-agent buying (the Shopper, haggling card, Payment Protocol) | Built and live October 24, in ASI:One and through `@yardsale`. Not pitched. |
 | Payment links, commission | Built for test mode: Visa Pay By Link sandbox or Stripe test checkout, 5% commission. Stripe run live October 24: a $295 deal was paid with a test card and recorded with its commission. Visa not yet run (no sandbox keys). |
 | Selling on the seller's own eBay | Built ([ebay_seller.py](../yardsale/ebay_seller.py)); tested against a local stand-in only; needs eBay developer keys. |
@@ -464,9 +465,11 @@ read.
   results, but OfferUp ignored the result cap (a bigger paid run than asked for) and bike parts
   ranked too high for a bike search. Fixes are in progress; run the demo search end to end once
   they land, and the day before.
-- **`priceCheck` isn't in `@yardsale` yet.** The endpoint is built, but Fetch only sees it after
-  the Business Tool is re-imported from the tunnel's `/openapi.json` and the skill names it
-  ([fetch-business.md](fetch-business.md)).
+- **`priceCheck` and `startNegotiation` aren't in `@yardsale` yet.** The endpoints are built,
+  but Fetch only sees them after the Business Tool is re-imported from the tunnel's
+  `/openapi.json` and the skill names them ([fetch-business.md](fetch-business.md)). The same
+  re-import drops `startHaggle`, `getHaggle`, `acceptDeal`, and `getDeal`, which are off unless
+  `YARDSALE_API_HAGGLE=1`.
 - **Craigslist's relay is unverified.** Nothing has been run against real Craigslist: whether
   the relay accepts replies from the posting email, keeps the subject, how long it takes, and
   whether it strips links (if it does, `YARDSALE_MAIL_LINKS=0` gives the amount and asks for a
@@ -498,7 +501,7 @@ read.
 - **`@yardsale` depends on the tunnel.** Its Business Tool calls Yardsale's API through a
   Cloudflare quick tunnel, which gets a new URL every time `cloudflared` restarts; the Business
   Tool then has to be pointed at the new URL. Keep the tunnel running from before the demo to
-  after it, and check `curl <tunnel>/openapi.json` first. Every new tool (`priceCheck`) means
+  after it, and check `curl <tunnel>/openapi.json` first. Every new tool (`priceCheck`, `startNegotiation`) means
   re-importing the OpenAPI description in the workbench.
   - A quick tunnel that stays disconnected for a while is deleted by Cloudflare ("Tunnel not
     found"). On October 24 the Wi-Fi dropped at 5:07 PM, and by 5:32 PM the tunnel was gone.
@@ -666,8 +669,8 @@ from "The demo, step by step" above.
   ASI:One finds and routes to the agents. The README and Devpost say the same.
 - **"How is this linked to Fetch Business?"** `@yardsale` is Yardsale's Fetch Business agent
   (Plus trial). It calls Yardsale's HTTP API through an OpenAPI Integration, one tool per call
-  (search listings, search other sites, price check), and the API runs the same
-  agents the ASI:One chat does. Sellers' photos go to `@ys-orchestrator`, because a photo has
+  (search listings, search other sites, price check, negotiate with a Craigslist seller by
+  email), and the API runs the same agents the ASI:One chat does. Sellers' photos go to `@ys-orchestrator`, because a photo has
   to reach Claude.
 - **"What if ASI:One doesn't pick Yardsale?"** Use the rehearsed query. If routing misses on
   stage, @mention the Market (`@ys-orchestrator`) or ask `@yardsale`.

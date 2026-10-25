@@ -31,8 +31,8 @@ Yardsale keeps a commission on the sales it collects payment for; the seller get
   photos in one message; the Market Scout (live asking prices beside the sold comps) and the
   warning when a seller's minimum is far off; counters that cite the market; the item agent
   answering Craigslist buyers by email ([Craigslist by email](#craigslist-by-email)); the Deal
-  Finder with its scores in the chat and `@yardsale`; `priceCheck` for `@yardsale`; and emailing
-  Craigslist sellers for a buyer
+  Finder with its scores in the chat and `@yardsale`; `priceCheck` and `startNegotiation` for
+  `@yardsale`; and emailing Craigslist sellers for a buyer
   ([Negotiating with Craigslist sellers](#negotiating-with-craigslist-sellers)). The Scout and
   Deal Finder agents connected to Agentverse as mailbox agents on October 24 (seven in all). The
   Deal Finder's one live probe parsed all four sources; OfferUp ignored the result cap and bike
@@ -388,17 +388,22 @@ paid to the seller in person, not through Yardsale. Details are in
 `@yardsale` ([asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale)) is Yardsale's Fetch Business
 agent. It can't message our agents, but it calls Yardsale's HTTP API
 ([business_api.py](yardsale/business_api.py)) through an OpenAPI Integration, so a buyer can
-search, haggle, and buy in its chat. Sellers still go to `@ys-orchestrator`, because a photo has
-to reach Claude.
+search Yardsale and other sites, check what something is worth, and have Yardsale's buyer agent
+email a Craigslist seller and negotiate, all in its chat. The haggle and buy calls (agent-to-agent
+buying, not pitched) are in the API only with `YARDSALE_API_HAGGLE=1`. Sellers still go to
+`@ys-orchestrator`, because a photo has to reach Claude.
 
 | Call | Tool | Does |
 | --- | --- | --- |
 | `GET /listings?q=&max_usd=` | `searchListings` | Active listings, with asking prices only |
-| `POST /haggles` `{"looking_for", "max_usd"}` | `startHaggle` | The buyer agent haggles with every match at once. Answers within 25 s with the result, or `status: "running"` |
-| `GET /haggles/{haggle_id}` | `getHaggle` | The result; waits up to 25 s while it's running |
-| `POST /haggles/{haggle_id}/accept` `{"item_id"?}` | `acceptDeal` | Buys the best price (or the named item's) and returns the payment link |
-| `GET /deals/{deal_id}` | `getDeal` | Whether it's paid |
-| `GET /other-sites?q=&max_usd=` | `searchOtherSites` | When Yardsale has nothing: the best deals on eBay, Craigslist, and OfferUp, as links. Answers within 25 s, or `status: "running"`; the same call again picks up the same search |
+| `GET /other-sites?q=&max_usd=&zip=` | `searchOtherSites` | The best deals on eBay, Craigslist, OfferUp, and Facebook Marketplace, scored against eBay sold prices, as links. Answers within 25 s, or `status: "running"`; the same call again picks up the same search |
+| `GET /price-check?q=&zip=` | `priceCheck` | What an item is worth, from eBay sales of the last 90 days matched by title |
+| `POST /negotiations` `{"relay_address", "max_usd", "title"?, "post_url"?, "asking_usd"?}` | `startNegotiation` | The buyer agent emails the Craigslist seller at the reply address the buyer pasted and haggles within the max, which it never tells the seller. Returns the negotiation's `ref` |
+| `GET /negotiations/{ref}` | `getNegotiation` | Where that negotiation stands |
+| `POST /haggles` `{"looking_for", "max_usd"}` | `startHaggle` | Only with `YARDSALE_API_HAGGLE=1`: the buyer agent haggles with every match at once. Answers within 25 s with the result, or `status: "running"` |
+| `GET /haggles/{haggle_id}` | `getHaggle` | Only with `YARDSALE_API_HAGGLE=1`: the result; waits up to 25 s while it's running |
+| `POST /haggles/{haggle_id}/accept` `{"item_id"?}` | `acceptDeal` | Only with `YARDSALE_API_HAGGLE=1`: buys the best price (or the named item's) and returns the payment link |
+| `GET /deals/{deal_id}` | `getDeal` | Only with `YARDSALE_API_HAGGLE=1`: whether it's paid |
 | `GET /openapi.json` | | The OpenAPI 3.0 description Fetch reads; no key needed |
 
 Every call except `/openapi.json` needs the key in `X-Yardsale-Key` (or
@@ -420,9 +425,10 @@ To connect it (needs a paid Fetch Business plan; the Plus trial worked):
 3. In the Fetch Business workbench, pick the agent, open Integrations, and under OpenAPI
    Integration click Create Business Tool: From URL `<tunnel URL>/openapi.json`, API Key in a
    Header named `X-Yardsale-Key`, and the key as the Agent Credential. Fetch makes one tool per
-   call and asks the buyer to confirm before `startHaggle` and `acceptDeal`.
+   call; on October 24 it asked the buyer to confirm before `startHaggle` and `acceptDeal`, so
+   expect the same for `startNegotiation`. Re-import it whenever the API gains a tool.
 4. Add a skill that says when to call each tool. Ours is in
-   [calhacks-plan.md](docs/calhacks-plan.md#what-fetch-business-offers).
+   [fetch-business.md](docs/fetch-business.md#2-update-the-skill).
 
 ## Hosting on Agentverse
 

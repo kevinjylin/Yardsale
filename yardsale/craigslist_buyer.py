@@ -169,7 +169,7 @@ def owned(store: Store, buyer: str) -> list[Negotiation]:
     return [Negotiation(**dict(row)) for row in rows]
 
 
-def _live_for_relay(store: Store, relay: str) -> Negotiation | None:
+def live_for_relay(store: Store, relay: str) -> Negotiation | None:
     return _row(
         _db(store)
         .execute(
@@ -595,7 +595,7 @@ def _cents(text: str | None) -> int | None:
     return cents if valid_cents(cents) else None
 
 
-def _title_from_url(url: str) -> str:
+def title_from_url(url: str) -> str:
     """Words from a post link's slug (/d/<place-and-title>/<id>.html)."""
     found = re.search(r"/d/([a-z0-9-]+)/", url.lower())
     return found.group(1).replace("-", " ") if found else ""
@@ -624,7 +624,7 @@ def command(text: str) -> NegotiateCommand | None:
         if len(title) < 3:
             title = ""
     if not title and post_url:
-        title = _title_from_url(post_url)
+        title = title_from_url(post_url)
     return NegotiateCommand(
         relay=relay,
         max_cents=_cents(max_found.group(1)) if max_found else None,
@@ -663,7 +663,7 @@ def chat_reply(store: Store, buyer: str, cmd: NegotiateCommand) -> str:
             "What's the most you'd pay? Send it with the address, like: negotiate "
             f"{cmd.relay} max $250. I never tell the seller your max."
         )
-    current = _live_for_relay(store, cmd.relay)
+    current = live_for_relay(store, cmd.relay)
     if current is not None:
         if current.buyer == buyer:
             return "I'm already negotiating for that post. " + status_line(current)

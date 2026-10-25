@@ -374,7 +374,14 @@ each is a good deal. Yardsale's own listings still come first when they match.
     one search) gets a Craigslist search link for its title instead of being dropped.
   - *Failures.* `SourceError.kind` says why a site failed: timeout, blocked (only error items,
     or an empty dataset whose run says its page loads failed), busy (Apify's 5-runs-at-once
-    limit on the free plan, hit live by a probe; retried twice first), credit, setup, or error.
+    limit on the free plan, hit live by a probe; retried three times first), credit, setup, or
+    error.
+  - *Runs at once.* On October 25 a photo failed with Apify's raw "concurrent-runs-limit-exceeded"
+    JSON in the seller's chat: another chat's deal search (four sites plus comps) held all 5
+    runs. Every Apify run in the server now waits for a slot (`sources.apify_slot`, 5 or
+    `YARDSALE_APIFY_RUNS`), one slot is kept for eBay sold-price searches, and the Researcher
+    retries a refused run too and says why in plain words ("Too many price searches were
+    running at once"). Runs from another machine on the same Apify account aren't counted.
     `Found.sites` (and `DealsFound.sites`) has each site's outcome: ok with listing and fit
     counts, empty, or failed with the reason. The chat says "I didn't find" only of sites that
     answered, names each failed site with why, and when every site failed says it couldn't
@@ -420,24 +427,43 @@ uses the same Market backend as the chat:
   per query, each one being a paid Apify search, and a check still running after 25 seconds
   answers `status: "running"` and is picked up by the same call. Queries and ZIP codes stay
   out of the log.
-- `POST /haggles` (`startHaggle`) sends the Shopper to haggle with every match at once. It
-  answers within 25 seconds with the result, or with `status: "running"` and a `haggle_id`.
-- `GET /haggles/{haggle_id}` returns the result, waiting up to 25 seconds while it's running.
-- `POST /haggles/{haggle_id}/accept` (`acceptDeal`) buys the best price (or a named item's) and
-  returns the payment link.
-- `GET /deals/{deal_id}` says whether it's paid.
+- `POST /negotiations` (`startNegotiation`, added October 25) has Yardsale's buyer agent email
+  a Craigslist seller and haggle for the buyer, the same negotiation the chat's `negotiate`
+  command starts ([craigslist_buyer.py](../yardsale/craigslist_buyer.py)). The buyer taps Reply
+  on the post and pastes the reply address; the body carries it with the max and, optionally,
+  the title, the post's link (its slug gives the title), and the asking price. The answer is
+  the negotiation's `ref` (8 characters, the "Yardsale ref" in every email), what the first
+  email will do, and a `next_step` that has `@yardsale` write the ref in its reply; the max is
+  never returned. `GET /negotiations/{ref}` (`getNegotiation`) says where it stands: the offers
+  so far, the seller's price, and once agreed, the price and the seller's pickup note. These
+  negotiations belong to the API (owner `api`), so no ASI:One chat lists them and only a caller
+  with the ref sees one; a chat's negotiations are 404 here. Starting one for a post already
+  being negotiated through the API returns that negotiation (`already_started`); for a post a
+  chat buyer is negotiating, 409.
+- `POST /haggles` (`startHaggle`), `GET /haggles/{haggle_id}` (`getHaggle`),
+  `POST /haggles/{haggle_id}/accept` (`acceptDeal`), and `GET /deals/{deal_id}` (`getDeal`) are
+  agent-to-agent buying, which the pitch dropped, so since October 25 they're in the API and
+  its description only with `YARDSALE_API_HAGGLE=1`. Off, they answer 404 with a message that
+  says so, for a Business Tool imported while they were on. With them on:
+  - `startHaggle` sends the Shopper to haggle with every match at once. It answers within 25
+    seconds with the result, or with `status: "running"` and a `haggle_id`.
+  - `getHaggle` returns the result, waiting up to 25 seconds while it's running.
+  - `acceptDeal` buys the best price (or a named item's) and returns the payment link.
+  - `getDeal` says whether it's paid.
 - `GET /openapi.json` is the description Fetch reads. It needs no key; everything else needs
   the key in `X-Yardsale-Key` (or `Authorization: Bearer`).
 
 Since October 24 the description leads with the two products (deals for buyers, prices for
-sellers) and marks the haggle and deal operations "advanced", so `@yardsale` prefers search and
-price checks; it also says, wherever photos come up, that Claude reads them and ASI:One's models
+sellers), and since October 25 the haggle and deal operations are left out unless
+`YARDSALE_API_HAGGLE=1` (marked "advanced" when they're in), so `@yardsale` searches, checks
+prices, and negotiates by email; it also says, wherever photos come up, that Claude reads them and ASI:One's models
 read typed text only. The Business Tool has to be re-imported for `@yardsale` to see new
 operations; [fetch-business.md](fetch-business.md) has the workbench steps, the Skill text, and
 what Fetch Business can and can't link to our agents.
 
 Each haggle is its own buyer (`buyer_ref` `api-<haggle id>`), so its prices and deals are
-separate from chat buyers', and the API only shows deals made through it. Floors never appear,
+separate from chat buyers', and the API only shows deals made through it. Negotiations started
+here are owned by `api` and found by their ref alone. Floors never appear,
 and the log has one line per call (the method, the route pattern, the status, and the time),
 never a buyer's max or a whole haggle ID. A running haggle answers with a plain 200, because a
 tool runner may treat 202 as a failure.
@@ -560,6 +586,11 @@ $300`. The title (in quotes, or the post's link) becomes the email subject; the 
 optional, and without it the first email asks for it. Craigslist's
 [relay help](https://www.craigslist.org/about/help/posting/features/contact-info/email/mail-relay)
 says replies come back from an `@reply.craigslist.org` address and threads last up to 4 months.
+
+`@yardsale` starts the same negotiation through its `startNegotiation` tool (the buyer pastes the
+reply address into its chat, with the max) and follows it with `getNegotiation`; see
+[Buying through `@yardsale`](#buying-through-yardsale-fetch-business). Those negotiations belong
+to the API, so an ASI:One chat's `negotiations` doesn't show them.
 
 1. The chat saves the negotiation (the conversation, the address, the title, and the max, which
    is never logged or emailed). The next inbox check sends the first email from Yardsale's
@@ -704,8 +735,9 @@ per agent, because agent addresses come from the master seed and don't change.
   at its Agentverse mailbox, so `buyer_test` without `--offline` only reaches it once it's
   connected to Agentverse.
 - **`@yardsale` and our agents.** It can't message `@ys-orchestrator`, but on the Plus trial
-  (started October 24) it calls Yardsale's HTTP API, so buyers can search, haggle, and buy in
-  its chat. Sellers still go to `@ys-orchestrator`, since a photo has to reach Claude. Its
+  (started October 24) it calls Yardsale's HTTP API, so buyers can search Yardsale and other
+  sites, check prices, and have the buyer agent negotiate with a Craigslist seller in its chat
+  (and haggle with Yardsale's own sellers and buy, with `YARDSALE_API_HAGGLE=1`). Sellers still go to `@ys-orchestrator`, since a photo has to reach Claude. Its
   Orders page takes orders only from Square or SumUp POS, so our sales don't show there. The
   API is public only through a quick tunnel, whose URL changes when it restarts. Details are in
   [calhacks-plan.md](calhacks-plan.md#what-fetch-business-offers).

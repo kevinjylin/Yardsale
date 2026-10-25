@@ -40,7 +40,8 @@ Two products, built on Fetch.ai agents and Apify market data:
   searches. For a Craigslist post, the agent can email the seller and negotiate within the buyer's
   max, when the buyer pastes the post's reply address and asks.
 - **Front door:** `@yardsale` on Fetch Business (OpenAPI tools: `searchListings`, `searchOtherSites`,
-  `priceCheck`), and `@ys-orchestrator` in ASI:One for sellers with photos.
+  `priceCheck`, `startNegotiation`, `getNegotiation`; the haggle and buy tools only with
+  `YARDSALE_API_HAGGLE=1`), and `@ys-orchestrator` in ASI:One for sellers with photos.
 
 Agent-to-agent buying on ASI:One (the Shopper haggling with item agents) is built but **not pitched**:
 a Fetch judge found it too ambitious. Leave the code; don't demo it. It's out of the default flow:
@@ -128,7 +129,8 @@ cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8110
 ```
 
 Copy the `https://....trycloudflare.com` URL it prints, and check it (should list `searchListings`,
-`searchOtherSites`, `priceCheck` first):
+`searchOtherSites`, `priceCheck`, `startNegotiation`, `getNegotiation`, and no `startHaggle` unless
+the server runs with `YARDSALE_API_HAGGLE=1`):
 
 ```bash
 curl https://YOUR-URL.trycloudflare.com/openapi.json
@@ -163,6 +165,8 @@ a deal search about $0.10 ($0.16 with Facebook).
    - "What's my Breville Bambino Plus worth?" → `priceCheck`.
    - "Best deal on a road bike under $300" → `searchListings` and `searchOtherSites`, with a score,
      a reason, and a link per deal. No `startHaggle`.
+   - A Craigslist post's reply address with a max → `startNegotiation` (it emails that seller for
+     real); "how's my negotiation going?" → `getNegotiation` with the ref from its earlier reply.
 5. **Deal finder in the ASI:One chat:** "find me a mini fridge under $60" → nothing on Yardsale, then
    scored deals from other sites. `watch for it` saves a standing search.
 6. **Negotiate with a Craigslist seller for a buyer:** tap Reply on any Craigslist post, copy its relay
@@ -184,7 +188,7 @@ uv run python -m yardsale.hosting --list                       # hosted item age
 - **Unverified live:** a photo priced with the Scout in the pipeline; the price warning and
   market-citing counters in the real ASI:One app; the full Craigslist round trip (does the relay keep
   the title in the subject, keep our Message-IDs, strip payment links, how long it takes);
-  `@yardsale` calling `priceCheck` and `searchOtherSites`; the OfferUp result cap and the corrected
+  `@yardsale` calling `priceCheck`, `searchOtherSites`, and `startNegotiation`; the OfferUp result cap and the corrected
   quality fields since their fixes. The one live deal-finder probe parsed all four sources.
 - **Facebook and Craigslist** listings don't carry condition or listing date (the actors only give
   those with paid per-listing detail options).
