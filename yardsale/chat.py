@@ -246,6 +246,8 @@ ALREADY_WORKING = (
     "as it's ready."
 )
 SOMETHING_BROKE = "Sorry, something went wrong on my side. Please send that again."
+SOLD_HEADING = "Recent eBay sales:"  # what the same thing sold for: these set the price
+ASKING_HEADING = "Listed for sale now:"  # what similar ones ask today; nothing here sold
 APPROVE_PROMPT = (
     'Tap Approve, or reply "approve" to put it up for sale, "ask $X" or "lowest $X" to change a '
     'price, or "cancel".'
@@ -527,25 +529,31 @@ def proposal_text(listing: Listing, n: int | None = None) -> str:
     """The text above a proposal's card: what it is, the prices, and links to the closest
     sales (card text can't be tapped). `n` is the proposal's number when there are several."""
     condition = f" ({listing.item.condition} condition)" if listing.item else ""
-    lines = [
+    sections = [
         f"Here's my suggested listing for your {listing.title}{condition}: asking "
         f"{usd(listing.asking_cents)}, lowest {usd(listing.floor_cents)} (only you see it)."
     ]
     appraisal = listing.appraisal
     if appraisal is not None and appraisal.asking_cents is not None and appraisal.matches:
-        lines.append("Closest eBay sales:")
-        lines += [
+        sold = [
             f"- {_link(match.comp.title, match.comp.url)}: {usd(match.comp.price_cents)}"
+            + (f", sold {match.comp.sold_at}" if match.comp.sold_at else "")
             for match in appraisal.matches[:3]
         ]
-    lines += [line for line in advice.market_lines(listing) if line.startswith("- [")]
+        sections.append("\n".join([SOLD_HEADING, "", *sold]))
+    # Live asking prices are what similar ones are listed for, not what anything sold for, so
+    # they get their own list.
+    asking = [line for line in advice.market_lines(listing) if line.startswith("- [")]
+    if asking:
+        sections.append("\n".join([ASKING_HEADING, "", *asking]))
     if n is None:
-        lines.append(APPROVE_PROMPT)
+        sections.append(APPROVE_PROMPT)
     else:
-        lines.append(
+        sections.append(
             f'Tap Approve, or reply "approve {n}", "ask {n} $X", "lowest {n} $X", or "cancel {n}".'
         )
-    return "\n".join(lines)
+    # Blank lines between the parts, so each list ends before the next line starts.
+    return "\n\n".join(sections)
 
 
 def proposal_card(listing: Listing, n: int | None = None) -> MetadataContent:

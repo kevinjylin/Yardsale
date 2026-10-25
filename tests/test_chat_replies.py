@@ -236,6 +236,23 @@ async def test_slow_pricing_sends_progress_then_the_result_without_it(
 # --- The proposal's words -------------------------------------------------------------------------
 
 
+def test_sold_and_listed_prices_are_separate_lists() -> None:
+    text = chat.proposal_text(shoes_listing())
+    parts = text.split("\n\n")
+    sold = parts.index(chat.SOLD_HEADING)
+    assert parts[sold + 1].startswith("- [Air Jordan 4 Retro sz 10")
+    assert all(line.startswith("- ") for line in parts[sold + 1].splitlines())
+    assert "sold 2026-10-01" in parts[sold + 1]
+    assert " on Craigslist" not in parts[sold + 1] and " on OfferUp" not in parts[sold + 1]
+    listed = parts.index(chat.ASKING_HEADING)
+    assert listed > sold
+    assert all(line.startswith("- ") for line in parts[listed + 1].splitlines())
+    assert " on Craigslist" in parts[listed + 1] or " on OfferUp" in parts[listed + 1]
+    # The last list ends before the prompt: a blank line, not a lazy continuation of a bullet.
+    assert parts[-1] == chat.APPROVE_PROMPT
+    assert f"\n\n{chat.APPROVE_PROMPT}" in text
+
+
 def test_the_sales_line_agrees_with_the_cards_and_the_count() -> None:
     proposal = shoes_listing()  # 20 sales behind the price, 6 in the carousel
     assert chat.comps_text(proposal) == (
