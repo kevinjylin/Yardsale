@@ -89,7 +89,13 @@ async def test_nothing_on_yardsale_shows_the_best_deals_elsewhere(
     buyer = shop.user("buyer")
     reply = await buyer.exchange(sim.chat_message("find me a road bike under $300"))
     text = reply.text()
-    assert 'Nothing on Yardsale matches "road bike" under $300' in text
+    # The reply opens with the best deal, then says Yardsale had nothing.
+    assert text.startswith(
+        "Found it: [Trek road bike 54cm](https://craigslist.example.test/Trek-road-bike-54cm) on "
+        "Craigslist for $180, $120 under your $300 budget (Oakland, CA, pickup).\n\n"
+        'Nothing on Yardsale matches "road bike" under $300'
+    )
+    assert text.count("Found it") == 1
     assert "Best deals on other sites" in text
     lines = text.splitlines()
     first = next(n for n, line in enumerate(lines) if line.startswith("1. "))
@@ -119,18 +125,78 @@ async def test_deals_are_scored_against_what_the_item_sells_for(
         reply = await buyer.exchange(sim.chat_message("find me a road bike under $300"))
     text = reply.text()
     assert "(typical sold price on eBay: $310, from 4 sales):" in text
+    assert (
+        "Found it: [Trek road bike 54cm](https://craigslist.example.test/Trek-road-bike-54cm) on "
+        "Craigslist for $180, $120 under your $300 budget (Oakland, CA, pickup)."
+    ) in text
     lines = text.splitlines()
     first = next(n for n, line in enumerate(lines) if line.startswith("1. "))
-    assert "$180 on Craigslist, 42% under the $310 typical sold price (Oakland, CA)" in lines[first]
-    assert "$210 + $30 shipping on eBay, 23% under the $310 typical sold price" in lines[first + 1]
+    assert lines[first].endswith(
+        ": $180 on Craigslist, pickup only, $120 under budget. Oakland, CA. 42% under the $310 "
+        "typical sold price. (no photo, condition not listed)"
+    )
+    assert (
+        "$210 + $30 shipping on eBay, $60 under budget with shipping. Oakland, CA. 23% under "
+        "the $310 typical sold price."
+    ) in lines[first + 1]
     # The $25 helmet is 92% under a $310 bike and an accessory: a part priced as a part, dropped.
-    assert "helmet" not in text and not lines[first + 2].startswith("3. ")
+    assert "helmet" not in text
+    # Only two fit the $300, so the closest over it fills in, marked.
+    assert lines[first + 2] == "Over your $300 budget, since only 2 fit:"
+    assert lines[first + 3].startswith("3. [Road bike](")
+    assert "$400 on Craigslist, pickup only, $100 over budget." in lines[first + 3]
     card = card_in(reply)
     assert card is not None and isinstance(card.payload, CarouselCardPayload)
-    assert len(card.payload.items) == 2
-    assert card.payload.items[0].subtitle == "$180, 42% under typical"
-    assert card.payload.items[1].subtitle == "$240 with shipping, 23% under typical"
+    assert [item.subtitle for item in card.payload.items] == [
+        "$180 on Craigslist, $120 under budget",
+        "$240 with shipping on eBay, $60 under budget",
+        "$400 on Craigslist, $100 over budget",
+    ]
+    assert [b.label for b in card.payload.items[2].badges or []] == ["Craigslist", "Over budget"]
     assert ebay.calls == ["road bike"]
+
+
+async def test_without_a_budget_the_headline_compares_with_the_typical_sold_price(
+    store: Store, ebay: Site, craigslist: Site
+) -> None:
+    sources = {"ebay": ebay, "craigslist": craigslist}
+    async with sim.running_market(
+        store, research=fakes.research_with_comps, sources=sources
+    ) as market:
+        reply = await market.user("buyer").exchange(sim.chat_message("find me a road bike"))
+    text = reply.text()
+    assert (
+        "Found it: [Trek road bike 54cm](https://craigslist.example.test/Trek-road-bike-54cm) on "
+        "Craigslist for $180, $130 under the typical $310 sold price (Oakland, CA, pickup)."
+    ) in text
+    assert "budget" not in text  # no budget, so nothing is said to be under or over one
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, CarouselCardPayload)
+    assert card.payload.items[0].subtitle == "$180 on Craigslist, 42% under typical"
+
+
+async def test_when_nothing_fits_the_budget_the_closest_are_shown_marked(store: Store) -> None:
+    site = Site([deal("Trek road bike", 18000), deal("Giant road bike", 21000, "ebay")])
+    async with sim.running_market(store, sources={"craigslist": site}) as market:
+        reply = await market.user("buyer").exchange(
+            sim.chat_message("find me a road bike under $150")
+        )
+    text = reply.text()
+    assert (
+        "Nothing fits your $150 budget yet. Closest: [Trek road bike]"
+        "(https://craigslist.example.test/Trek-road-bike) on Craigslist for $180, $30 over it "
+        "(Oakland, CA, pickup)."
+    ) in text
+    assert "Found it" not in text
+    lines = text.splitlines()
+    header = lines.index("Over your $150 budget, since none fit:")
+    assert lines[header + 1].startswith("1. [Trek road bike](")
+    assert "$30 over budget" in lines[header + 1]
+    assert "$90 on eBay" not in text
+    assert "$210 on eBay, shipping unknown, $60 over budget before shipping" in lines[header + 2]
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, CarouselCardPayload)
+    assert all("Over budget" in [b.label for b in item.badges or []] for item in card.payload.items)
 
 
 async def test_yardsale_listings_come_first_then_other_sites(shop: sim.Market, ebay: Site) -> None:

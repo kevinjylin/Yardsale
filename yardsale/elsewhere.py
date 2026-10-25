@@ -118,8 +118,8 @@ def best(
     limit: int = LIMIT,
     market: MarketPrice | None = None,
 ) -> list[ExternalListing]:
-    """The best listings for a buyer, best first (deals.rank without the reasons)."""
-    return [deal.listing for deal in deals.rank(listings, query, budget_cents, market, limit=limit)]
+    """The best priced listings within the budget, best first (deals.fitting, no reasons)."""
+    return [d.listing for d in deals.fitting(listings, query, budget_cents, market, limit=limit)]
 
 
 class DealFinder:

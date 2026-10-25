@@ -3,6 +3,7 @@ conversions, and the Market-side client. Sources and comps are fakes; nothing is
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 import pytest
@@ -101,6 +102,17 @@ def test_messages_carry_everything_the_finder_found() -> None:
 
     without = found_from(deals_found("r10", Found("road bike", None, (), ("ebay",), (), 0)))
     assert without.market is None and without.deals == ()
+
+
+def test_an_unpriced_or_over_budget_deal_stays_so_through_the_message() -> None:
+    no_price = dataclasses.replace(deal("Trek road bike", 0), price_cents=None)
+    unpriced = ScoredDeal(no_price, 0, 5.0, None, "", ("no_price",))
+    over = ScoredDeal(deal("Giant road bike", 33000), 33000, 9.0, None, "", ("over_budget",))
+    found = Found("road bike", 30000, (over, unpriced), ("craigslist",), (), 2)
+    back = found_from(deals_found("r11", found))
+    assert [d.flags for d in back.deals] == [("over_budget",), ("no_price",)]
+    assert back.deals[0].listing.price_cents == 33000
+    assert back.deals[1].listing.price_cents is None
 
 
 async def test_the_client_asks_the_agent_once_per_search_and_reports_failures() -> None:

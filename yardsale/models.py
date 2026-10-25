@@ -426,8 +426,9 @@ class FoundDeal(Model):
     score: float = 0.0  # higher is better; price against the market first, then quality, fit
     versus_market_pct: int | None = None  # positive: under the typical sold price; None: unknown
     why: str = ""  # one line: "35% under the $185 typical sold price, like new, 6 photos"
-    # parts | accessory | missing_words | far_under. uAgents models are pydantic v1, which copies
-    # a default list per instance.
+    # parts | accessory | missing_words | far_under | over_budget | no_price (price_cents is 0
+    # then, meaning not listed). uAgents models are pydantic v1, which copies a default list
+    # per instance.
     flags: list[str] = []  # noqa: RUF012
 
 

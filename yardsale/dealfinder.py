@@ -76,7 +76,8 @@ def from_message(deal: FoundDeal) -> ScoredDeal:
         source=deal.source,
         external_id=deal.external_id,
         title=deal.title,
-        price_cents=deal.price_cents,
+        # A listing with no price travels as 0, flagged; it's unpriced again here.
+        price_cents=None if "no_price" in deal.flags else deal.price_cents,
         url=deal.url,
         location=deal.location,
         image_url=deal.image_url,

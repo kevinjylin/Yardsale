@@ -50,6 +50,14 @@ def test_the_description_has_search_other_sites() -> None:
     operation = spec["paths"]["/other-sites"]["get"]
     assert operation["operationId"] == "searchOtherSites"
     assert "NOT Yardsale listings" in operation["description"]
+    assert "headline word for word" in operation["description"]
+    body = operation["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+    assert "word for word" in body["headline"]["description"]
+    fields = body["listings"]["items"]["properties"]
+    for name in ("under_budget_usd", "shipping_known", "shipping", "missing", "reason", "url"):
+        assert name in fields
+    assert fields["missing"]["items"]["enum"] == ["price", "photo", "condition", "location"]
+    assert "over_budget" in fields["flags"]["description"]
     json.dumps(spec)
 
 
@@ -61,10 +69,19 @@ async def test_listings_point_to_other_sites_when_empty(client: Client) -> None:
 
 async def test_other_sites_returns_deals_under_the_max(client: Client, ebay: Site) -> None:
     status, found = await client.call("GET", "/other-sites", q="road bike", max_usd=300)
-    assert status == 200 and found["status"] == "done" and found["count"] == 1
-    (bike,) = found["listings"]
+    assert status == 200 and found["status"] == "done" and found["count"] == 2
+    bike, over = found["listings"]
     assert bike["site"] == "eBay" and bike["title"] == "Giant road bike"
     assert bike["price_usd"] == 210 and bike["shipping_usd"] == 30 and bike["total_usd"] == 240
+    assert bike["under_budget_usd"] == 60 and bike["shipping_known"] is True
+    assert bike["shipping"] == "+ $30 shipping" and bike["missing"] == ["photo", "condition"]
+    # Only one fits the $300, so the closest over it follows, flagged.
+    assert over["title"] == "Road bike" and over["under_budget_usd"] == -100
+    assert "over_budget" in over["flags"] and "$100 over budget" in over["reason"]
+    assert found["headline"] == (
+        "Found it: [Giant road bike](https://ebay.example.test/Giant-road-bike) on eBay for $240 "
+        "with shipping, $60 under your $300 budget (Oakland, CA)."
+    )
     assert bike["url"].startswith("https://ebay.example.test/")
     assert found["searched"] == ["eBay"] and found["failed"] == ["OfferUp"]
     assert "aren't Yardsale listings" in found["next_step"]
@@ -87,11 +104,14 @@ async def test_other_sites_explains_each_deal_against_the_market(store: Store, e
             status, found = await client.call("GET", "/other-sites", q="road bike", max_usd=300)
     assert status == 200 and found["typical_sold_usd"] == 310 and found["comps_used"] == 4
     assert "typical sold price on eBay, $310" in found["summary"]
-    (bike,) = found["listings"]
+    bike, _over = found["listings"]
     assert bike["versus_market_pct"] == 23 and bike["flags"] == []
-    assert bike["reason"] == "$210 + $30 shipping on eBay, 23% under the $310 typical sold price"
+    assert bike["reason"] == (
+        "$210 + $30 shipping on eBay, $60 under budget with shipping. Oakland, CA. 23% under "
+        "the $310 typical sold price. (no photo, condition not listed)"
+    )
     assert isinstance(bike["score"], float)
-    assert "each one's reason" in found["next_step"]
+    assert found["next_step"].startswith("Start your answer with headline")
 
 
 async def test_other_sites_checks_its_input(client: Client) -> None:
@@ -113,7 +133,7 @@ async def test_a_slow_search_answers_running_then_done(store: Store, ebay: Site)
             if later["status"] == "done":
                 break
             client_wait += 1
-        assert later["status"] == "done" and later["count"] == 1
+        assert later["status"] == "done" and later["count"] == 2
         assert ebay.calls == ["road bike"]  # the second call joined the first search
 
 
