@@ -126,8 +126,19 @@ text plus an Interactive Card, the way ResourcePilot does it:
   what the typed command does, with the same checks. Floors appear only on the seller's own
   cards, never a buyer's.
 
-Not yet seen in the real ASI:One app: everything but the Approve card. Restart the server to
-pick it up.
+**One message per answer.** On October 25 the real ASI:One app showed every card of a turn
+twice, a stale "Pricing your stuff" card and the home menu beside a finished proposal, and
+separate messages' text run together ("Got your photo…You're in…Here's my suggested
+listing"). The server had sent each card once, but several messages per turn: a proposal and
+then its eBay sales, an attachments-only message after the campus welcome, the photo's
+"still working" and proposal while the student was signing up, and every card again for a
+resent message. So an answer is now one message: its text, then its cards (a proposal's card,
+then the sales carousel), with no card twice for one message. Only slow work still sends two:
+"still working" with the progress card, then the result without it. Several photos and other
+sites' deals still follow as their own messages.
+
+Seen in the real ASI:One app on October 25, before that fix: the campus cards, the email form,
+the proposal card, the sales carousel, and the menu.
 
 ## Selling in the ASI:One chat
 
@@ -144,9 +155,12 @@ Code: [yardsale/chat.py](../yardsale/chat.py) and [yardsale/asione.py](../yardsa
    price, a note such as "size M", and for buyers a search and a budget. It uses a strict JSON
    schema. If ASI:One is down or `ASI_ONE_API_KEY` isn't set, a keyword reader
    (`read_locally`) does the same job more roughly.
-4. The photo goes through the pipeline below. The reply is a proposal: the item, the asking and
-   lowest prices and where each came from, and the three closest eBay sales as links. Nothing is
-   listed yet.
+4. The photo goes through the pipeline below. The reply is a proposal, in one message: the
+   item, the asking and lowest prices and where each came from, the three closest eBay sales as
+   links under "Recent eBay sales:", what similar ones ask right now under "Listed for sale
+   now:" (never mixed with the sales), the proposal card with the only Approve button, and a
+   carousel of up to 6 of the sales behind the price ("the 6 closest of the 13 eBay sales").
+   Nothing is listed yet.
 5. The seller replies `approve`, changes a price (`ask $360`, `lowest $280`), or `cancel`.
    [commands.py](../yardsale/commands.py) reads these with patterns, not a model, so a misread
    can't approve anything. Approving starts the item agent and the reply gives its address. If
@@ -167,14 +181,24 @@ Rules learned from Maestro's live testing:
   their floors.
 - **The first reply carries `{"attachments": "true"}` metadata**, which tells ASI:One the agent
   accepts uploads. A session that opens with a `StartSessionContent`-only message gets just that
-  metadata and no text, as in Fetch's own examples.
+  metadata and no text, as in Fetch's own examples; one that also has words or a photo gets the
+  metadata on its answer, not as a second message.
 - **A repeated photo that's still being priced** gets "I'm still pricing that photo" instead of
   the help text.
 
 A photo link counts whatever its `mime_type` says, since ASI:One doesn't always
 send a full `image/...`, and each message's attachments are logged (URI, type, metadata keys, never
 the text). A message ASI:One sends twice (same message ID) gets
-the same answer again instead of being acted on twice.
+the same text again, without its cards (they went out the first time), instead of being acted
+on twice. If the first answer wasn't delivered, the whole answer goes again.
+
+**Campus mode** (`YARDSALE_CAMPUS=1`): a new conversation's first message is answered only with
+"Are you a student?" and its card. A photo in that message is priced at once, but its proposal
+is held until the student signs up: the sign-up confirmation ("You're in, at UCR") and the
+proposal then come as one message, as separate paragraphs, and if pricing is still running the
+confirmation says so and the proposal follows once. Words in that first message without a
+photo aren't answered; the student asks again after signing up. School names read as people
+say them: "UCR", "UCLA", "MIT", "Berkeley".
 
 ### Messages the chat doesn't recognize
 
