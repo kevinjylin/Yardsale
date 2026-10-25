@@ -7,17 +7,19 @@ The Cal Hacks 13.0 plan (the pitch, what Fetch Business offers, what's missing, 
 order) is in [calhacks-plan.md](calhacks-plan.md).
 
 **Two products (decided October 24).** Sellers photograph their things and set minimums; the
-agents price each item from eBay sold sales and live local asking prices (the Market Scout, in
-progress), tell the seller when a minimum is far off, and give it an agent that lists it (on
-ASI:One, on `@yardsale`, and in a Craigslist post the seller pastes by hand) and haggles with
-every buyer, never below the minimum. Buyers say what they want and their max, and the deal
-finder searches eBay, Craigslist, OfferUp, and Facebook Marketplace through Apify, scores each
-listing against what it actually sells for (in progress), and can email a Craigslist seller to
-negotiate for them. Agent-to-agent buying on ASI:One (the Shopper haggling with item agents and
-buying) is built and ran live, but after a Fetch judge's feedback it's no longer pitched; selling
-on the seller's own eBay is built but secondary. The sections below describe the code as it is,
-including the parts not pitched. What's built and what's in progress is in
-[calhacks-plan.md](calhacks-plan.md#the-pitch).
+agents price each item from eBay sold sales and live asking prices (the Market Scout), tell the
+seller plainly when a minimum is far off, and give it an agent that lists it (on ASI:One, on
+`@yardsale`, and in a Craigslist post the seller pastes by hand) and haggles with every buyer,
+citing the market and never going below the minimum. Buyers say what they want and their max,
+and the Deal Finder agent searches eBay, Craigslist, OfferUp, and Facebook Marketplace through
+Apify, scores each listing against what it actually sells for with a reason, and can email a
+Craigslist seller to negotiate for them. The Scout, the Deal Finder, the seller feedback, and
+the cited counters are tested offline (the Deal Finder has had one live probe); the Scout and
+Deal Finder agents are on Agentverse as mailbox agents since October 24. Agent-to-agent buying on
+ASI:One (the Shopper haggling with item agents and buying) is built and ran live, but after a
+Fetch judge's feedback it's no longer pitched; selling on the seller's own eBay is built but
+secondary. The sections below describe the code as it is, including the parts not pitched.
+What's built and what's been run live is in [calhacks-plan.md](calhacks-plan.md#the-pitch).
 
 ## The idea
 
