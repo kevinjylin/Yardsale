@@ -139,10 +139,10 @@ def joined_text(school: str) -> str:
 def join(store: Store, owner: str, email: str) -> tuple[str, MetadataContent | None]:
     """Sign a student up from an email. Returns the reply and a card if one is needed again.
 
-    This answers at once and never waits on a map service. A cold campus fetch measured 42-53
-    seconds against Overpass, which is past the chat's reply budget, and a student doesn't need
-    a meeting spot until they actually trade. The caller schedules `warm` instead, so the first
-    student from a school starts the mapping without waiting for it.
+    This answers at once and never waits on the campus lookup. Working a campus out is a Claude
+    call, and a student doesn't need a meeting spot until they actually trade. The caller
+    schedules `warm` instead, so the first student from a school starts the lookup without
+    waiting for it.
 
     A bad address comes back as a message rather than an error, because the student simply
     needs to try again.
@@ -154,7 +154,7 @@ def join(store: Store, owner: str, email: str) -> tuple[str, MetadataContent | N
     return joined_text(student.school), None
 
 
-async def warm(store: Store, school: str, find: campus.FindCampus = campus.find_and_load) -> None:
+async def warm(store: Store, school: str, find: campus.FindCampus = students.find_campus) -> None:
     """Map a school's campus if it isn't mapped yet. Meant to be run in the background, so it
     returns nothing and never raises: campus.find_and_load already swallows a failure, and
     students.warm_campus logs what it cached."""

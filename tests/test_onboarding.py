@@ -14,6 +14,7 @@ from yardsale.store import Store
 
 CAFE = Spot("Free Speech Movement Cafe", 37.8723, -122.2600, "cafe", indoor=True)
 DORM = Spot("Unit 1 Residence Hall", 37.8679, -122.2553, "dormitory", indoor=True)
+SPROUL = Spot("Sproul Plaza", 0.0, 0.0, "plaza")  # as Claude names it: no coordinates yet
 
 
 @pytest.fixture
@@ -65,8 +66,8 @@ def test_signing_up_is_one_step(db: Store) -> None:
 
 
 def test_signing_up_never_waits_on_a_map(db: Store) -> None:
-    """A cold campus fetch took 42-53 seconds against Overpass, past the chat's reply budget,
-    so joining says nothing about a meeting spot and the mapping happens behind it."""
+    """Working a campus out is a Claude call, so joining says nothing about a meeting spot and
+    the lookup happens behind the reply."""
     text, _ = onboarding.join(db, "asi1:a", "sam@berkeley.edu")
     assert "somewhere on campus" in text
     assert not db.campus_loaded("berkeley.edu")  # joining didn't fetch anything
@@ -132,3 +133,35 @@ async def test_the_meeting_spot_appears_once_the_campus_is_mapped(db: Store) -> 
     meeting = students.where_to_meet(db, "berkeley.edu")
     assert meeting.spot.name == "Free Speech Movement Cafe"
     assert not meeting.spot.private  # never the dorm
+
+
+# --- Does it reach the chat? ----------------------------------------------------------------
+
+
+def test_the_chat_builds_a_meeting_line_with_a_map_link(
+    db: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the feature: a closed deal says where to hand the item over."""
+    from yardsale import campus, maps, meetup, students
+
+    monkeypatch.setenv("YARDSALE_CAMPUS", "1")
+    onboarding.join(db, "asi1:a", "sam@berkeley.edu")
+    db.save_campus("berkeley.edu", [SPROUL, CAFE, DORM])
+
+    meeting = students.where_to_meet(db, "berkeley.edu")
+    link = maps.map_url(meeting.spot, campus.school_label_for("berkeley.edu"))
+    line = f"Meet at [{meetup.describe(meeting)}]({link}) to hand it over."
+
+    assert "Sproul Plaza" in line
+    assert "Unit 1" not in line  # never a dorm
+    assert "google.com/maps" in link
+    assert "Berkeley" in link  # the university scopes the search when there are no coordinates
+
+
+def test_a_map_link_works_without_a_google_key(db: Store) -> None:
+    """No key means no coordinates, and a search link is still the right thing to send."""
+    from yardsale import maps
+
+    assert not maps.located(SPROUL)
+    link = maps.map_url(SPROUL, "Berkeley")
+    assert link.startswith("https://") and "Sproul" in link.replace("%20", " ").replace("+", " ")

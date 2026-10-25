@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import logging
 
-from yardsale import campus, schools
-from yardsale.meetup import Meetup, choose, options
+from yardsale import campus, maps, schools
+from yardsale.meetup import Meetup, Spot, choose, options
 from yardsale.store import Listing, Store, Student
 
 log = logging.getLogger("yardsale.students")
@@ -108,9 +108,21 @@ def check_may_trade(store: Store, listing: Listing, owner: str) -> None:
 # --- Campuses and meeting points ------------------------------------------------------------
 
 
-async def warm_campus(
-    store: Store, school: str, find: campus.FindCampus = campus.find_and_load
-) -> int:
+async def find_campus(school: str) -> list[Spot]:
+    """Claude names a school's meeting spots, then Google puts them on the map.
+
+    Two steps because they answer different questions. Claude knows that you meet at Sproul
+    Plaza at Berkeley, which is the part a chat message needs. Google knows where Sproul Plaza
+    is, which is what turns it into a link. Without a Google key the names come through on their
+    own and the spots keep no coordinates, which costs nothing a student would notice.
+    """
+    spots = await campus.find_and_load(school)
+    if not spots:
+        return spots
+    return await maps.locate_all(spots, campus.school_label_for(school))
+
+
+async def warm_campus(store: Store, school: str, find: campus.FindCampus = find_campus) -> int:
     """Make sure a school's campus is cached, fetching it once if not. Returns how many places
     it has. Safe to call often: a school already in the store costs one query."""
     if store.campus_loaded(school):
@@ -123,7 +135,7 @@ async def warm_campus(
     return kept
 
 
-async def warm_known_campuses(store: Store, find: campus.FindCampus = campus.find_and_load) -> int:
+async def warm_known_campuses(store: Store, find: campus.FindCampus = find_campus) -> int:
     """Load the campus of every school someone has signed up from. Runs on an interval, so a
     school picked up between restarts still gets mapped."""
     loaded = 0

@@ -101,11 +101,15 @@ from uagents_core.contrib.protocols.chat.cards import (
 
 from yardsale import (
     advice,
+    campus,
     commands,
     craigslist_buyer,
     craigslist_mail,
     deals,
+    maps,
+    meetup,
     onboarding,
+    students,
     watches,
 )
 from yardsale.asione import ReadMessage
@@ -1799,14 +1803,33 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         provider = backend.checkout.provider
         return provider.label if provider is not None else None
 
+    def meeting_line(conv: Conversation) -> str:
+        """Where to hand the item over, on campus. Empty unless both sides are at one school.
+
+        Only in campus mode, and only when the campus has been mapped. Neither student's own
+        location is involved: it's one public spot on the campus they share.
+        """
+        if not onboarding.campus_mode():
+            return ""
+        school = students.school_of(store, conv.owner)
+        if not school:
+            return ""
+        try:
+            meeting = students.where_to_meet(store, school)
+        except students.StudentError:
+            return ""
+        link = maps.map_url(meeting.spot, campus.school_label_for(school))
+        return f"\n\nMeet at [{meetup.describe(meeting)}]({link}) to hand it over."
+
     async def settle(conv: Conversation, listing: Listing, deal: Deal) -> str | Reply:
         """A deal closed: make the payment link and show it."""
         conv.quotes.pop(listing.item_id, None)
+        where = meeting_line(conv)
         record = await backend.checkout.start(deal.deal_id) or store.deal(deal.deal_id)
         if record is None:
-            return f"Deal! The {listing.title} is yours for {usd(deal.price_cents)}."
+            return f"Deal! The {listing.title} is yours for {usd(deal.price_cents)}.{where}"
         label = provider_label()
-        text = deal_text(record, listing.title, label)
+        text = deal_text(record, listing.title, label) + where
         if record.payment_status == PENDING and label is not None:
             return Reply(text, payment_card(record, listing.title, label))
         return text
@@ -2142,8 +2165,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             text, card = onboarding.join(store, conv.owner, str(choice.get("email", "")))
             student = store.student(conv.owner)
             if student is not None and not store.campus_loaded(student.school):
-                # The first student from a school starts its mapping. It takes the better part
-                # of a minute against Overpass, so it runs behind the reply rather than in it.
+                # The first student from a school starts its campus lookup. That's a Claude
+                # call, so it runs behind the reply rather than inside it.
                 warming = asyncio.ensure_future(onboarding.warm(store, student.school))
                 follow_ups.add(warming)
                 warming.add_done_callback(follow_ups.discard)

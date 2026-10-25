@@ -1097,9 +1097,11 @@ class Store:
                 indoor=bool(row["indoor"]),
                 opening_hours=row["opening_hours"],
             )
+            # Insertion order, because the order places were saved in is the ranking: campus.py
+            # gets them back from Claude best first, and meetup.py takes the first usable one.
             for row in self._db.execute(
                 "SELECT name, kind, latitude, longitude, indoor, opening_hours"
-                " FROM campus_places WHERE school = ? ORDER BY kind, name",
+                " FROM campus_places WHERE school = ? ORDER BY rowid",
                 (school,),
             )
         ]
