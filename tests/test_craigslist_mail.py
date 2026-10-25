@@ -250,6 +250,25 @@ async def test_an_offer_at_the_floor_is_agreed_and_deal_sends_the_payment_link(
     assert "went to a Craigslist buyer by email" in listings
 
 
+@pytest.mark.parametrize("words", ["deal ill take the bike for 360", "I'll take it"])
+async def test_deal_with_an_acceptable_price_closes_on_the_first_email(
+    shop: Shop, words: str
+) -> None:
+    """Seen live: "deal ill take the bottle for 11" got "let me check", and even an agreement
+    would have asked them to say deal again. An agreed price with deal words is a sale."""
+    paid = body(await shop.buyer_says(words))
+    assert "it's yours for $360" in paid
+    deal = shop.market.store.deal_for(shop.bike().item_id)
+    assert deal is not None and deal.price_cents == 36000 and deal.payment_url in paid
+    assert shop.bike().status == SOLD
+
+
+async def test_deal_words_under_the_floor_still_get_a_counter(shop: Shop) -> None:
+    text = body(await shop.buyer_says("deal at $250?"))
+    assert "$300" not in text and 30000 < counter_in(text) <= 36000
+    assert shop.bike().status == ACTIVE
+
+
 async def test_yes_accepts_a_counter_at_its_price(shop: Shop) -> None:
     counter = counter_in(body(await shop.buyer_says("$280?")))
     assert "yours for" in body(await shop.buyer_says("ok"))

@@ -961,6 +961,9 @@ class CraigslistAgent:
             if isinstance(accepted, OfferRejected) and accepted.code == "unavailable":
                 return self._now_closed(listing)
             price = None  # the price lapsed: fall through to the asking price
+        taking_it = bool(_ACCEPT.search(text)) and not _NO_DEAL.search(text)
+        if amount is None and price is None and taking_it:
+            amount = listing.asking_cents  # "deal, I'll take it" with nothing on the table
         if amount is not None:
             offer = min(amount, listing.asking_cents)
             reply = await self.negotiate(
@@ -968,6 +971,20 @@ class CraigslistAgent:
             )
             if isinstance(reply, Counter):
                 _remember_price(self.store, item_id, buyer_ref, reply, offer)
+                if reply.agreed and taking_it:
+                    # "Deal, I'll take it for $11" and $11 is agreed: close it now rather than
+                    # asking them to say deal a second time.
+                    accepted = await self.negotiate(
+                        ctx,
+                        item_id,
+                        AcceptCounter(
+                            item_id=item_id, counter_cents=reply.counter_cents, buyer_ref=buyer_ref
+                        ),
+                    )
+                    if isinstance(accepted, Deal):
+                        return "deal", await self._settle(accepted.deal_id)
+                    if isinstance(accepted, OfferRejected) and accepted.code == "unavailable":
+                        return self._now_closed(listing)
                 if reply.agreed:
                     return "agreed", (
                         f'{usd(reply.counter_cents)} works for me. Reply "deal" and I\'ll send '
