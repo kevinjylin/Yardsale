@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -12,7 +13,7 @@ from uagents_core.contrib.protocols.chat import ChatMessage, MetadataContent
 from uagents_core.contrib.protocols.chat.cards import Card, CarouselCardPayload, extract_card
 
 from tests import fakes, sim
-from yardsale import chat, commands
+from yardsale import bureau_server, chat, commands
 from yardsale.sources import ExternalListing, SourceError
 from yardsale.store import Store
 
@@ -88,9 +89,12 @@ async def test_nothing_on_yardsale_shows_the_best_deals_elsewhere(
 ) -> None:
     buyer = shop.user("buyer")
     reply = await buyer.exchange(sim.chat_message("find me a road bike under $300"))
+    # The answer goes out at once, and the deals follow as the next message.
+    (first_reply,) = buyer.interim
+    assert first_reply.startswith('Nothing on Yardsale matches "road bike" under $300')
+    assert "so I'm checking eBay, Craigslist, and OfferUp" in first_reply
     text = reply.text()
-    assert 'Nothing on Yardsale matches "road bike" under $300' in text
-    assert "Best deals on other sites" in text
+    assert text.startswith("Best deals on other sites")
     lines = text.splitlines()
     first = next(n for n, line in enumerate(lines) if line.startswith("1. "))
     # Best match, then cheapest total: $180 on Craigslist, then $210 + $30 shipping on eBay.
@@ -137,12 +141,12 @@ async def test_yardsale_listings_come_first_then_other_sites(shop: sim.Market, e
     """A buyer sees Yardsale's own listings and, every time, the best deals elsewhere too."""
     await list_bike(shop, 360, 300)
     buyer = shop.user("buyer")
-    reply = await buyer.say("find me a hybrid bike")
+    deals = await buyer.exchange(sim.chat_message("find me a hybrid bike"))
+    (reply,) = buyer.interim  # Yardsale's own results go out at once
     assert reply.startswith("Here's what's for sale")
     assert "also checking" in reply
     assert ebay.calls  # other sites were searched as well
-    deals = await buyer.next_reply()  # the deals arrive as a second message
-    assert "Best deals on other sites" in deals.text()
+    assert deals.text().startswith("Best deals on other sites")  # as the next message
     assert card_in(deals) is not None  # the deals carousel, after Yardsale's own results card
 
 
@@ -165,22 +169,44 @@ async def test_asking_again_uses_the_cached_search(shop: sim.Market, ebay: Site)
     assert ebay.calls == ["road bike"]  # one paid search for all three
 
 
-async def test_a_slow_search_says_so_first(
-    shop: sim.Market, ebay: Site, monkeypatch: pytest.MonkeyPatch
+async def test_the_first_reply_goes_out_at_once_and_the_deals_follow(
+    shop: sim.Market, ebay: Site, craigslist: Site
 ) -> None:
-    monkeypatch.setattr(chat, "REPLY_WITHIN", 0.2)
-    ebay.delay = 0.6
+    ebay.delay = craigslist.delay = 1.0
     buyer = shop.user("buyer")
-    reply = await buyer.say("find me a road bike under $300")
-    (first,) = buyer.interim
+    started = time.monotonic()
+    await buyer.send(sim.chat_message("find me a road bike under $300"))
+    first = (await buyer.next_reply()).text()
+    assert time.monotonic() - started < 0.5  # not waiting on any site
     assert first.startswith('Nothing on Yardsale matches "road bike"')
     assert first.endswith(chat.SEARCHING_ELSEWHERE)
-    assert "Best deals on other sites" in reply
+    deals = (await buyer.next_reply()).text()
+    assert deals.startswith("Best deals on other sites") and "Trek road bike 54cm" in deals
+    assert 1.0 <= time.monotonic() - started < 2.0
+
+
+async def test_slow_sites_are_marked_pending_and_sent_later(
+    store: Store, ebay: Site, craigslist: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    craigslist.delay = 1.5
+    async with sim.running_market(store, sources={"ebay": ebay, "craigslist": craigslist}) as m:
+        monkeypatch.setattr(bureau_server.runtime().finder, "within", 0.3)
+        buyer = m.user("buyer")
+        started = time.monotonic()
+        deals = (await buyer.exchange(sim.chat_message("find me a road bike under $300"))).text()
+        assert time.monotonic() - started < 1.0  # eBay's deals, by the deadline
+        assert "Giant road bike" in deals and "Trek" not in deals
+        assert "(Still searching Craigslist; I'll send anything better.)" in deals
+        later = (await buyer.next_reply()).text()
+        assert later.startswith("Craigslist answered too, so here's the updated list.")
+        assert "Trek road bike 54cm" in later and "Still searching" not in later
+    assert len(craigslist.calls) == 1
 
 
 async def test_nothing_to_haggle_over_looks_elsewhere(shop: sim.Market) -> None:
-    reply = await shop.user("buyer").say("find me a road bike, haggle for me, max $300")
-    assert "Nothing on Yardsale is close enough to haggle over" in reply
+    buyer = shop.user("buyer")
+    reply = await buyer.say("find me a road bike, haggle for me, max $300")
+    assert "Nothing on Yardsale is close enough to haggle over" in buyer.interim[0]
     assert "Trek road bike 54cm" in reply
 
 
