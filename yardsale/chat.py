@@ -240,7 +240,8 @@ HELP = "Hi, I'm Yardsale. " + HOW_IT_WORKS  # the greeting, for a conversation's
 UNCLEAR = "I didn't catch that. " + HOW_IT_WORKS  # a returning conversation isn't greeted again
 AGENT_ANSWERS_EMAIL = (
     "Its agent answers Craigslist buyers' emails by itself, usually within seconds: it haggles "
-    "with your prices, never below your lowest, and sends a payment link once a buyer says deal. "
+    "with your prices, never below your lowest, and sets up where to meet once a buyer says deal "
+    "(they pay you in person). "
     "You don't need to tell it to reply or haggle."
 )
 EMAIL_OFF = (
@@ -341,10 +342,6 @@ class Reply(NamedTuple):
     # and add the best deals to this text before it's sent. The ZIP is the place the buyer
     # named ("in Berkeley"); "" searches the server's default place.
     elsewhere: tuple[str, int | None, str] | None = None
-    # More cards in this same message, after `card`, such as the eBay sales behind a proposal's
-    # price. One message per answer: ASI:One folds a turn's messages together, and a second
-    # message showed every card of the turn twice.
-    extra: tuple[MetadataContent, ...] = ()
 
 
 def as_reply(answer: str | Reply) -> Reply:
@@ -485,18 +482,14 @@ def card_key(card: MetadataContent) -> str:
 
 
 def text_message(
-    text: str,
-    offer_uploads: bool = False,
-    card: MetadataContent | None = None,
-    extra: tuple[MetadataContent, ...] = (),
+    text: str, offer_uploads: bool = False, card: MetadataContent | None = None
 ) -> ChatMessage:
-    """One chat message: the text, then its cards, each card once."""
+    """One chat message: the text, then at most one card. ASI:One keeps only the last card of a
+    message (seen October 25: a proposal's Approve card vanished behind its sales carousel), so
+    a second card goes in a message of its own (`Reply.more`)."""
     content: list[TextContent | MetadataContent] = [TextContent(type="text", text=text)]
-    seen: set[str] = set()
-    for one in (card, *extra):
-        if one is not None and card_key(one) not in seen:
-            seen.add(card_key(one))
-            content.append(one)
+    if card is not None:
+        content.append(card)
     if offer_uploads:
         content.append(UPLOADS_WELCOME)  # tells ASI:One this agent accepts file uploads
     return ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=content)
@@ -665,13 +658,13 @@ def batch_notes(count: int, text: str) -> str:
 
 
 def proposal_reply(listing: Listing) -> Reply:
-    """The proposal: one message with its text, its card, and the eBay sales behind the price
-    as a carousel in the same message. The proposal card has the only Approve button."""
+    """The proposal: its text and card (the only Approve button), then the eBay sales behind
+    the price as a carousel in a message of its own, since ASI:One shows one card per message."""
+    reply = Reply(proposal_text(listing), proposal_card(listing))
     comps = cards.comps(listing)
     if comps is None:
-        return Reply(proposal_text(listing), proposal_card(listing))
-    text = f"{proposal_text(listing)}\n\n{comps_text(listing)}"
-    return Reply(text, proposal_card(listing), extra=(comps,))
+        return reply
+    return reply._replace(more=((comps_text(listing), comps),))
 
 
 def comps_text(listing: Listing) -> str:
@@ -3413,20 +3406,18 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         offer_uploads: bool = False,
         sent: set[str] | None = None,
     ) -> bool:
-        """Send an answer: one message with its text and cards, then any later messages
+        """Send an answer: one message with its text and card, then any later messages
         (`more`). A card this turn already sent (`sent`, by card_key) isn't sent again. Returns
         whether the first message was delivered."""
         sent = set() if sent is None else sent
-        messages = [(reply.text, reply.card, reply.extra)]
-        messages += [(text, card, ()) for text, card in reply.more]
+        messages = [(reply.text, reply.card), *reply.more]
         delivered = True
-        for n, (text, card, extra) in enumerate(messages):
+        for n, (text, card) in enumerate(messages):
             # Anything that got here without a card gets a plain one, so every reply is a card.
             card = card or cards.notice(text, [cards.SELL, cards.BUY])
-            fresh = [one for one in (card, *extra) if card_key(one) not in sent]
-            sent.update(card_key(one) for one in fresh)
-            first = fresh[0] if fresh else None
-            message = text_message(text, offer_uploads and n == 0, first, tuple(fresh[1:]))
+            fresh = card_key(card) not in sent
+            sent.add(card_key(card))
+            message = text_message(text, offer_uploads and n == 0, card if fresh else None)
             status = await ctx.send(sender, message)
             if n == 0:
                 delivered = status.status != DeliveryStatus.FAILED

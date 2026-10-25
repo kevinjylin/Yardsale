@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1250" viewBox="0 0 1800 1250" role="img" aria-labelledby="title desc">
+<title id="title">Yardsale agent architecture</title><desc id="desc">Seven core Fetch.ai agents and one item agent per approved listing. The orchestrator coordinates identification, parallel sold-price research and live market scouting, appraisal, deal finding, and buyer-side negotiation. Item agents enforce a private seller floor. Checkout and Craigslist email negotiation are orchestrator functions.</desc>
+<defs><radialGradient id="glow"><stop stop-color="#143d57"/><stop offset="1" stop-color="#081423"/></radialGradient>
+<marker id="cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#5ee4ed"/></marker>
+<marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#73e2b0"/></marker>
+<marker id="gold" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#ffc476"/></marker>
+<marker id="purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#b8a3ff"/></marker>
+</defs><style>text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}</style>
+<rect x="0" y="0" width="1800" height="1250" rx="0" fill="#081423" stroke="none" stroke-width="1.5" />
+<ellipse cx="900" cy="310" rx="900" ry="380" fill="url(#glow)"/>
+<text x="64" y="58" font-size="17" fill="#5ee4ed" font-weight="650" letter-spacing="3">YARDSALE  /  AGENT ARCHITECTURE</text>
+<text x="64" y="115" font-size="46" fill="#edf5ff" font-weight="700" >One marketplace. A team of agents.</text>
+<text x="64" y="151" font-size="23" fill="#a4b6cb" font-weight="400" >7 core agents + an agent for every approved item</text>
+<text x="1736" y="57" font-size="16" fill="#a4b6cb" font-weight="600" text-anchor="end">FETCH.AI  ·  AGENTVERSE  ·  ASI:ONE</text>
+<rect x="64" y="192" width="536" height="94" rx="18" fill="#0e2033" stroke="#29435e" stroke-width="1.5" />
+<text x="88" y="229" font-size="23" fill="#edf5ff" font-weight="650" >ASI:One</text>
+<text x="88" y="261" font-size="19" fill="#a4b6cb" font-weight="400" >Seller photos · buyer searches · chat cards</text>
+<rect x="632" y="192" width="536" height="94" rx="18" fill="#0e2033" stroke="#29435e" stroke-width="1.5" />
+<text x="656" y="229" font-size="23" fill="#edf5ff" font-weight="650" >@yardsale on Fetch Business</text>
+<text x="656" y="261" font-size="19" fill="#a4b6cb" font-weight="400" >Search, price checks and negotiation tools</text>
+<rect x="1200" y="192" width="536" height="94" rx="18" fill="#0e2033" stroke="#29435e" stroke-width="1.5" />
+<text x="1224" y="229" font-size="23" fill="#edf5ff" font-weight="650" >Craigslist email</text>
+<text x="1224" y="261" font-size="19" fill="#a4b6cb" font-weight="400" >Buyer replies and seller outreach</text>
+<path d="M332 286 V306 H900 V328" fill="none" stroke="#5ee4ed" stroke-width="2" marker-end="url(#cyan)" />
+<path d="M900 286 V328" fill="none" stroke="#5ee4ed" stroke-width="2" marker-end="url(#cyan)" />
+<path d="M1468 286 V306 H900 V328" fill="none" stroke="#5ee4ed" stroke-width="2" marker-end="url(#cyan)" />
+<rect x="64" y="332" width="1672" height="108" rx="20" fill="#15394c" stroke="#5ee4ed" stroke-width="1.5" />
+<text x="92" y="372" font-size="18" fill="#5ee4ed" font-weight="700" >01</text>
+<text x="138" y="374" font-size="31" fill="#edf5ff" font-weight="700" >Yardsale Orchestrator</text>
+<text x="138" y="411" font-size="20" fill="#a4b6cb" font-weight="400" >@ys-orchestrator  ·  Routes work, owns approvals and maintains workflow state</text>
+<text x="1708" y="373" font-size="20" fill="#5ee4ed" font-weight="600" text-anchor="end">asi1-mini → text intent</text>
+<text x="1708" y="410" font-size="18" fill="#a4b6cb" font-weight="400" text-anchor="end">SQLite → listings, offers, deals and payments</text>
+<path d="M544 440 V488" fill="none" stroke="#73e2b0" stroke-width="2" marker-end="url(#green)" />
+<path d="M1396 440 V488" fill="none" stroke="#b8a3ff" stroke-width="2" marker-end="url(#purple)" />
+<text x="566" y="472" font-size="17" fill="#73e2b0" font-weight="400" >Coordinates pricing</text>
+<text x="1418" y="472" font-size="17" fill="#b8a3ff" font-weight="400" >Coordinates buying</text>
+<rect x="64" y="492" width="960" height="426" rx="22" fill="#0c211f" stroke="#244b43" stroke-width="1.5" />
+<text x="88" y="531" font-size="18" fill="#73e2b0" font-weight="650" letter-spacing="1.6">SELL  /  FROM PHOTO TO PROPOSAL</text>
+<rect x="88" y="626" width="232" height="149" rx="18" fill="#11243a" stroke="#29435e" stroke-width="1.5" />
+<rect x="106" y="644" width="32" height="28" rx="8" fill="#1b3449" stroke="none" stroke-width="1.5" />
+<text x="122" y="664" font-size="15" fill="#73e2b0" font-weight="700" text-anchor="middle">02</text>
+<text x="152" y="665" font-size="23" fill="#edf5ff" font-weight="650" >Identifier</text>
+<text x="108" y="694" font-size="15" fill="#73e2b0" font-weight="500" >@ys-identifier</text>
+<text x="108" y="723" font-size="18" fill="#a4b6cb" font-weight="400" >Claude reads the photo</text>
+<text x="108" y="747" font-size="18" fill="#a4b6cb" font-weight="400" >Brand, model, condition</text>
+<rect x="365" y="556" width="290" height="130" rx="18" fill="#11243a" stroke="#29435e" stroke-width="1.5" />
+<rect x="383" y="574" width="32" height="28" rx="8" fill="#1b3449" stroke="none" stroke-width="1.5" />
+<text x="399" y="594" font-size="15" fill="#73e2b0" font-weight="700" text-anchor="middle">03</text>
+<text x="429" y="595" font-size="23" fill="#edf5ff" font-weight="650" >Researcher</text>
+<text x="385" y="624" font-size="15" fill="#73e2b0" font-weight="500" >@ys-researcher</text>
+<text x="385" y="653" font-size="18" fill="#a4b6cb" font-weight="400" >Apify · eBay sold prices</text>
+<rect x="365" y="736" width="290" height="130" rx="18" fill="#11243a" stroke="#29435e" stroke-width="1.5" />
+<rect x="383" y="754" width="32" height="28" rx="8" fill="#1b3449" stroke="none" stroke-width="1.5" />
+<text x="399" y="774" font-size="15" fill="#73e2b0" font-weight="700" text-anchor="middle">04</text>
+<text x="429" y="775" font-size="23" fill="#edf5ff" font-weight="650" >Market Scout</text>
+<text x="385" y="804" font-size="15" fill="#73e2b0" font-weight="500" >@ys-scout</text>
+<text x="385" y="833" font-size="18" fill="#a4b6cb" font-weight="400" >Apify · live asking prices</text>
+<rect x="700" y="556" width="300" height="154" rx="18" fill="#11243a" stroke="#29435e" stroke-width="1.5" />
+<rect x="718" y="574" width="32" height="28" rx="8" fill="#1b3449" stroke="none" stroke-width="1.5" />
+<text x="734" y="594" font-size="15" fill="#73e2b0" font-weight="700" text-anchor="middle">05</text>
+<text x="764" y="595" font-size="23" fill="#edf5ff" font-weight="650" >Appraiser</text>
+<text x="720" y="624" font-size="15" fill="#73e2b0" font-weight="500" >@ys-appraiser</text>
+<text x="720" y="653" font-size="18" fill="#a4b6cb" font-weight="400" >Claude matches sold comps</text>
+<text x="720" y="677" font-size="18" fill="#a4b6cb" font-weight="400" >Code calculates prices</text>
+<path d="M320 680 H342 V621 H363" fill="none" stroke="#73e2b0" stroke-width="2" marker-end="url(#green)" />
+<path d="M342 680 V801 H363" fill="none" stroke="#73e2b0" stroke-width="2" marker-end="url(#green)" />
+<text x="385" y="719" font-size="14" fill="#73e2b0" font-weight="600" letter-spacing="1.3">RUN IN PARALLEL</text>
+<path d="M655 621 H698" fill="none" stroke="#73e2b0" stroke-width="2" marker-end="url(#green)" />
+<rect x="700" y="756" width="300" height="130" rx="18" fill="#17372d" stroke="#73e2b0" stroke-width="1.5" stroke-dasharray="7 6" />
+<text x="720" y="790" font-size="22" fill="#edf5ff" font-weight="650" >Seller reviews proposal</text>
+<text x="720" y="820" font-size="19" fill="#a4b6cb" font-weight="400" >Price + market advice</text>
+<text x="720" y="850" font-size="19" fill="#a4b6cb" font-weight="400" >Approve, edit or cancel</text>
+<path d="M850 710 V754" fill="none" stroke="#73e2b0" stroke-width="2" marker-end="url(#green)" />
+<path d="M655 801 H698" fill="none" stroke="#73e2b0" stroke-width="2" marker-end="url(#green)" />
+<text x="88" y="899" font-size="16" fill="#a4b6cb" font-weight="400" >Workflow order shown; the orchestrator sends each specialist request.</text>
+<rect x="1056" y="492" width="680" height="426" rx="22" fill="#1b1d35" stroke="#41395f" stroke-width="1.5" />
+<text x="1080" y="531" font-size="18" fill="#b8a3ff" font-weight="650" letter-spacing="1.6">BUY  /  DISCOVER AND NEGOTIATE</text>
+<rect x="1080" y="556" width="632" height="154" rx="18" fill="#11243a" stroke="#29435e" stroke-width="1.5" />
+<rect x="1098" y="574" width="32" height="28" rx="8" fill="#1b3449" stroke="none" stroke-width="1.5" />
+<text x="1114" y="594" font-size="15" fill="#b8a3ff" font-weight="700" text-anchor="middle">06</text>
+<text x="1144" y="595" font-size="23" fill="#edf5ff" font-weight="650" >Deal Finder</text>
+<text x="1100" y="624" font-size="15" fill="#b8a3ff" font-weight="500" >@ys-dealfinder</text>
+<text x="1100" y="653" font-size="18" fill="#a4b6cb" font-weight="400" >Apify searches external marketplaces</text>
+<text x="1100" y="677" font-size="18" fill="#a4b6cb" font-weight="400" >Code ranks deals against eBay sold prices</text>
+<rect x="1080" y="748" width="632" height="138" rx="18" fill="#11243a" stroke="#29435e" stroke-width="1.5" />
+<rect x="1098" y="766" width="32" height="28" rx="8" fill="#1b3449" stroke="none" stroke-width="1.5" />
+<text x="1114" y="786" font-size="15" fill="#b8a3ff" font-weight="700" text-anchor="middle">07</text>
+<text x="1144" y="787" font-size="23" fill="#edf5ff" font-weight="650" >Shopper</text>
+<text x="1100" y="816" font-size="15" fill="#b8a3ff" font-weight="500" >@ys-shopper</text>
+<text x="1100" y="845" font-size="18" fill="#a4b6cb" font-weight="400" >On request: haggles with item agents within buyer budget</text>
+<text x="1080" y="734" font-size="16" fill="#a4b6cb" font-weight="400" >Separate paths: external deals or Yardsale item negotiation</text>
+<path d="M850 886 V980" fill="none" stroke="#ffc476" stroke-width="2" marker-end="url(#gold)" />
+<text x="873" y="955" font-size="17" fill="#ffc476" font-weight="400" >On approval</text>
+<path d="M1080 817 H1040 V1055 H1026" fill="none" stroke="#b8a3ff" stroke-width="2" marker-end="url(#purple)" marker-start="url(#purple)" />
+<rect x="64" y="984" width="960" height="150" rx="20" fill="#30291f" stroke="#ffc476" stroke-width="1.5" />
+<rect x="88" y="1010" width="58" height="58" rx="14" fill="#4b3b26" stroke="#745936" stroke-width="1.5" />
+<text x="117" y="1049" font-size="27" fill="#ffc476" font-weight="700" text-anchor="middle">N</text>
+<text x="168" y="1026" font-size="30" fill="#edf5ff" font-weight="700" >Item agents</text>
+<text x="168" y="1062" font-size="21" fill="#a4b6cb" font-weight="400" >One per approved listing · negotiates offers and counters</text>
+<text x="168" y="1096" font-size="19" fill="#ffc476" font-weight="400" >Enforces the private seller floor · runs in Bureau or on Agentverse</text>
+<rect x="1056" y="984" width="680" height="150" rx="18" fill="#0e2033" stroke="#6b819a" stroke-width="1.5" stroke-dasharray="7 6" />
+<text x="1080" y="1018" font-size="16" fill="#5ee4ed" font-weight="650" letter-spacing="1.4">INSIDE THE ORCHESTRATOR</text>
+<text x="1080" y="1053" font-size="22" fill="#edf5ff" font-weight="650" >Checkout</text>
+<text x="1223" y="1053" font-size="19" fill="#a4b6cb" font-weight="400" >Stripe test / Visa sandbox</text>
+<text x="1080" y="1087" font-size="22" fill="#edf5ff" font-weight="650" >Email negotiator</text>
+<text x="1282" y="1087" font-size="19" fill="#a4b6cb" font-weight="400" >Craigslist seller outreach</text>
+<text x="1080" y="1114" font-size="17" fill="#a4b6cb" font-weight="400" >Buyer-approved outreach; never above the buyer&#x27;s max</text>
+<text x="64" y="1177" font-size="14" fill="#5ee4ed" font-weight="700" letter-spacing="2">TRANSPORT</text>
+<text x="204" y="1177" font-size="18" fill="#a4b6cb" font-weight="400" >7 core uAgents in one Bureau · Agentverse mailboxes in live mode · local fallback for service requests</text>
+<text x="64" y="1214" font-size="14" fill="#73e2b0" font-weight="700" letter-spacing="2">MARKET DATA</text>
+<text x="204" y="1214" font-size="18" fill="#a4b6cb" font-weight="400" >eBay · Craigslist · OfferUp · Facebook Marketplace (optional)</text>
+<text x="1736" y="1214" font-size="16" fill="#a4b6cb" font-weight="400" text-anchor="end">01-07 = core agents  ·  N = item agents  ·  Dashed = functions</text>
+</svg>

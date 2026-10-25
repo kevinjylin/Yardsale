@@ -159,8 +159,10 @@ async def test_a_resent_message_is_answered_again_not_redone(
     seller = market.user("seller")
     msg = sim.chat_message("sell", BIKE)
     await seller.send(msg)
-    first = await seller.next_reply()  # the proposal and its sales, in one message
-    assert len(sim.cards_of(first)) == 2
+    first = await seller.next_reply()  # the proposal, with its card
+    assert len(sim.cards_of(first)) == 1
+    sales = await seller.next_reply()  # then its sales, in a message of their own
+    assert len(sim.cards_of(sales)) == 1
     await seller.send(msg)
     again = await seller.next_reply()
     # The same words, but not the cards again: ASI:One showed resent cards twice.
@@ -427,6 +429,7 @@ async def test_a_session_start_with_a_photo_is_priced_in_one_message(market: sim
     # The answer offers uploads itself, rather than a second message doing it.
     uploads = [c for c in proposal.content if getattr(c, "metadata", None) == UPLOADS]
     assert len(uploads) == 1
+    assert "behind that price." in (await seller.next_reply()).text()  # then its sales
     await asyncio.sleep(0.2)
     assert seller.replies.empty()
 

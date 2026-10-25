@@ -239,7 +239,7 @@ def shown(msg: ChatMessage) -> str:
 
 
 # Messages the Market sends right after an answer, which ChatUser.exchange sets aside.
-FOLLOW_UPS = ("closest eBay sales behind that price",)
+FOLLOW_UPS = ("behind that price.",)  # the sales carousel after a proposal (chat.comps_text)
 
 
 def start(agents: list[Agent]) -> None:

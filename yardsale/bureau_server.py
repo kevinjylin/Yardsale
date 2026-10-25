@@ -1396,6 +1396,9 @@ async def main(mode: str) -> None:
 
 
 if __name__ == "__main__":
+    # `python -m` runs this file as __main__. Without this, a later `from yardsale import
+    # bureau_server` (priceCheck's) loads a second copy whose RUNTIME is None (seen October 25).
+    sys.modules.setdefault("yardsale.bureau_server", sys.modules[__name__])
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--offline", action="store_true", help="skip the Almanac and Agentverse")
     parser.add_argument("--check", action="store_true", help="print what live mode still needs")

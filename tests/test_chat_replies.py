@@ -126,9 +126,10 @@ async def test_signing_up_with_a_photo_is_one_message_per_turn(campus: None, sto
         assert [m.text() for m in asked] == [onboarding.ASK_FOR_EMAIL]
         assert [title(c) for c in cards_in(asked)] == ["Your school email"]
 
-        # Turn 3: signed up, and the photo's proposal with it, in one message.
+        # Turn 3: signed up, and the photo's proposal with it in one message, then its sales
+        # (ASI:One shows one card per message).
         joined = await turn(seller, tap({"action": "student_email", "email": "sam@ucr.edu"}))
-        assert len(joined) == 1
+        assert [len(sim.cards_of(message)) for message in joined] == [1, 1]
         text = joined[0].text()
         assert text.startswith("You're in, at UCR.")
         assert "\n\nHere's my suggested listing" in text  # its own paragraph, not run together
@@ -177,7 +178,7 @@ async def test_a_photo_still_pricing_at_sign_up_follows_once(
         assert [title(c) for c in cards_in(joined)] == ["Pricing your stuff"]
 
         release.set()
-        proposal = [await seller.next_reply()]
+        proposal = [await seller.next_reply(), await seller.next_reply()]  # then its sales
         await asyncio.sleep(SETTLE)
         assert seller.replies.empty()
         assert "suggested listing" in proposal[0].text()
@@ -191,10 +192,13 @@ async def test_a_photo_still_pricing_at_sign_up_follows_once(
 # --- Any seller ----------------------------------------------------------------------------------
 
 
-async def test_a_priced_photo_is_one_message_with_its_cards_once(market: sim.Market) -> None:
+async def test_a_priced_photo_sends_one_card_per_message(market: sim.Market) -> None:
+    """ASI:One keeps only the last card of a message: with the sales carousel in the proposal's
+    message, the Approve card never showed. So the sales follow in a message of their own."""
     seller = market.user("seller")
     answer = await turn(seller, sim.chat_message("sell this, at least $300", BOTTLE))
-    assert len(answer) == 1
+    assert [len(sim.cards_of(message)) for message in answer] == [1, 1]
+    assert "behind that price." in answer[1].text()
     found = cards_in(answer)
     assert [type(c.payload).__name__ for c in found] == ["CustomCardPayload", "CarouselCardPayload"]
     assert len(approve_buttons(found)) == 1  # the proposal card's, not the carousel's too
@@ -222,11 +226,13 @@ async def test_slow_pricing_sends_progress_then_the_result_without_it(
         assert [title(c) for c in sim.cards_of(working)] == ["Pricing your stuff"]
         release.set()
         done = await seller.next_reply()
+        sales = await seller.next_reply()  # the carousel, in a message of its own
         await asyncio.sleep(SETTLE)
         assert seller.replies.empty()
         assert "suggested listing" in done.text()
+        assert "behind that price." in sales.text()
         assert "Pricing your stuff" not in [title(c) for c in sim.cards_of(done)]
-        assert_each_card_once([working, done])
+        assert_each_card_once([working, done, sales])
 
 
 # --- The proposal's words -------------------------------------------------------------------------
@@ -255,10 +261,11 @@ def test_the_sales_line_agrees_with_the_cards_and_the_count() -> None:
         "The cards show the 6 closest of the 20 eBay sales behind that price."
     )
     reply = chat.proposal_reply(proposal)
-    (carousel,) = reply.extra
-    assert carousel.metadata["card_kind"] == "carousel"
-    assert reply.text.endswith(chat.comps_text(proposal))
-    assert reply.more == ()  # one message
+    # ASI:One shows one card per message, so the carousel follows in a message of its own.
+    ((text, carousel),) = reply.more
+    assert carousel is not None and carousel.metadata["card_kind"] == "carousel"
+    assert text == chat.comps_text(proposal)
+    assert reply.card is not None and reply.card.metadata["card_kind"] != "carousel"
 
 
 @pytest.mark.parametrize(

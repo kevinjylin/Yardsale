@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
   <title>How Yardsale's agents fit together</title>
-  <desc>Buyers and sellers reach Yardsale through the ASI:One chat, @yardsale on Fetch Business, or Craigslist email. All three go to the Yardsale Orchestrator, which runs checkout and hands each job to an agent, sending each request through that agent's Agentverse mailbox: the Identifier, Researcher, Market Scout, and Appraiser price a photo, and the Deal Finder scores listings on other sites. An item agent per approved listing haggles with buyers. For a Craigslist post the buyer picks, the orchestrator's email negotiator haggles with the seller by email, never above the buyer's max.</desc>
+  <desc>Buyers and sellers reach Yardsale through the ASI:One chat, @yardsale on Fetch Business, or Craigslist email. All three go to the Yardsale Orchestrator, which runs checkout and hands each job to an agent, sending each request through that agent's Agentverse mailbox: the Identifier, Researcher, Market Scout, and Appraiser price a photo, and the Deal Finder scores listings on other sites. The Appraiser prices from the Researcher's eBay sales; the Scout's live asking prices go to the orchestrator's market view, which sets the fair range and warns a seller whose price is far off. An item agent per approved listing haggles with buyers; the Shopper, the buyer agent, haggles with several at once when a buyer asks. ASI:One deals get a payment link; Craigslist buyers meet the seller and pay in person. For a Craigslist post the buyer picks, the orchestrator's email negotiator haggles with the seller by email, never above the buyer's max.</desc>
   <defs>
     <style>
       /*THEME*/:root {
@@ -90,12 +90,13 @@
   <text class="o-handle mono" x="84" y="287">@ys-orchestrator</text>
   <text class="o-body" x="84" y="317">Hands each job to an agent below · asi1-mini reads typed text · keeps state in SQLite</text>
 
-  <rect class="checkout" x="1196" y="230" width="332" height="92" rx="12"/>
-  <text class="c-title" x="1220" y="262">Checkout</text>
-  <rect class="chip-orch" x="1380" y="244" width="132" height="24" rx="12"/>
-  <text class="chip-orch-t" x="1446" y="261" text-anchor="middle">Stripe test mode</text>
-  <text class="c-body" x="1220" y="288">A payment link for each deal</text>
-  <text class="c-body" x="1220" y="310">5% commission · Payment Protocol</text>
+  <rect class="checkout" x="1196" y="224" width="332" height="106" rx="12"/>
+  <text class="c-title" x="1220" y="254">Checkout</text>
+  <rect class="chip-orch" x="1380" y="236" width="132" height="24" rx="12"/>
+  <text class="chip-orch-t" x="1446" y="253" text-anchor="middle">Stripe test mode</text>
+  <text class="c-body" x="1220" y="278">Payment link for ASI:One deals</text>
+  <text class="c-body" x="1220" y="298">5% commission · Payment Protocol</text>
+  <text class="c-body" x="1220" y="318">Craigslist buyers pay at a meetup</text>
 
   <!-- Orchestrator to each job; requests to the photo and deal agents go through Agentverse -->
   <path class="wire" d="M448 339 V407" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
@@ -115,7 +116,7 @@
   <text class="wire-label" x="1296" y="387" text-anchor="end">scored deals out</text>
 
   <!-- Sell: price a photo -->
-  <rect class="lane-sell" x="48" y="408" width="800" height="342" rx="18"/>
+  <rect class="lane-sell" x="48" y="408" width="800" height="360" rx="18"/>
   <text class="lane-t sell-t" x="72" y="442">Sell: price a photo</text>
   <text class="lane-note" x="824" y="442" text-anchor="end">Step 1, then both 2s at once, then 3</text>
 
@@ -161,26 +162,39 @@
 
   <path class="wire" d="M282 598 H302 V530 H320" marker-end="url(#arrow)"/>
   <path class="wire" d="M302 598 V666 H320" marker-end="url(#arrow)"/>
-  <path class="wire" d="M562 530 H582 V666 H562"/>
-  <path class="wire" d="M582 598 H600" marker-end="url(#arrow)"/>
+  <!-- The Appraiser gets only the Researcher's eBay sales; the Scout's asking prices go to the market view -->
+  <path class="wire" d="M562 530 H582 V598 H600" marker-end="url(#arrow)"/>
+  <path class="wire" d="M562 716 H600" marker-end="url(#arrow)"/>
+  <path class="wire" d="M713 659 V682" marker-end="url(#arrow)"/>
+
+  <rect class="card-dash" x="602" y="684" width="222" height="64" rx="12"/>
+  <text class="name" x="620" y="710">Market view</text>
+  <text class="desc" x="620" y="734">Fair range, price warning</text>
 
   <!-- Haggle: an agent per item -->
-  <rect class="lane-haggle" x="872" y="408" width="300" height="342" rx="18"/>
+  <rect class="lane-haggle" x="872" y="408" width="300" height="360" rx="18"/>
   <text class="lane-t haggle-t" x="896" y="442">Haggle: an agent per item</text>
 
-  <rect class="card" x="912" y="502" width="244" height="220" rx="12"/>
-  <rect class="card" x="904" y="494" width="244" height="220" rx="12"/>
-  <rect class="card" x="896" y="486" width="244" height="220" rx="12"/>
-  <text class="name" x="914" y="520">Item agents</text>
-  <text class="desc" x="914" y="548">One per approved listing</text>
-  <text class="desc" x="914" y="574">Knows the seller's floor,</text>
-  <text class="desc" x="914" y="596">never shows it</text>
-  <text class="desc" x="914" y="622">Haggles with every buyer:</text>
-  <text class="desc" x="914" y="644">ASI:One chat, Craigslist email</text>
-  <text class="note" x="914" y="680">On Agentverse or in our server</text>
+  <rect class="card" x="912" y="474" width="244" height="156" rx="12"/>
+  <rect class="card" x="904" y="466" width="244" height="156" rx="12"/>
+  <rect class="card" x="896" y="458" width="244" height="156" rx="12"/>
+  <text class="name" x="914" y="488">Item agents</text>
+  <text class="desc" x="914" y="514">Knows the seller's floor,</text>
+  <text class="desc" x="914" y="536">never shows it</text>
+  <text class="desc" x="914" y="562">Haggles with every buyer:</text>
+  <text class="desc" x="914" y="584">ASI:One chat, Craigslist email</text>
+  <text class="note" x="914" y="604">On Agentverse or in our server</text>
+
+  <path class="wire" d="M1018 651 V632" marker-end="url(#arrow)"/>
+
+  <rect class="card" x="896" y="652" width="244" height="104" rx="12"/>
+  <text class="name" x="914" y="682">Shopper</text>
+  <text class="handle mono" x="914" y="703">@ys-shopper</text>
+  <text class="desc" x="914" y="728">Haggles with many at once</text>
+  <text class="note" x="914" y="748">Only when a buyer asks</text>
 
   <!-- Buy: find deals, negotiate -->
-  <rect class="lane-buy" x="1196" y="408" width="356" height="342" rx="18"/>
+  <rect class="lane-buy" x="1196" y="408" width="356" height="360" rx="18"/>
   <text class="lane-t buy-t" x="1220" y="442">Buy: find deals, negotiate</text>
 
   <rect class="card" x="1220" y="460" width="308" height="138" rx="12"/>
@@ -201,15 +215,15 @@
   <text class="desc" x="1238" y="709">by email, never above the buyer's max</text>
 
   <!-- Legend -->
-  <rect class="card" x="48" y="790" width="34" height="24" rx="6"/>
-  <text class="legend" x="94" y="807">Agent with its own address</text>
-  <rect class="legend-dash" x="330" y="790" width="34" height="24" rx="6"/>
-  <text class="legend" x="376" y="807">Part of the orchestrator, not its own agent</text>
-  <rect class="chip" x="720" y="790" width="56" height="24" rx="12"/>
-  <text class="chip-t" x="748" y="807" text-anchor="middle">Apify</text>
-  <text class="legend" x="788" y="807">Outside service it calls</text>
-  <rect class="av" x="990" y="789" width="124" height="26" rx="13"/>
-  <text class="av-t" x="1052" y="807" text-anchor="middle">via Agentverse</text>
-  <text class="legend" x="1126" y="807">Request goes to the agent's mailbox</text>
-  <text class="foot" x="48" y="850">Claude reads photos. asi1-mini reads typed text. Suggested prices and deal scores come from code, not a model.</text>
+  <rect class="card" x="48" y="806" width="34" height="24" rx="6"/>
+  <text class="legend" x="94" y="823">Agent with its own address</text>
+  <rect class="legend-dash" x="330" y="806" width="34" height="24" rx="6"/>
+  <text class="legend" x="376" y="823">Part of the orchestrator, not its own agent</text>
+  <rect class="chip" x="720" y="806" width="56" height="24" rx="12"/>
+  <text class="chip-t" x="748" y="823" text-anchor="middle">Apify</text>
+  <text class="legend" x="788" y="823">Outside service it calls</text>
+  <rect class="av" x="990" y="805" width="124" height="26" rx="13"/>
+  <text class="av-t" x="1052" y="823" text-anchor="middle">via Agentverse</text>
+  <text class="legend" x="1126" y="823">Request goes to the agent's mailbox</text>
+  <text class="foot" x="48" y="866">Claude reads photos. asi1-mini reads typed text. Suggested prices and deal scores come from code, not a model.</text>
 </svg>

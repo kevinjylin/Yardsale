@@ -164,10 +164,12 @@ separate messages' text run together ("Got your photo…You're in…Here's my su
 listing"). The server had sent each card once, but several messages per turn: a proposal and
 then its eBay sales, an attachments-only message after the campus welcome, the photo's
 "still working" and proposal while the student was signing up, and every card again for a
-resent message. So an answer is now one message: its text, then its cards (a proposal's card,
-then the sales carousel), with no card twice for one message. Only slow work still sends two:
-"still working" with the progress card, then the result without it. Several photos and other
-sites' deals still follow as their own messages.
+resent message. So an answer is now one message with one card, and no card goes out twice in
+a turn. The exception is a proposal, whose sales carousel follows in a second message: ASI:One
+keeps only the last card of a message, so with both cards in one message the Approve card (and
+its price warning) never showed (seen October 25). Slow work also sends two: "still working"
+with the progress card, then the result without it. Several photos and other sites' deals
+still follow as their own messages.
 
 Seen in the real ASI:One app on October 25, before that fix and before the layout redesign: the
 campus cards, the email form, the proposal card, the sales carousel, and the menu.
@@ -197,6 +199,9 @@ JavaScript (its card schemas and its renderer) the same day. What it showed:
 - **A card the app rejects isn't shown at all**; the message's text still is. The app checks
   each card strictly (an unknown field fails it), which is why the tests check every card
   against `card_schema.py`.
+- **One card per message.** The app stores only the last card of a message (seen October 25,
+  in its `interactions` API): a proposal sent with its sales carousel showed the carousel and
+  no Approve card. Each message now carries at most one card.
 - **A tap sends a chat message**: `@<agent address>` followed by the button's selection as JSON,
   with the card's field values merged in. A link-only button opens the link in a new tab and
   sends nothing.
@@ -216,11 +221,12 @@ Code: [yardsale/chat.py](../yardsale/chat.py) and [yardsale/asione.py](../yardsa
    price, a note such as "size M", and for buyers a search and a budget. It uses a strict JSON
    schema. If ASI:One is down or `ASI_ONE_API_KEY` isn't set, a keyword reader
    (`read_locally`) does the same job more roughly.
-4. The photo goes through the pipeline below. The reply is a proposal, in one message: the
-   item, the asking and lowest prices and where each came from, the three closest eBay sales as
-   links under "Recent eBay sales:", what similar ones ask right now under "Listed for sale
-   now:" (never mixed with the sales), the proposal card with the only Approve button, and a
-   carousel of up to 6 of the sales behind the price ("the 6 closest of the 13 eBay sales").
+4. The photo goes through the pipeline below. The reply is a proposal: the item, the asking
+   and lowest prices and where each came from, the three closest eBay sales as links under
+   "Recent eBay sales:", what similar ones ask right now under "Listed for sale now:" (never
+   mixed with the sales), and the proposal card with the only Approve button. A second message
+   carries a carousel of up to 6 of the sales behind the price ("the 6 closest of the 13 eBay
+   sales").
    Nothing is listed yet.
 5. The seller replies `approve`, changes a price (`ask $360`, `lowest $280`), or `cancel`.
    [commands.py](../yardsale/commands.py) reads these with patterns, not a model, so a misread

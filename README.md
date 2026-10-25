@@ -51,13 +51,15 @@ and the pitch.
 
 ## Agents
 
-![The ASI:One chat, @yardsale on Fetch Business (finding deals, checking prices, starting a Craigslist negotiation), and Craigslist email all lead to the Yardsale Orchestrator, which runs checkout and hands each job to an agent, sending each request through that agent's Agentverse mailbox: the Identifier, Researcher, Market Scout, and Appraiser price a photo, and the Deal Finder scores listings on other sites. An item agent per approved listing haggles with buyers. For a Craigslist post the buyer picks, the orchestrator's email negotiator haggles with the seller by email, never above the buyer's max.](docs/architecture.png)
+![Yardsale's seven core agents: the Orchestrator coordinates the Identifier, Researcher, Market Scout, Appraiser, Deal Finder, and Shopper. Each approved listing gets an item agent; the Shopper negotiates with those item agents for buyers. Checkout and Craigslist email negotiation run inside the orchestrator.](docs/agent-structure.png)
+
+[Full-size diagram](docs/agent-structure.png) · [Editable SVG](docs/agent-structure.svg) · [Diagram sources and rendering](docs/agent-structure.md)
 
 Every request goes through the orchestrator, which hands each job to an agent. Requests to the
 photo agents and the Deal Finder go through each agent's Agentverse mailbox, as they would to an
 agent running elsewhere. Checkout and the email negotiator, which haggles with a Craigslist seller
-for a buyer, run inside the orchestrator, not as their own agents. The diagram leaves out the
-Shopper, the buyer agent in the table below.
+for a buyer, run inside the orchestrator, not as their own agents. The Shopper negotiates with
+Yardsale item agents when a buyer explicitly asks it to haggle.
 
 Yardsale was started during [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/), October 23–25,
 2026. These agents are Agentverse mailbox agents and run in one Bureau server:
