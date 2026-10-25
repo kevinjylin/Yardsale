@@ -3,37 +3,41 @@
 ![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)
 ![tag:hackathon](https://img.shields.io/badge/hackathon-5F43F1)
 
-Yardsale is two products built on Fetch.ai agents.
+Yardsale is two products built on Fetch.ai agents and market data from Apify.
 
 **For sellers.** Built for a student moving out right before finals, who can't answer 200 DMs
-while selling everything in their dorm. Take a photo of each thing and say your minimum ("sell
-this, at least $40"). Yardsale identifies it, prices it from recent eBay sales, and suggests a
-listing. Once you approve, the item gets its own agent that knows your minimum. The listing is
-on ASI:One and `@yardsale`, and Yardsale writes a Craigslist post for you to paste. The item's
-agent haggles with every buyer, in ASI:One or by email from the Craigslist post, and never goes
-below your minimum or shows it.
+while selling everything in their dorm. Take a photo of each thing (up to 8 in one message) and
+say your minimum ("sell this, at least $40"). Yardsale identifies each one, prices it from what
+it sold for on eBay and what it's asking nearby, tells you if your minimum is far off, and
+suggests a listing. Once you approve, the item gets its own agent that knows your minimum. The
+listing is on ASI:One and `@yardsale`, and Yardsale writes a Craigslist post for you to paste.
+The item's agent haggles with every buyer, in ASI:One or by email from the Craigslist post, and
+never goes below your minimum or shows it.
 
 **For buyers.** Say what you want and the most you'll pay, in ASI:One or to `@yardsale` on Fetch
-Business ("find me a hybrid bike, haggle for me, max $320"). Yardsale's buyer agent haggles with
-every matching item agent at once, over several rounds, without either side revealing its limit,
-and you pay through a link. When nothing on Yardsale matches, the deal finder searches eBay,
-Craigslist, and OfferUp for the best deals under your max, and can email a Craigslist seller for
-you and negotiate the price.
+Business ("find me a mini fridge, max $60"). Yardsale's listings come first. Then the deal finder
+searches eBay, Craigslist, OfferUp, and Facebook Marketplace through Apify Actors, scores each
+listing against what that item actually sells for, and lists the best under your max with why
+each is a deal. Pick a Craigslist post and the agent emails its seller and negotiates for you.
 
 Yardsale keeps a commission on the sales it collects payment for; the seller gets the rest.
 
 **Status:** prototype, built at Cal Hacks 13.0.
 
 - **Built and run live** (October 23–24): photos from the real ASI:One app priced with real
-  Claude and Apify keys; seller approval; item agents, some hosted on Agentverse; haggling and
-  buying from the ASI:One app, through ASI:One's planner (which found Yardsale without an
-  @mention), and through `@yardsale` on Fetch Business; and a Stripe test payment end to end.
-- **Built, tested only with fakes:** the item agent answering Craigslist buyers by email
-  ([Craigslist by email](#craigslist-by-email)).
-- **In progress:** several photos in one message; the deal finder in the chat and `@yardsale`
-  (the eBay and Craigslist searches through Apify are written, OfferUp isn't); and emailing
-  Craigslist sellers for a buyer.
-- **Also built, not on the main path:** listing on the seller's own eBay, waiting on eBay
+  Claude and Apify keys; seller approval; item agents, some hosted on Agentverse; `@yardsale`
+  on Fetch Business calling Yardsale's API; and a Stripe test payment end to end.
+- **Built, tested only with fakes:** several photos in one message; the item agent answering
+  Craigslist buyers by email ([Craigslist by email](#craigslist-by-email)); the deal finder in
+  the chat and `@yardsale` (eBay and Craigslist tried on real Actor results, OfferUp and
+  Facebook not yet run live); and emailing Craigslist sellers for a buyer
+  ([Negotiating with Craigslist sellers](#negotiating-with-craigslist-sellers)).
+- **In progress:** the Market Scout (live local asking prices in a seller's price), telling a
+  seller when their minimum is far off, deal scores against eBay sold prices, and a price check
+  tool for `@yardsale`.
+- **Also built, not on the main path:** agent-to-agent buying, where Yardsale's buyer agent
+  haggles with item agents in ASI:One and buys (run live October 24;
+  [How buying works](#how-buying-works)), and listing on the seller's own eBay, waiting on eBay
   developer keys ([Selling on the seller's own eBay](#selling-on-the-sellers-own-ebay)).
 
 Claude reads the photos and `asi1-mini` reads typed text; ASI:One finds and routes to the agents.
