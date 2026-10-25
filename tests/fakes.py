@@ -184,6 +184,31 @@ async def research(query: str, condition: str, max_results: int) -> list[Comp]:
     return [_comp(fake.key, n, *sale) for n, sale in enumerate(fake.sales)][:max_results]
 
 
+# What road bikes sold for, for the deal finder's market price: four whole bikes around $310,
+# plus an accessory, a parts listing, and a repair job that must not count.
+ROAD_BIKE_SALES: tuple[tuple[str, int, bool], ...] = (
+    ("Trek Domane AL 2 road bike 54cm", 320, False),
+    ("Giant Contend road bike", 280, False),
+    ("Specialized Allez road bike 56cm", 300, False),
+    ("Cannondale CAAD road bike", 340, False),
+    ("Road bike wheelset only", 90, False),
+    ("Road bike frame for parts", 60, False),
+    ("Fuji road bike, needs repair", 50, False),
+)
+
+
+def road_bike_comps() -> list[Comp]:
+    return [_comp("road-bike", n, *sale) for n, sale in enumerate(ROAD_BIKE_SALES)]
+
+
+async def research_with_comps(query: str, condition: str, max_results: int) -> list[Comp]:
+    """`research`, plus sold road bikes for any search that says "road bike", so the deal
+    finder has a market price to judge other sites' listings against."""
+    if "road bike" in query.lower():
+        return road_bike_comps()[:max_results]
+    return await research(query, condition, max_results)
+
+
 async def judge(
     item: ItemDetails, image_b64: str, media_type: str, comps: list[Comp]
 ) -> list[Judgement]:

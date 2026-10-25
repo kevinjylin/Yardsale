@@ -25,6 +25,7 @@ from yardsale.sources import (
     deduplicated,
     first_web_link,
     one_line,
+    photo_count,
     run_actor,
     web_link,
 )
@@ -73,6 +74,7 @@ def parse_listing(raw: Any) -> ExternalListing | None:
         condition=one_line(raw.get("conditionText") or details.get("conditionDisplayText"), 60),
         # Firm-priced posts say so; the rest take offers through OfferUp's own button.
         accepts_offers=raw.get("isFirmPrice") is not True,
+        photo_count=photo_count(details.get("photos") or image or raw.get("imageUrl")),
     )
 
 

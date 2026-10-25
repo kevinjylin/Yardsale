@@ -10,7 +10,10 @@ import logging
 
 import pytest
 
+from tests import fakes
 from yardsale.elsewhere import DealFinder, best, search_words
+from yardsale.models import Comp
+from yardsale.researcher import ResearchError
 from yardsale.sources import ExternalListing, Source, SourceError
 
 
@@ -183,8 +186,65 @@ async def test_off_without_sources_and_needs_words() -> None:
 
 
 async def test_the_log_never_has_the_search_or_the_max(caplog: pytest.LogCaptureFixture) -> None:
-    sources: dict[str, Source] = {"ebay": FakeSite([listing("zebra bike", 20000)])}
+    sources: dict[str, Source] = {"ebay": FakeSite([listing("zebra road bike", 20000)])}
     with caplog.at_level(logging.INFO):
-        await DealFinder(sources).find("zebra bike", 31337)
+        await DealFinder(sources, comps=fakes.research_with_comps).find("zebra road bike", 31337)
     assert caplog.records
     assert "zebra" not in caplog.text and "313" not in caplog.text
+
+
+# --- The market price ---------------------------------------------------------------------------
+
+
+class FakeComps:
+    def __init__(self, comps: list[Comp], fail: bool = False) -> None:
+        self.comps = comps
+        self.fail = fail
+        self.calls: list[tuple[str, str, int]] = []
+
+    async def __call__(self, query: str, condition: str, max_results: int) -> list[Comp]:
+        self.calls.append((query, condition, max_results))
+        if self.fail:
+            raise ResearchError("Apify returned 503 (fake outage)")
+        return self.comps
+
+
+async def test_comps_price_the_market_once_per_search_words() -> None:
+    comps = FakeComps(fakes.road_bike_comps())
+    site = FakeSite([listing("Trek road bike", 18000), listing("Road bike", 29000)])
+    clock = Clock()
+    finder = DealFinder({"craigslist": site}, comps=comps, clock=clock)
+
+    found = await finder.find("find me a road bike", 30000)
+    assert found.market is not None and found.typical_cents == 31000
+    assert [d.versus_market_pct for d in found.deals] == [42, 6]
+    assert found.deals[0].why.startswith("42% under the $310 typical sold price")
+    assert comps.calls == [("road bike", "any", 20)]
+
+    await finder.find("road bike", 25000)  # another budget: another site search, same comps
+    assert len(site.calls) == 2 and len(comps.calls) == 1
+    await finder.find("hybrid bike", None)  # other words: other comps
+    assert len(comps.calls) == 2
+
+    clock.now += 601
+    await finder.find("road bike", 30000)
+    assert len(comps.calls) == 3
+
+
+async def test_without_comps_or_when_they_fail_the_search_still_answers() -> None:
+    site = FakeSite([listing("Trek road bike", 18000), listing("Giant road bike", 22000)])
+    plain = await DealFinder({"craigslist": site}).find("road bike", None)
+    assert plain.market is None and "no eBay sold-listings search" in plain.comps_note
+    assert [x.title for x in plain.listings] == ["Trek road bike", "Giant road bike"]
+
+    down = FakeComps([], fail=True)
+    finder = DealFinder({"craigslist": site}, comps=down)
+    failed = await finder.find("road bike", None)
+    assert failed.market is None and failed.comps_note == "the eBay sold-listings search failed"
+    assert len(failed.deals) == 2
+    await finder.find("road bike", 25000)  # a failed comps search is tried again
+    assert len(down.calls) == 2
+
+    nothing = FakeComps([])
+    none = await DealFinder({"craigslist": site}, comps=nothing).find("road bike", None)
+    assert none.market is None and none.comps_note == "no recent eBay sales matched the search"
