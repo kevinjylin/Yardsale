@@ -24,7 +24,7 @@ from typing import Any
 
 import aiohttp
 
-from yardsale.meetup import Spot
+from yardsale.meetup import Spot, metres_between
 
 log = logging.getLogger("yardsale.campus")
 
@@ -32,7 +32,13 @@ OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 FETCH_TIMEOUT = 180.0  # Overpass queues queries under load
 GEOCODE_TIMEOUT = 30.0
-SEARCH_RADIUS_M = 2500  # around the campus centre: big enough for a spread-out university
+# Around the campus centre. Generous, because a geocoded centre can sit a kilometre or two off
+# the main campus, and students meet at cafes just off it anyway.
+SEARCH_RADIUS_M = 3000
+# Anything further than this from the centre isn't this campus, whatever the map service says.
+# A second line of defence: the query is already scoped by distance, and this catches a bad
+# centre or a service that ignores the scope.
+MAX_PLACE_DISTANCE_M = 4000.0
 # Both services ask callers to say who they are, so they can tell traffic apart.
 USER_AGENT = "Yardsale/0.1 (campus meetup points)"
 
@@ -49,16 +55,19 @@ KIND_TAGS: tuple[tuple[str, str, str], ...] = (
     ("amenity", "bench", "bench"),
 )
 
-# One query for a campus: the university's own area, its dorms, and public places near it.
+# One query for a campus, scoped by distance from its centre and nothing else.
+#
+# An earlier version scoped by `area[name~"...",i][amenity=university]`. Don't: Nominatim
+# resolves "berkeley.edu" to the generic "University of California", and that regex then matched
+# every UC campus in the state. A real run came back with dorms in Berkeley and cafes in San
+# Diego, 700 km apart. Names are ambiguous across a university system; coordinates aren't.
 QUERY = """
 [out:json][timeout:120];
-area[name~"{name}",i][amenity=university]->.campus;
 (
-  nwr(area.campus)["building"="dormitory"];
-  nwr(area.campus)["amenity"~"^(cafe|library|food_court|community_centre)$"];
-  nwr(area.campus)["leisure"="park"];
-  nwr(area.campus)["place"="square"];
-  nwr(around:{radius},{lat},{lon})["amenity"~"^(cafe|library|food_court)$"];
+  nwr(around:{radius},{lat},{lon})["building"="dormitory"];
+  nwr(around:{radius},{lat},{lon})["amenity"~"^(cafe|library|food_court|community_centre)$"];
+  nwr(around:{radius},{lat},{lon})["leisure"="park"];
+  nwr(around:{radius},{lat},{lon})["place"="square"];
 );
 out center tags;
 """
@@ -166,6 +175,18 @@ async def fetch_from_overpass(name: str, latitude: float, longitude: float) -> l
     return elements
 
 
+def near(
+    spots: list[Spot],
+    latitude: float,
+    longitude: float,
+    limit_m: float = MAX_PLACE_DISTANCE_M,
+) -> list[Spot]:
+    """Only the places actually on this campus. Guards against a map service answering with
+    another campus of the same university, which is what a loose name match once did."""
+    centre = Spot(name="centre", latitude=latitude, longitude=longitude)
+    return [spot for spot in spots if metres_between(centre, spot) <= limit_m]
+
+
 async def geocode_school(school: str) -> tuple[str, float, float] | None:
     """A school key -> its official name and campus centre, from Nominatim.
 
@@ -228,7 +249,13 @@ async def load(
 ) -> list[Spot]:
     """Fetch one campus and log what came back. Callers cache the result; this doesn't."""
     elements = await fetch(name, latitude, longitude)
-    spots = parse_campus(elements)
+    found = parse_campus(elements)
+    spots = near(found, latitude, longitude)
+    if len(spots) < len(found):
+        log.warning(
+            f"{school}: dropped {len(found) - len(spots)} place(s) further than "
+            f"{MAX_PLACE_DISTANCE_M:.0f} m from the campus centre"
+        )
     dorms = sum(1 for s in spots if s.kind == "dormitory")
     log.info(f"{school}: {len(spots)} places on campus ({dorms} dorms) from {len(elements)} tags")
     if not spots:

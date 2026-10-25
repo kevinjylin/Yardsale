@@ -530,3 +530,37 @@ async def test_only_schools_with_a_verified_student_are_warmed(db: Store) -> Non
     students.begin(db, BOB, "bob@mit.edu")  # never confirmed
     await students.warm_known_campuses(db, find)
     assert asked == ["stanford.edu"]
+
+
+# --- The wrong-campus bug -------------------------------------------------------------------
+
+
+def test_places_on_another_campus_are_dropped() -> None:
+    """A real run once came back with Berkeley dorms and San Diego cafes, because the query
+    scoped by name and "University of California" matches every UC campus. Coordinates decide
+    now, and this is the second line of defence."""
+    berkeley_lat, berkeley_lon = 37.8719, -122.2585
+    mixed = [
+        Spot("Caffe Strada", 37.8691, -122.2549, "cafe"),  # Berkeley
+        Spot("Fairbanks", 32.8765, -117.2370, "cafe"),  # UC San Diego, 700 km away
+        Spot("Rupert Costo Library", 33.9725, -117.3273, "library"),  # UC Riverside
+    ]
+    kept = campus.near(mixed, berkeley_lat, berkeley_lon)
+    assert [s.name for s in kept] == ["Caffe Strada"]
+
+
+async def test_load_drops_places_from_another_campus() -> None:
+    async def mixed(name: str, latitude: float, longitude: float):
+        return [
+            OSM_CAFE,  # Berkeley
+            {
+                "type": "node",
+                "id": 999,
+                "lat": 32.8765,
+                "lon": -117.2370,
+                "tags": {"amenity": "cafe", "name": "Fairbanks"},
+            },
+        ]
+
+    spots = await campus.load("berkeley.edu", "Berkeley", 37.8719, -122.2585, mixed)
+    assert [s.name for s in spots] == ["Free Speech Movement Cafe"]
