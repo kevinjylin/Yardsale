@@ -268,6 +268,36 @@ each is a good deal. Yardsale's own listings still come first when they match.
   What each site gives: Craigslist a photo count (`imageCount`) and a date but no condition;
   eBay a condition and seller rating but no date; Facebook search results only a primary photo
   (condition and date need its paid per-listing details). Unknown signals score as unknown.
+- **Search fixes, October 24 evening** (after "no listings found" for a water bottle, and no
+  Jordans). Checked against 20 live runs, recorded and re-ranked offline:
+  - *Query.* Every number used to be dropped, so "air jordan 4 retro" searched "air jordan
+    retro" and showed Jordan 11s and 12s; model numbers now stay. A place in the message ("in
+    Berkeley", "near 94704", "sf") is read by [places.py](../yardsale/places.py) and taken out
+    of the words instead of being searched for. Sizes, measurements, years, and style codes
+    ("size 10", "32 oz", "FV5029-141") are left out of what the sites get (Craigslist found
+    nothing for the Identifier's full Jordan query) and count as soft words in the score.
+  - *Place.* Every place becomes a ZIP code (`FindDeals.zip`, `?zip=` on `searchOtherSites`).
+    Craigslist then searches within `YARDSALE_CRAIGSLIST_MILES` (10) of it with a search URL
+    (checked live: a 5-mile search around 94704 returned only East Bay posts), OfferUp around
+    it, and Facebook in its city. Without one, `YARDSALE_ZIP`, else each site's default
+    (sfbay, 94103). The reply says where: "Local sites searched around Berkeley (94704)".
+  - *Fit.* A title says a word through a synonym ("Hydro Flask" is a water bottle), a compound
+    ("minifridge"), or "4's" for "4". "box", "only", "light", and "seat" no longer make a whole
+    item an accessory ("new in box", "light blue"); bike parts count only in a bike search; an
+    accessory word after "with" or "+" is an extra. Two posts with the same title and price in
+    different towns are two items (OfferUp's "Air Jordan 4 Retro" posts at the same price in
+    Hayward and American Canyon had been cut to one, and two $60 "Mini Fridge" posts too). When nothing fits, the closest are shown and flagged `loose_match`.
+  - *Parsing.* Craigslist's `images` arrives as a string ("['https://...']"), which hid every
+    photo; it's read back as a list. Its `location` was another post's in about half the
+    results, so the town comes from the post's slug. A post the actor gave no link (6 of 10 in
+    one search) gets a Craigslist search link for its title instead of being dropped.
+  - *Failures.* `SourceError.kind` says why a site failed: timeout, blocked (only error items,
+    or an empty dataset whose run says its page loads failed), busy (Apify's 5-runs-at-once
+    limit on the free plan, hit live by a probe; retried twice first), credit, setup, or error.
+    `Found.sites` (and `DealsFound.sites`) has each site's outcome: ok with listing and fit
+    counts, empty, or failed with the reason. The chat says "I didn't find" only of sites that
+    answered, names each failed site with why, and when every site failed says it couldn't
+    search; the API's `searchOtherSites` returns `sites`, `place`, and `status: "failed"`.
 - `watch for it` turns the last search (or `watch for a road bike under $300`) into a standing
   search that polls every 6 hours for a week. The Market can't message a chat later, so any
   reply mentions new finds, and `my watches` shows them (then they count as told). `stop

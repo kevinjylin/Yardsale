@@ -1,0 +1,288 @@
+{
+ "_note": "Recorded from the live actors on October 24, 2026 (search results only, no seller details): Craigslist 'water bottle' in sfbay, OfferUp and eBay 'air jordan 4 retro'.",
+ "craigslist_water_bottle": [
+  {
+   "id": "20581048",
+   "title": "Full Size Black Canvas Backpack Water Bottle Pouch",
+   "price": "$10",
+   "priceValue": 10,
+   "category": "sss",
+   "location": "San Francisco",
+   "latitude": 37.756,
+   "longitude": -122.4242,
+   "postedDate": "2026-10-25T06:11:08.000Z",
+   "slug": "san-francisco-full-size-black-canvas",
+   "images": [
+    "https://images.craigslist.org/00I0I_1PyW4LrQSLm_0t20CI_600x450.jpg"
+   ],
+   "imageCount": 1,
+   "url": "https://www.craigslist.org/view/d/san-francisco-full-size-black-canvas/wV4bDz7a9RnsnLr2S1tDot",
+   "source": "sfbay.craigslist.org"
+  },
+  {
+   "id": "30780829",
+   "title": "UNIQLO GRADIENT WATER BOTTLE",
+   "price": "$20",
+   "priceValue": 20,
+   "category": "sss",
+   "location": "Alameda",
+   "latitude": 37.7621,
+   "longitude": -122.2516,
+   "postedDate": "2026-10-25T01:50:04.000Z",
+   "slug": "alameda-uniqlo-gradient-water-bottle",
+   "images": [
+    "https://images.craigslist.org/01212_kbxMftlaRaQ_0t20CI_600x450.jpg",
+    "https://images.craigslist.org/00N0N_6ZGdYIDX3bl_0t20CI_600x450.jpg",
+    "https://images.craigslist.org/00909_2RUzYpSuqqb_0t20CI_600x450.jpg"
+   ],
+   "imageCount": 3,
+   "url": "https://www.craigslist.org/view/d/alameda-uniqlo-gradient-water-bottle/14MsGnpkNvYpdo951SbcEX",
+   "source": "sfbay.craigslist.org"
+  },
+  {
+   "id": "58941250",
+   "title": "DYLN Stainless Steel Hydrogen Water Bottle (NEW)",
+   "price": "$25",
+   "priceValue": 25,
+   "category": "sss",
+   "location": "San Francisco",
+   "latitude": 37.7303,
+   "longitude": -122.4663,
+   "postedDate": "2026-10-25T00:51:42.000Z",
+   "slug": "san-francisco-dyln-stainless-steel",
+   "images": [
+    "https://images.craigslist.org/00p0p_LscwWz8Itu_0d00oc_600x450.jpg"
+   ],
+   "imageCount": 1,
+   "url": "https://www.craigslist.org/view/d/san-francisco-dyln-stainless-steel/rLLLy9zgfSfoxNNkkGRLNh",
+   "source": "sfbay.craigslist.org"
+  },
+  {
+   "id": "10305669",
+   "title": "Pokemon water bottle - magicarp",
+   "price": "$20",
+   "priceValue": 20,
+   "category": "sss",
+   "location": "Alameda",
+   "latitude": 38.4089,
+   "longitude": -122.7339,
+   "postedDate": "2026-10-25T00:26:39.000Z",
+   "slug": "santa-rosa-pokemon-water-bottle-magicarp",
+   "images": [
+    "https://images.craigslist.org/00L0L_ZegNZ8E1bR_0t20CI_600x450.jpg",
+    "https://images.craigslist.org/00202_dCCgRl7NfLq_0t20CI_600x450.jpg"
+   ],
+   "imageCount": 2,
+   "url": "https://www.craigslist.org/view/d/santa-rosa-pokemon-water-bottle-magicarp/n8NMBpeZPqyahhdsCjozAY",
+   "source": "sfbay.craigslist.org"
+  },
+  {
+   "id": "58861090",
+   "title": "Nice Arrowhead spring water glass bottle",
+   "price": "$30",
+   "priceValue": 30,
+   "category": "sss",
+   "location": "west portal / forest hill",
+   "latitude": 37.0089,
+   "longitude": -121.9849,
+   "postedDate": "2026-10-24T21:42:21.000Z",
+   "slug": "santa-cruz-nice-arrowhead-spring-water",
+   "images": [
+    "https://images.craigslist.org/01616_lXg6paL4xOX_0t20CI_600x450.jpg",
+    "https://images.craigslist.org/00W0W_8wlj4oln0oj_0CI0t2_600x450.jpg"
+   ],
+   "imageCount": 2,
+   "url": "https://www.craigslist.org/view/d/santa-cruz-nice-arrowhead-spring-water/hTjNPeywL5cEEtX9qRd5F5",
+   "source": "sfbay.craigslist.org"
+  }
+ ],
+ "offerup_air_jordan_4_retro": [
+  {
+   "__typename": "ModularFeedListing",
+   "conditionText": null,
+   "flags": [
+    "LOCAL_PICKUP"
+   ],
+   "formattedOriginalPrice": null,
+   "formattedPrice": "$150",
+   "image": {
+    "height": 444,
+    "url": "https://images.offerup.com/Wyce2EOWUVd-LY_H68cwgf16p9g=/250x444/8bc2/8bc250fce7c743a192590a028b424ffe.jpg",
+    "width": 250,
+    "__typename": "ModularFeedImage"
+   },
+   "isFirmPrice": null,
+   "listingId": "02ce6f03-180f-3279-9af9-e1b049dbcecc",
+   "locationName": "Hayward, CA",
+   "price": "150",
+   "priceDropPercentage": null,
+   "title": "Military black jordan 4’s",
+   "url": "https://offerup.com/item/detail/02ce6f03-180f-3279-9af9-e1b049dbcecc",
+   "vehicleMiles": null
+  },
+  {
+   "__typename": "ModularFeedListing",
+   "conditionText": null,
+   "flags": [
+    "LOCAL_PICKUP"
+   ],
+   "formattedOriginalPrice": null,
+   "formattedPrice": "$150",
+   "image": {
+    "height": 444,
+    "url": "https://images.offerup.com/ZBjgjJLHYbCemlx5PgEZNCu26oQ=/250x444/851d/851d1521e5734ffd949ac3511d532f44.jpg",
+    "width": 250,
+    "__typename": "ModularFeedImage"
+   },
+   "isFirmPrice": null,
+   "listingId": "f6c50f05-b1f7-3206-b519-497b812149f7",
+   "locationName": "Vallejo, CA",
+   "price": "150",
+   "priceDropPercentage": null,
+   "title": "Jordan 4's",
+   "url": "https://offerup.com/item/detail/f6c50f05-b1f7-3206-b519-497b812149f7",
+   "vehicleMiles": null
+  },
+  {
+   "__typename": "ModularFeedListing",
+   "conditionText": null,
+   "flags": [
+    "LOCAL_PICKUP"
+   ],
+   "formattedOriginalPrice": "$120",
+   "formattedPrice": "$100",
+   "image": {
+    "height": 333,
+    "url": "https://images.offerup.com/REja3podUP0cvYDN5alNiatMTjM=/250x333/5e67/5e672d3487ca43c885f4e3131ed9e0b2.jpg",
+    "width": 250,
+    "__typename": "ModularFeedImage"
+   },
+   "isFirmPrice": null,
+   "listingId": "b2ad5e54-a53b-347b-b3b5-1d9c8d7f6b80",
+   "locationName": "American Canyon, CA",
+   "price": "100",
+   "priceDropPercentage": null,
+   "title": "Air Jordan 4 Retro \"Lightning\"",
+   "url": "https://offerup.com/item/detail/b2ad5e54-a53b-347b-b3b5-1d9c8d7f6b80",
+   "vehicleMiles": null
+  },
+  {
+   "__typename": "ModularFeedListing",
+   "conditionText": null,
+   "flags": [
+    "LOCAL_PICKUP"
+   ],
+   "formattedOriginalPrice": null,
+   "formattedPrice": "$100",
+   "image": {
+    "height": 333,
+    "url": "https://images.offerup.com/oKNKBqqEWOHUDg7gh990ZOs96Gk=/250x333/59e2/59e237f9fd9a40bc8452d149e88792e6.jpg",
+    "width": 250,
+    "__typename": "ModularFeedImage"
+   },
+   "isFirmPrice": null,
+   "listingId": "f0a70f71-50e0-3474-95d1-ec4f6c5d69e2",
+   "locationName": "Hayward, CA",
+   "price": "100.00",
+   "priceDropPercentage": null,
+   "title": "Air Jordan 4 retro",
+   "url": "https://offerup.com/item/detail/f0a70f71-50e0-3474-95d1-ec4f6c5d69e2",
+   "vehicleMiles": null
+  }
+ ],
+ "ebay_air_jordan_4_retro": [
+  {
+   "itemId": "800835047292",
+   "title": "Jordan Air Jordan 4 Retro Toro Bravo Fire Red/White Men's US 6 308497-603",
+   "url": "https://www.ebay.com/itm/800835047292",
+   "price": 65,
+   "priceMax": null,
+   "priceText": "$65.00",
+   "currency": "USD",
+   "buyItNowPrice": null,
+   "originalPriceText": null,
+   "shippingText": "Free delivery",
+   "shippingCost": 0,
+   "condition": "Pre-Owned",
+   "listingType": "buy_it_now",
+   "bestOffer": true,
+   "bids": null,
+   "timeLeft": null,
+   "endsText": null,
+   "locationText": "United States",
+   "soldCount": null,
+   "watchers": null,
+   "sellerFeedbackPercent": null,
+   "sellerFeedbackCount": 0,
+   "isSponsored": false,
+   "fewerWordsMatch": false,
+   "imageUrl": "https://i.ebayimg.com/images/g/IuEAAeSwA6hq3Wc-/s-l500.webp",
+   "site": "ebay.com",
+   "search": "air jordan 4 retro (ebay.com)",
+   "page": 1,
+   "position": 1
+  },
+  {
+   "itemId": "287677072767",
+   "title": "Jordan Air Jordan 4 Men's Size 10 Black/Gray/White Mid Top Basketball",
+   "url": "https://www.ebay.com/itm/287677072767",
+   "price": 200,
+   "priceMax": null,
+   "priceText": "$200.00",
+   "currency": "USD",
+   "buyItNowPrice": null,
+   "originalPriceText": null,
+   "shippingText": "+$14.95 delivery",
+   "shippingCost": 14.95,
+   "condition": "Brand New",
+   "listingType": "buy_it_now",
+   "bestOffer": true,
+   "bids": null,
+   "timeLeft": null,
+   "endsText": null,
+   "locationText": "United States",
+   "soldCount": null,
+   "watchers": null,
+   "sellerFeedbackPercent": 0,
+   "sellerFeedbackCount": 295,
+   "isSponsored": false,
+   "fewerWordsMatch": false,
+   "imageUrl": "https://i.ebayimg.com/images/g/1xEAAeSwGwBq3Xvc/s-l140.webp",
+   "site": "ebay.com",
+   "search": "air jordan 4 retro (ebay.com)",
+   "page": 1,
+   "position": 5
+  },
+  {
+   "itemId": "820272032781",
+   "title": "Jordan Air Jordan 4Mid Top Leather Sneakers Black/White Men’s 9.5 NIB",
+   "url": "https://www.ebay.com/itm/820272032781",
+   "price": 70,
+   "priceMax": null,
+   "priceText": "$70.00",
+   "currency": "USD",
+   "buyItNowPrice": null,
+   "originalPriceText": null,
+   "shippingText": "+$11.26 delivery",
+   "shippingCost": 11.26,
+   "condition": "Brand New",
+   "listingType": "buy_it_now",
+   "bestOffer": true,
+   "bids": null,
+   "timeLeft": null,
+   "endsText": null,
+   "locationText": "United States",
+   "soldCount": null,
+   "watchers": null,
+   "sellerFeedbackPercent": null,
+   "sellerFeedbackCount": 0,
+   "isSponsored": false,
+   "fewerWordsMatch": false,
+   "imageUrl": "https://i.ebayimg.com/images/g/pg8AAeSw9~pq3DoN/s-l140.webp",
+   "site": "ebay.com",
+   "search": "air jordan 4 retro (ebay.com)",
+   "page": 1,
+   "position": 6
+  }
+ ]
+}

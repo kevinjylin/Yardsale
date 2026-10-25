@@ -431,6 +431,18 @@ class FoundDeal(Model):
     flags: list[str] = []  # noqa: RUF012
 
 
+class SiteOutcome(Model):
+    """How one site's search went (elsewhere.SiteResult): "ok" with `raw` listings, `kept` of
+    them fitting; "empty", it answered with none; "failed", with `reason` (timeout, blocked,
+    busy, credit, setup, error). A failed site never counts as having nothing."""
+
+    source: str
+    status: str
+    raw: int = 0
+    kept: int = 0
+    reason: str = ""
+
+
 class DealsFound(Model):
     """Deal Finder -> Market: the top deals, best first, with the market price they're judged
     against. typical_cents is None when no recent eBay sales matched the search."""
@@ -445,3 +457,5 @@ class DealsFound(Model):
     typical_cents: int | None = None  # the median of matching eBay sales in the last 90 days
     comps_used: int = 0  # how many sales that median is from
     comps_note: str = ""  # why there's no market price, when there isn't
+    sites: list[SiteOutcome] = []  # noqa: RUF012  # per site, in the order searched
+    place: str = ""  # where the local sites searched: "Berkeley (94704)", "the SF Bay Area"

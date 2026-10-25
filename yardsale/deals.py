@@ -27,7 +27,10 @@ Each listing's score adds up, in this order of weight:
    seller's rating when the site gives one, a title with enough words to tell what it is, and
    how recently it was posted.
 3. Fit: each search word the title lacks costs MISSING_WORD. A title missing more than half the
-   words is dropped before scoring.
+   words is dropped before scoring, unless nothing fits better (then the closest are kept,
+   flagged "loose_match"). A title "says" a word through a synonym ("flask" for "water
+   bottle"), a compound ("minifridge"), or "4's" for "4" (has_term). Sizes and measurements
+   ("size 10", "32 oz") are soft: each one a title doesn't say costs SOFT_MISSING, never a drop.
 
 "Parts", "for repair", "broken", "lot", "frame only" and the like cost RED_FLAG, and parts of or
 add-ons for the thing ("road bike helmet" or "road bike brake levers" for "road bike") cost
@@ -41,6 +44,7 @@ dropped, keeping the better-scored one.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from fractions import Fraction
@@ -82,16 +86,82 @@ RED_FLAG_PHRASES = ("frame only", "box only", "for parts", "parts only", "not wo
 # Words that make a listing a part of or an add-on for the thing, unless the buyer asked for them.
 # A road bike search on October 24 ranked "Road Bike Brake Levers" third, so bike parts are
 # spelled out.
+#
+# "box", "only", "light", and "seat" used to be here too, and they sank whole items: "Jordan 4
+# Retro ... new in box", "worn only once", "light blue water bottle", "3 seat sofa".
+# The bike words are now accessories only in a bike search, and "box only" and the like are
+# RED_FLAG phrases. An accessory word right after "with", "w/", "includes", "+" ... names
+# something that comes with the thing ("iPhone 13 with case"), so it doesn't count either.
 ACCESSORIES = {
     # anything
-    "case", "cover", "charger", "cable", "cord", "remote", "manual", "box", "mount", "bracket",
+    "case", "cover", "charger", "cable", "cord", "remote", "manual", "mount", "bracket",
     "rack", "bag", "strap", "sticker", "decal", "replacement", "adapter", "skin", "protector",
-    "stand", "kit", "only", "cushion", "leg", "light", "helmet",
-    # bikes
+    "stand", "kit", "cushion", "leg", "helmet", "lid", "cap", "straw", "sleeve", "holder", "pouch",
+    "carrier", "insert", "cage", "lace", "insole",
+}  # fmt: skip
+# Parts of a bike, which are accessories only when the buyer is shopping for a bike. A road bike
+# search on October 24 ranked "Road Bike Brake Levers" third.
+BIKE_PARTS = {
     "tire", "tyre", "tube", "wheel", "wheelset", "pedal", "saddle", "seat", "stem", "handlebar",
     "fork", "derailleur", "crank", "crankset", "cassette", "shifter", "lever", "brake",
-    "groupset", "frameset",
+    "groupset", "frameset", "light",
 }  # fmt: skip
+BIKE_WORDS = {"bike", "bicycle", "ebike", "cycle", "cycling"}
+# Words just before an accessory word that make it an extra, not the thing for sale.
+WITH_WORDS = {
+    "with", "w", "includes", "including", "incl", "plus", "comes", "extra", "bonus", "free",
+    "original", "og", "and",
+}  # fmt: skip
+# "<part> only" means that's all there is.
+_ONLY = re.compile(
+    r"\b(?:box|case|lid|cap|legs?|shell|top|base|frame|cover|stand|charger|remote|controller|"
+    r"straps?|parts?|boots?|sleeve|cushions?|mattress|tank)\s+only\b"
+)
+# Search words that mean the same thing in a listing's title. Both sides go through words(),
+# which drops a plural s. A water bottle search on October 24 had nothing to say about "Hydro
+# Flask Standard Mouth" or "ThermoFlask Blue Insulated", which are water bottles.
+SYNONYMS: dict[str, frozenset[str]] = {
+    "fridge": frozenset({"refrigerator", "minifridge", "fridgerator"}),
+    "refrigerator": frozenset({"fridge", "minifridge"}),
+    "mini": frozenset({"compact", "minifridge", "dorm"}),
+    "bottle": frozenset({"flask", "hydroflask", "thermoflask", "tumbler", "canteen", "nalgene"}),
+    "bike": frozenset({"bicycle"}),
+    "bicycle": frozenset({"bike"}),
+    "couch": frozenset({"sofa", "loveseat", "sectional"}),
+    "sofa": frozenset({"couch", "loveseat", "sectional"}),
+    "tv": frozenset({"television"}),
+    "television": frozenset({"tv"}),
+    "sneaker": frozenset({"shoe", "trainer"}),
+    "shoe": frozenset({"sneaker", "trainer"}),
+    "headphone": frozenset({"headset", "earbud", "earphone"}),
+    "laptop": frozenset({"macbook", "chromebook", "thinkpad"}),
+    "jordan": frozenset({"aj", "jordans"}),
+    "4": frozenset({"iv"}),
+    "3": frozenset({"iii"}),
+    "11": frozenset({"xi"}),
+    "12": frozenset({"xii"}),
+}
+# A search word that a synonym of another word already says: a flask is a water bottle.
+IMPLIED: dict[str, frozenset[str]] = {
+    "water": frozenset({"flask", "hydroflask", "thermoflask", "nalgene", "canteen"}),
+}
+# The sizes and measurements in a search ("size 10", "32 oz", "128gb"). The sites are searched
+# without them, since titles word them every way ("Sz 10", "32oz", "10M"), and a title that
+# doesn't say them costs SOFT_MISSING instead of being dropped.
+_SIZE = re.compile(
+    r"\b(?:size|sz|us|mens|men|womens|women|youth|kids|gs)\s*(\d{1,2}(?:\.5)?)\b(?!\s*(?:oz|gb))"
+)
+_UNITS = (
+    "oz", "ounce", "gb", "tb", "inch", "in", "ft", "feet", "l", "liter", "litre", "ml", "cm",
+    "mm", "lb", "lbs", "qt", "quart", "gal", "gallon", "cu", "w", "mah",
+)  # fmt: skip
+_MEASURE = re.compile(r"\b(\d+(?:\.\d+)?)\s*(" + "|".join(_UNITS) + r")s?\b")
+# Style codes and part numbers ("FV5029-141", "308497-603") and years: right for eBay's exact
+# search, but a classified ad rarely carries them, and Craigslist found nothing for "Air Jordan
+# 4 Military Blue 2024 FV5029-141" on October 24.
+_CODE = re.compile(r"\b(?:[a-z]{1,3}\d{4,}-\d{1,4}|\d{6}-\d{3}|\d{6,})\b")
+_YEAR = re.compile(r"\b(?:19[5-9]\d|20[0-4]\d)\b")
+SOFT_MISSING = 8  # per size or measurement the title doesn't say
 # How the sites word condition, best first, with the points each is worth.
 CONDITIONS: tuple[tuple[str, int], ...] = (
     ("like new", 6),
@@ -133,14 +203,101 @@ class ScoredDeal:
     flags: tuple[str, ...] = field(default=())  # parts | accessory | missing_words | far_under
 
 
-def search_terms(query: str) -> list[str]:
-    """The words of a search worth matching titles on: no filler, no amounts, no "under"."""
-    kept = []
-    for w in words(query):
-        if w in STOPWORDS or w in CHEAP or w in BUDGET_WORDS or w.isdigit() or w in kept:
+_AMOUNTS = re.compile(
+    r"\b(?:under|below|max(?:imum)?|budget(?:\s+of)?|up\s+to|at\s+most|less\s+than|"
+    r"no\s+more\s+than)\s*\$?\s?\d[\d,]*(?:\.\d+)?\b|\$\s?\d[\d,]*(?:\.\d+)?|"
+    r"\b\d[\d,]*(?:\.\d+)?\s*(?:dollars|bucks|usd)\b"
+)
+_UNIT_NAMES = {
+    "ounce": "oz", "inch": "in", "feet": "ft", "liter": "l", "litre": "l", "lbs": "lb",
+    "quart": "qt", "gallon": "gal",
+}  # fmt: skip
+
+
+def norm(word: str) -> str:
+    """One title or search word, compared form: "4s" (as in "Jordan 4's") is "4"."""
+    return word[:-1] if len(word) > 1 and word[:-1].isdigit() and word.endswith("s") else word
+
+
+def _measures(text: str) -> list[str]:
+    """ "32 oz" and "32oz" -> "32oz"; every measurement in the text, in one spelling."""
+    return [
+        f"{found.group(1)}{_UNIT_NAMES.get(found.group(2), found.group(2))}"
+        for found in _MEASURE.finditer(text)
+    ]
+
+
+def split_terms(query: str) -> tuple[list[str], list[str]]:
+    """(core, soft) words of a search. Core words are what a title has to say to be the thing:
+    no filler, no amounts, no "under", but model numbers stay ("jordan 4", "trek fx 2"). Soft
+    words are sizes, measurements, and years ("10", "32oz", "2024"): worth a little when a
+    title says them, never a reason to drop one. Style codes are dropped from both."""
+    text = _AMOUNTS.sub(" ", _plain(query))
+    soft = [f"size{found.group(1)}" for found in _SIZE.finditer(text)]
+    text = _SIZE.sub(" ", text)
+    soft += _measures(text)
+    text = _MEASURE.sub(" ", text)
+    soft += _YEAR.findall(text)
+    text = _CODE.sub(" ", _YEAR.sub(" ", text))
+    core: list[str] = []
+    for w in words(text):
+        w = norm(w)
+        if w in STOPWORDS or w in CHEAP or w in BUDGET_WORDS or w in core:
             continue
-        kept.append(w)
-    return kept
+        core.append(w)
+    return core, list(dict.fromkeys(soft))
+
+
+def search_terms(query: str) -> list[str]:
+    """The words of a search a title has to match: split_terms' core words."""
+    return split_terms(query)[0]
+
+
+def site_query(query: str) -> str:
+    """What to type into another site's search box for a search: its core words, in order,
+    without sizes, measurements, years, or style codes, which titles word every way."""
+    return " ".join(search_terms(query))
+
+
+def _plain(text: str) -> str:
+    """Lowercase, without apostrophes, so "Men's" reads as "mens"."""
+    return re.sub("['\\u2019]", "", text.lower())
+
+
+def title_words(title: str) -> set[str]:
+    """A title's words in compared form, plus its measurements ("32oz") and sizes ("size10").
+    A size's number isn't a word of its own, so "Air Jordan Retro Size 4.5" doesn't say "4"."""
+    lowered = _plain(title)
+    sizes = {f"size{found.group(1)}" for found in _SIZE.finditer(lowered)}
+    return {norm(w) for w in words(_SIZE.sub(" ", lowered))} | set(_measures(lowered)) | sizes
+
+
+def has_term(term: str, have: set[str]) -> bool:
+    """Whether a title (its title_words) says a search word: the word itself, a synonym, a word
+    the synonym implies ("flask" says "water"), or a compound starting with it ("minifridge")
+    or, for longer words, ending with it ("hydroflask")."""
+    if term in have or have & SYNONYMS.get(term, frozenset()):
+        return True
+    if have & IMPLIED.get(term, frozenset()):
+        return True
+    if term.isalpha() and len(term) >= 3:
+        for word in have:
+            if len(word) < len(term) + 3 or not word.isalpha():
+                continue
+            if word.startswith(term) or (len(term) >= 5 and word.endswith(term)):
+                return True
+    return False
+
+
+def missing_terms(wanted: list[str], title: str) -> list[str]:
+    """The search words a title doesn't say (has_term)."""
+    have = title_words(title)
+    return [w for w in wanted if not has_term(w, have)]
+
+
+def fits(wanted: list[str], title: str) -> bool:
+    """A title says at least half the search words (has_term). The buyer's fit rule."""
+    return not wanted or len(missing_terms(wanted, title)) * 2 <= len(wanted)
 
 
 def comp_total(comp: Comp) -> int:
@@ -161,10 +318,10 @@ def market_price(comps: list[Comp], query: str) -> MarketPrice | None:
     full: list[Comp] = []
     partial: list[Comp] = []
     for comp in comps:
-        have = set(words(comp.title))
+        have = title_words(comp.title)
         if not_the_thing(comp.title, have, set(wanted)):
             continue
-        hits = sum(1 for w in wanted if w in have)
+        hits = sum(1 for w in wanted if has_term(w, have))
         if hits == len(wanted):
             full.append(comp)
         elif hits * 2 >= len(wanted):
@@ -190,11 +347,22 @@ def market_price(comps: list[Comp], query: str) -> MarketPrice | None:
 def not_the_thing(title: str, have: set[str], wanted: set[str]) -> str | None:
     """ "parts" when a title says the item is broken, incomplete, or a part; "accessory" when it
     names a part of or add-on for the thing; None otherwise. Words the buyer asked for don't
-    count against a listing ("bike helmet" for "bike helmet")."""
+    count against a listing ("bike helmet" for "bike helmet"), and neither does an accessory
+    word right after "with" or "+" ("Jordan 4 with box", "DS + laces"). Bike parts count only
+    in a bike search. `have` is kept for callers; the title is read again for word order."""
     lowered = title.lower()
-    if have & (RED_FLAGS - wanted) or any(phrase in lowered for phrase in RED_FLAG_PHRASES):
+    ordered = words(lowered.replace("+", " plus ").replace("&", " and "))
+    tokens = set(ordered) | have
+    if tokens & (RED_FLAGS - wanted) or any(phrase in lowered for phrase in RED_FLAG_PHRASES):
         return "parts"
-    if (have & ACCESSORIES) - wanted:
+    if _ONLY.search(lowered) and not wanted & {"box", "case", "lid", "frame", "part", "parts"}:
+        return "parts"
+    parts = ACCESSORIES | (BIKE_PARTS if wanted & BIKE_WORDS else set())
+    for n, word in enumerate(ordered):
+        if word not in parts or word in wanted:
+            continue
+        if any(before in WITH_WORDS for before in ordered[max(0, n - 3) : n]):
+            continue
         return "accessory"
     return None
 
@@ -278,20 +446,26 @@ def score(
     market: MarketPrice | None,
     reference_cents: int | None,
     today: date,
+    soft: list[str] | tuple[str, ...] = (),
+    loose: bool = False,
 ) -> ScoredDeal | None:
-    """One listing's score and reason. None when a buyer couldn't use it (no price, no link).
+    """One listing's score and reason. None when a buyer couldn't use it (no price, no link),
+    or when its title says fewer than half the search words (has_term). With `loose`, one word
+    is enough, and the deal is flagged "loose_match": rank uses that when nothing fits better.
 
     `reference_cents` is the stand-in for the market when there's no market price: the median
-    total of the listings that match every search word.
+    total of the listings that match every search word. `soft` are the search's sizes and
+    measurements (split_terms); each one the title doesn't say costs SOFT_MISSING.
     """
     total = listing.total_cents
     if listing.price_cents is None or listing.price_cents < MIN_PRICE_CENTS or total is None:
         return None
     if not listing.url:
         return None
-    have = set(words(listing.title))
-    missing = [w for w in wanted if w not in have]
-    if wanted and len(missing) * 2 > len(wanted):
+    have = title_words(listing.title)
+    missing = [w for w in wanted if not has_term(w, have)]
+    loosely = bool(wanted) and len(missing) * 2 > len(wanted)
+    if loosely and (not loose or len(missing) == len(wanted)):
         return None
 
     points = 0.0
@@ -326,6 +500,10 @@ def score(
     if missing:
         points -= MISSING_WORD * len(missing)
         flags.append("missing_words")
+    if loosely:
+        flags.append("loose_match")
+    unsaid = [term for term in soft if term not in have]
+    points -= SOFT_MISSING * len(unsaid)
 
     if "far_under" in flags:
         notes.append("far under market, so check it's the whole item")
@@ -338,11 +516,21 @@ def score(
     return ScoredDeal(listing, total, round(points, 1), versus, ", ".join(notes), tuple(flags))
 
 
+def _places(location: str) -> set[str]:
+    return set(words(location)) - {"ca", "california", "usa", "us", "united", "state"}
+
+
 def same_item(a: ExternalListing, b: ExternalListing) -> bool:
     """The same item posted twice, on one site or across sites: near-identical title words and
-    the same total price, or near enough. Different prices are different deals."""
+    the same total price, or near enough. Different prices are different deals, and so are two
+    posts in different towns: on October 24, OfferUp had "Mini Fridge" for $60 in Redwood City
+    and in Richmond, and four "Air Jordan 4 Retro" posts at the same prices around the bay, and
+    all but one of each were dropped as repeats."""
     wa, wb = set(words(a.title)), set(words(b.title))
     if not wa or not wb or len(wa & wb) < SIMILAR_TITLES * len(wa | wb):
+        return False
+    pa, pb = _places(a.location), _places(b.location)
+    if pa and pb and not pa & pb:
         return False
     ta, tb = a.total_cents, b.total_cents
     if ta is None or tb is None:
@@ -367,11 +555,13 @@ def rank(
     today: date | None = None,
     limit: int = LIMIT,
 ) -> list[ScoredDeal]:
-    """The best deals for a buyer, best first: priced, within budget (shipping included),
-    matching at least half the search words, scored as the module docstring says, repeats
-    dropped, at most `limit`."""
+    """The best deals for a buyer, best first: priced, within budget (shipping included; an
+    unknown shipping cost never drops a listing), matching at least half the search words,
+    scored as the module docstring says, repeats dropped, at most `limit`. When nothing
+    matches half the words, the listings matching any of them are kept instead, flagged
+    "loose_match", so the buyer sees the closest things rather than nothing."""
     today = today or date.today()
-    wanted = search_terms(query)
+    wanted, soft = split_terms(query)
     candidates = [
         listing
         for listing in deduplicated(listings)
@@ -386,8 +576,8 @@ def rank(
             if c.total_cents is not None
             and c.price_cents is not None
             and c.price_cents >= MIN_PRICE_CENTS
-            and set(wanted) <= set(words(c.title))
-            and not_the_thing(c.title, set(words(c.title)), set(wanted)) is None
+            and not missing_terms(wanted, c.title)
+            and not_the_thing(c.title, title_words(c.title), set(wanted)) is None
         ]
         totals = full or [
             c.total_cents
@@ -398,8 +588,15 @@ def rank(
     scored = [
         deal
         for listing in candidates
-        if (deal := score(listing, wanted, market, reference, today)) is not None
+        if (deal := score(listing, wanted, market, reference, today, soft)) is not None
     ]
+    if not scored:
+        scored = [
+            deal
+            for listing in candidates
+            if (deal := score(listing, wanted, market, reference, today, soft, loose=True))
+            is not None
+        ]
     scored.sort(key=lambda d: (-d.score, d.total_cents, d.listing.url))
     return without_repeats(scored)[:limit]
 

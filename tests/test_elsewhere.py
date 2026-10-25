@@ -66,7 +66,13 @@ class Clock:
 def test_search_words_drop_filler_sites_and_amounts() -> None:
     assert search_words("search ebay and craigslist for a road bike under $300") == "road bike"
     assert search_words("watch for it") == ""
-    assert search_words("find me a cheap Trek FX 2") == "trek fx"  # a lone digit isn't a word
+    # Model numbers stay: "air jordan 4" isn't "air jordan" (October 24).
+    assert search_words("find me a cheap Trek FX 2") == "trek fx 2"
+    assert search_words("air jordan 4 retro under $250") == "air jordan 4 retro"
+    assert search_words("xbox one controller max 40 dollars") == "xbox one controller"
+    assert search_words("mini fridge in Berkeley, $60 max") == "mini fridge"
+    assert search_words("search offer up for a desk lamp near 94704") == "desk lamp"
+    assert search_words("Nike Air Force 1 size 10.5") == "nike air force 1 size 10.5"
 
 
 def test_best_keeps_the_budget_including_shipping() -> None:

@@ -58,7 +58,15 @@ from yardsale.chat import LOWEST_SHARE_REACH, STATUS_TEXT, Backend, haggle_text
 from yardsale.common import PipelineError
 from yardsale.deals import ScoredDeal
 from yardsale.ebay_seller import EbayError
-from yardsale.elsewhere import Found, search_words, site_name
+from yardsale.elsewhere import (
+    Found,
+    and_list,
+    failed_sentence,
+    failure_words,
+    search_words,
+    site_name,
+    unfit_sentence,
+)
 from yardsale.hosting import profile_url
 from yardsale.models import (
     AcceptCounter,
@@ -212,7 +220,10 @@ def _deal_json(deal: ScoredDeal) -> dict[str, Any]:
 
 
 def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
+    """The deals, and per site whether it answered: "nothing fits" is only said when some site
+    did, and a search where every site failed says so instead (status "failed")."""
     failed = [site_name(name) for name in found.failed]
+    answered = [site_name(name) for name in found.searched]
     if found.deals:
         next_step = (
             "Show the buyer these deals with their links and each one's reason. They aren't "
@@ -220,9 +231,18 @@ def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
             "buyer opens the link to buy from the seller. Craigslist sellers usually take offers "
             "by email."
         )
+        if found.loose:
+            next_step += " None had every word of the search; say these are the closest."
+    elif answered:
+        next_step = f"Nothing fits on {and_list(answered)}. Try other words or a higher max." + (
+            f" {failed_sentence(found)}, so those weren't checked." if failed else ""
+        )
     else:
-        next_step = "Nothing fits on other sites either. Try other words or a higher max."
-    unsearched = f" ({', '.join(failed)} couldn't be searched)" if failed else ""
+        next_step = (
+            f"The search didn't run: {failed_sentence(found)}. Don't tell the buyer nothing "
+            "is out there; call searchOtherSites again in a minute."
+        )
+    unsearched = f" ({failed_sentence(found)})" if failed else ""
     market = found.market
     if market is not None:
         against = (
@@ -231,18 +251,36 @@ def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
         )
     else:
         against = "No recent eBay sales matched, so prices are compared with each other."
+    where = f" around {found.place}" if found.place else ""
+    if answered:
+        summary = (
+            f"{len(found.deals)} deal(s) on {and_list(answered)}{where}{unsearched}, best "
+            f"first: price against the market, then quality, then fit. {against}"
+        )
+        if not found.deals and unfit_sentence(found):
+            summary += f" {unfit_sentence(found)}"
+    else:
+        summary = f"No site could be searched: {failed_sentence(found)}."
     return {
-        "status": "done",
+        "status": "done" if answered else "failed",
         "count": len(found.deals),
         "listings": [_deal_json(deal) for deal in found.deals],
-        "searched": [site_name(name) for name in found.searched],
+        "searched": answered,
         "failed": failed,
+        "sites": [
+            {
+                "site": site_name(site.source),
+                "status": site.status,
+                "listings": site.raw,
+                "fit": site.kept,
+                "reason": failure_words(site.reason) if site.status == "failed" else "",
+            }
+            for site in found.sites
+        ],
+        "place": found.place,
         "typical_sold_usd": dollars(market.typical_cents) if market else None,
         "comps_used": market.sales if market else 0,
-        "summary": (
-            f"{len(found.deals)} deal(s) on {sites}{unsearched}, best first: price against the "
-            f"market, then quality, then fit. {against}"
-        ),
+        "summary": summary,
         "next_step": next_step,
     }
 
@@ -509,7 +547,9 @@ class BusinessApi:
             budget = _amount(request.query["max_usd"])
             if budget is None:
                 return _error(400, "max_usd must be a dollar amount, like 300.", "bad_amount")
-        task = finder.start(query, budget)
+        # A place in q ("in Berkeley") or a zip parameter scopes the local sites.
+        near = request.query.get("zip", "").strip()[:5]
+        task = finder.start(query, budget, near if near.isdigit() and len(near) == 5 else "")
         try:
             found = await asyncio.wait_for(asyncio.shield(task), self.answer_within)
         except TimeoutError:
@@ -1163,7 +1203,11 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                         "These are NOT Yardsale listings: no haggling or payment through "
                         "Yardsale. Answers within about "
                         "25 seconds; if status is running, call it again with the same q and "
-                        "max_usd."
+                        'max_usd. A place in q ("in Berkeley", "near 94704") or zip '
+                        "scopes Craigslist, OfferUp, and Facebook; place says where they "
+                        "searched. sites says, per site, whether it answered and why not: "
+                        "never tell the buyer a site had nothing when it's listed as failed, "
+                        "and if status is failed, no site could be searched."
                     ),
                     "parameters": [
                         {
@@ -1179,13 +1223,39 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                             "schema": {"type": "number"},
                             "description": "The most the buyer will pay, shipping included",
                         },
+                        {
+                            "name": "zip",
+                            "in": "query",
+                            "schema": {"type": "string"},
+                            "description": "A 5-digit ZIP code to search the local sites around",
+                        },
                     ],
                     "responses": {
                         "200": _ok(
                             {
                                 "type": "object",
                                 "properties": {
-                                    "status": {"type": "string", "enum": ["running", "done"]},
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["running", "done", "failed"],
+                                    },
+                                    "sites": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "site": {"type": "string"},
+                                                "status": {
+                                                    "type": "string",
+                                                    "enum": ["ok", "empty", "failed"],
+                                                },
+                                                "listings": {"type": "integer"},
+                                                "fit": {"type": "integer"},
+                                                "reason": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                    "place": {"type": "string"},
                                     "count": {"type": "integer"},
                                     "listings": {"type": "array", "items": _EXTERNAL},
                                     "searched": {"type": "array", "items": {"type": "string"}},
