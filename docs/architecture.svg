@@ -1,0 +1,195 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <title>How Yardsale's agents fit together</title>
+  <desc>Buyers and sellers reach Yardsale through the ASI:One chat, @yardsale on Fetch Business, or Craigslist email. All three go to the Yardsale Orchestrator, which runs checkout and hands each job to an agent: the Identifier, Researcher, Market Scout, and Appraiser price a photo; an item agent per approved listing haggles with buyers; the Deal Finder scores listings on other sites.</desc>
+  <defs>
+    <style>
+      /*THEME*/:root {
+        --bg: #FBFAF7; --ink: #1C1B19; --muted: #66625B; --line: #8C877E;
+        --card: #FFFFFF; --card-stroke: #D8D4CB;
+        --orch: #3D35A8; --orch-ink: #FFFFFF; --orch-sub: #DCD9FF; --orch-dash: #B3AEFF;
+        --sell-bg: #EDF6F0; --sell-stroke: #C3E0CF; --sell: #1E7A50;
+        --haggle-bg: #FDF3E5; --haggle-stroke: #EFD3A8; --haggle: #A9590B;
+        --buy-bg: #EDF2FB; --buy-stroke: #C3D3EF; --buy: #2556B5;
+        --chip: #EFEDE8; --chip-ink: #57534C; --badge-ink: #FFFFFF;
+      }/*END*/
+      text { font-family: system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+      .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+      .bg { fill: var(--bg); }
+      .card { fill: var(--card); stroke: var(--card-stroke); stroke-width: 1.5; }
+      .lane-sell { fill: var(--sell-bg); stroke: var(--sell-stroke); stroke-width: 1.5; }
+      .lane-haggle { fill: var(--haggle-bg); stroke: var(--haggle-stroke); stroke-width: 1.5; }
+      .lane-buy { fill: var(--buy-bg); stroke: var(--buy-stroke); stroke-width: 1.5; }
+      .orch { fill: var(--orch); }
+      .checkout { fill: rgba(255, 255, 255, 0.07); stroke: var(--orch-dash); stroke-width: 1.5; stroke-dasharray: 6 5; }
+      .legend-dash { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 5 4; }
+      .wire { fill: none; stroke: var(--line); stroke-width: 2; }
+      .arrowhead { fill: var(--line); }
+      .chip { fill: var(--chip); }
+      .chip-orch { fill: rgba(255, 255, 255, 0.16); }
+      .chip-t { font-size: 13px; font-weight: 600; fill: var(--chip-ink); }
+      .chip-orch-t { font-size: 13px; font-weight: 600; fill: var(--orch-ink); }
+      .t-title { font-size: 21px; font-weight: 700; }
+      .t-body { font-size: 16px; }
+      .t-small { font-size: 14px; fill: var(--muted); }
+      .o-title { font-size: 28px; font-weight: 700; fill: var(--orch-ink); }
+      .o-handle { font-size: 16px; fill: var(--orch-sub); }
+      .o-body { font-size: 16px; fill: var(--orch-sub); }
+      .c-title { font-size: 20px; font-weight: 700; fill: var(--orch-ink); }
+      .c-body { font-size: 15px; fill: var(--orch-sub); }
+      .lane-t { font-size: 17px; font-weight: 700; }
+      .sell-t { fill: var(--sell); }
+      .haggle-t { fill: var(--haggle); }
+      .buy-t { fill: var(--buy); }
+      .lane-note { font-size: 14px; fill: var(--muted); }
+      .name { font-size: 19px; font-weight: 700; }
+      .handle { font-size: 13px; fill: var(--muted); }
+      .desc { font-size: 15px; }
+      .note { font-size: 13px; fill: var(--muted); }
+      .badge-sell { fill: var(--sell); }
+      .badge-t { font-size: 14px; font-weight: 700; fill: var(--badge-ink); }
+      .wire-label { font-size: 14px; fill: var(--muted); }
+      .legend { font-size: 14px; fill: var(--muted); }
+      .foot { font-size: 15px; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="arrowhead"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1600" height="900"/>
+
+  <!-- Where people come in -->
+  <rect class="card" x="48" y="40" width="456" height="104" rx="14"/>
+  <text class="t-title" x="72" y="76">ASI:One chat</text>
+  <text class="t-body" x="72" y="102">Sellers send photos, buyers search</text>
+  <text class="t-small" x="72" y="126">Agent Chat Protocol, through an Agentverse mailbox</text>
+
+  <rect class="card" x="572" y="40" width="456" height="104" rx="14"/>
+  <text class="t-title" x="596" y="76">@yardsale on Fetch Business</text>
+  <text class="t-body" x="596" y="102">Buyers search Yardsale and other sites</text>
+  <text class="t-small" x="596" y="126">Its OpenAPI tools call Yardsale's HTTP API</text>
+
+  <rect class="card" x="1096" y="40" width="456" height="104" rx="14"/>
+  <text class="t-title" x="1120" y="76">Craigslist email</text>
+  <text class="t-body" x="1120" y="102">Buyers answer the seller's post</text>
+  <text class="t-small" x="1120" y="126">Through Craigslist's relay to Yardsale's inbox</text>
+
+  <path class="wire" d="M276 144 V172 H1324 V144"/>
+  <path class="wire" d="M800 144 V205" marker-end="url(#arrow)"/>
+
+  <!-- Orchestrator -->
+  <rect class="orch" x="48" y="206" width="1504" height="124" rx="16"/>
+  <text class="o-title" x="84" y="250">Yardsale Orchestrator</text>
+  <text class="o-handle mono" x="84" y="279">@ys-orchestrator</text>
+  <text class="o-body" x="84" y="309">Hands each job to an agent below · asi1-mini reads typed text · keeps state in SQLite</text>
+
+  <rect class="checkout" x="1196" y="222" width="332" height="92" rx="12"/>
+  <text class="c-title" x="1220" y="254">Checkout</text>
+  <rect class="chip-orch" x="1380" y="236" width="132" height="24" rx="12"/>
+  <text class="chip-orch-t" x="1446" y="253" text-anchor="middle">Stripe test mode</text>
+  <text class="c-body" x="1220" y="280">A payment link for each deal</text>
+  <text class="c-body" x="1220" y="302">5% commission · Payment Protocol</text>
+
+  <!-- Orchestrator to each job -->
+  <path class="wire" d="M468 331 V399" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text class="wire-label" x="484" y="361">Photo in,</text>
+  <text class="wire-label" x="484" y="379">price out</text>
+
+  <path class="wire" d="M1072 331 V399" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text class="wire-label" x="1088" y="361">Starts one on approval,</text>
+  <text class="wire-label" x="1088" y="379">relays buyers' offers</text>
+
+  <path class="wire" d="M1404 331 V399" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text class="wire-label" x="1420" y="361">Search in,</text>
+  <text class="wire-label" x="1420" y="379">scored deals out</text>
+
+  <!-- Sell: price a photo -->
+  <rect class="lane-sell" x="48" y="400" width="840" height="342" rx="18"/>
+  <text class="lane-t sell-t" x="72" y="434">Sell: price a photo</text>
+  <text class="lane-note" x="864" y="434" text-anchor="end">Step 1, then both 2s at once, then 3</text>
+
+  <rect class="card" x="72" y="530" width="210" height="120" rx="12"/>
+  <text class="name" x="90" y="564">Identifier</text>
+  <rect class="chip" x="202" y="546" width="66" height="24" rx="12"/>
+  <text class="chip-t" x="235" y="563" text-anchor="middle">Claude</text>
+  <text class="handle mono" x="90" y="586">@ys-identifier</text>
+  <text class="desc" x="90" y="612">What's in the photo:</text>
+  <text class="desc" x="90" y="634">brand, model, condition</text>
+  <circle class="badge-sell" cx="72" cy="530" r="14"/>
+  <text class="badge-t" x="72" y="535" text-anchor="middle">1</text>
+
+  <rect class="card" x="322" y="462" width="250" height="120" rx="12"/>
+  <text class="name" x="340" y="496">Researcher</text>
+  <rect class="chip" x="502" y="478" width="56" height="24" rx="12"/>
+  <text class="chip-t" x="530" y="495" text-anchor="middle">Apify</text>
+  <text class="handle mono" x="340" y="518">@ys-researcher</text>
+  <text class="desc" x="340" y="544">What it sold for on eBay</text>
+  <text class="desc" x="340" y="566">in the last 90 days</text>
+  <circle class="badge-sell" cx="322" cy="462" r="14"/>
+  <text class="badge-t" x="322" y="467" text-anchor="middle">2</text>
+
+  <rect class="card" x="322" y="598" width="250" height="120" rx="12"/>
+  <text class="name" x="340" y="632">Market Scout</text>
+  <rect class="chip" x="502" y="614" width="56" height="24" rx="12"/>
+  <text class="chip-t" x="530" y="631" text-anchor="middle">Apify</text>
+  <text class="handle mono" x="340" y="654">@ys-scout</text>
+  <text class="desc" x="340" y="680">What it's listed for now:</text>
+  <text class="desc" x="340" y="702">Craigslist, OfferUp, FB, eBay</text>
+  <circle class="badge-sell" cx="322" cy="598" r="14"/>
+  <text class="badge-t" x="322" y="603" text-anchor="middle">2</text>
+
+  <rect class="card" x="612" y="530" width="252" height="120" rx="12"/>
+  <text class="name" x="630" y="564">Appraiser</text>
+  <rect class="chip" x="784" y="546" width="66" height="24" rx="12"/>
+  <text class="chip-t" x="817" y="563" text-anchor="middle">Claude</text>
+  <text class="handle mono" x="630" y="586">@ys-appraiser</text>
+  <text class="desc" x="630" y="612">Picks the sales that match</text>
+  <text class="desc" x="630" y="634">Code sets price and floor</text>
+  <circle class="badge-sell" cx="612" cy="530" r="14"/>
+  <text class="badge-t" x="612" y="535" text-anchor="middle">3</text>
+
+  <path class="wire" d="M282 590 H302 V522 H320" marker-end="url(#arrow)"/>
+  <path class="wire" d="M302 590 V658 H320" marker-end="url(#arrow)"/>
+  <path class="wire" d="M572 522 H592 V658 H572"/>
+  <path class="wire" d="M592 590 H610" marker-end="url(#arrow)"/>
+
+  <!-- Haggle: an agent per item -->
+  <rect class="lane-haggle" x="912" y="400" width="320" height="342" rx="18"/>
+  <text class="lane-t haggle-t" x="936" y="434">Haggle: an agent per item</text>
+
+  <rect class="card" x="952" y="494" width="262" height="220" rx="12"/>
+  <rect class="card" x="944" y="486" width="262" height="220" rx="12"/>
+  <rect class="card" x="936" y="478" width="262" height="220" rx="12"/>
+  <text class="name" x="954" y="512">Item agents</text>
+  <text class="desc" x="954" y="540">One per approved listing</text>
+  <text class="desc" x="954" y="566">Knows the seller's floor,</text>
+  <text class="desc" x="954" y="588">never shows it</text>
+  <text class="desc" x="954" y="614">Haggles with every buyer:</text>
+  <text class="desc" x="954" y="636">ASI:One chat, Craigslist email</text>
+  <text class="note" x="954" y="672">On Agentverse or in our server</text>
+
+  <!-- Buy: find deals -->
+  <rect class="lane-buy" x="1256" y="400" width="296" height="342" rx="18"/>
+  <text class="lane-t buy-t" x="1280" y="434">Buy: find deals</text>
+
+  <rect class="card" x="1280" y="478" width="248" height="220" rx="12"/>
+  <text class="name" x="1298" y="512">Deal Finder</text>
+  <rect class="chip" x="1458" y="494" width="56" height="24" rx="12"/>
+  <text class="chip-t" x="1486" y="511" text-anchor="middle">Apify</text>
+  <text class="handle mono" x="1298" y="534">@ys-dealfinder</text>
+  <text class="desc" x="1298" y="566">Searches eBay, Craigslist,</text>
+  <text class="desc" x="1298" y="588">OfferUp, Facebook at once</text>
+  <text class="desc" x="1298" y="614">Scores each listing against</text>
+  <text class="desc" x="1298" y="636">what it sold for on eBay</text>
+  <text class="note" x="1298" y="672">Five best, each with a reason</text>
+
+  <!-- Legend -->
+  <rect class="card" x="48" y="786" width="34" height="24" rx="6"/>
+  <text class="legend" x="94" y="803">Agent with its own address</text>
+  <rect class="legend-dash" x="330" y="786" width="34" height="24" rx="6"/>
+  <text class="legend" x="376" y="803">Part of the orchestrator, not its own agent</text>
+  <rect class="chip" x="720" y="786" width="56" height="24" rx="12"/>
+  <text class="chip-t" x="748" y="803" text-anchor="middle">Apify</text>
+  <text class="legend" x="788" y="803">Outside service it calls</text>
+  <text class="foot" x="48" y="846">Claude reads photos. asi1-mini reads typed text. Suggested prices and deal scores come from code, not a model.</text>
+</svg>

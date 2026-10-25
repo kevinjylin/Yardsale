@@ -51,6 +51,12 @@ and the pitch.
 
 ## Agents
 
+![The ASI:One chat, @yardsale on Fetch Business, and Craigslist email all lead to the Yardsale Orchestrator, which runs checkout and hands each job to an agent: the Identifier, Researcher, Market Scout, and Appraiser price a photo; an item agent per approved listing haggles with buyers; the Deal Finder scores listings on other sites.](docs/architecture.png)
+
+Every request goes through the orchestrator, which hands each job to an agent. Checkout runs
+inside the orchestrator, not as its own agent. The diagram leaves out the Shopper, the buyer agent
+in the table below.
+
 Yardsale was started during [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/), October 23–25,
 2026. These agents are Agentverse mailbox agents and run in one Bureau server:
 
