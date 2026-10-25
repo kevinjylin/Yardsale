@@ -1003,25 +1003,29 @@ def _under(budget_cents: int | None) -> str:
     return f" under {usd(budget_cents)}" if budget_cents else ""
 
 
-def listing_line(n: int, listing: ExternalListing, why: str = "") -> str:
-    """One listing on another site: its link, price, site, `why` it's a good deal when scored
-    (deals.py; a watch's finds aren't), and where it is."""
-    price = usd(listing.price_cents) if listing.price_cents is not None else "no price given"
-    if listing.shipping_cents:
-        price += f" + {usd(listing.shipping_cents)} shipping"
-    notes = [listing.location] if listing.location else []
-    if not why and listing.condition:
-        notes.insert(0, listing.condition)
-    if listing.accepts_offers:
-        notes.append("takes offers")
-    extra = f" ({'; '.join(notes)})" if notes else ""
+def listing_line(
+    n: int, listing: ExternalListing, why: str = "", budget_cents: int | None = None
+) -> str:
+    """One listing on another site: its link, then price, site, shipping, the budget
+    difference, condition, location, age, `why` it's a good deal when scored (deals.py; a
+    watch's finds aren't), and what the site didn't say (deals.describe)."""
     link = _link(listing.title, listing.url)
-    about = f", {why}" if why else ""
-    return f"{n}. {link}: {price} on {site_name(listing.source)}{about}{extra}"
+    about = deals.describe(listing, site_name(listing.source), why, budget_cents)
+    return f"{n}. {link}: {about}"
 
 
-def deal_line(n: int, deal: ScoredDeal) -> str:
-    return listing_line(n, deal.listing, deal.why)
+def deal_line(n: int, deal: ScoredDeal, budget_cents: int | None = None) -> str:
+    return listing_line(n, deal.listing, deal.why, budget_cents)
+
+
+def deals_headline(found: Found) -> str:
+    """The sentence the deals open with (deals.headline). Read defensively: `Found` grows."""
+    return deals.headline(
+        tuple(getattr(found, "deals", ()) or ()),
+        getattr(found, "budget_cents", None),
+        getattr(found, "market", None),
+        site_name,
+    )
 
 
 def market_note(found: Found) -> str:
@@ -1032,13 +1036,27 @@ def market_note(found: Found) -> str:
     return f"typical sold price on eBay: {usd(found.market.typical_cents)}, from {sales}"
 
 
-def elsewhere_text(found: Found, sites: str) -> str:
+def elsewhere_text(found: Found, sites: str, headline: bool = True) -> str:
+    """The deals on other sites, opening with the headline (deals.headline) unless the caller
+    puts it first itself."""
     about = f'"{found.query}"{_under(found.budget_cents)}'
     if not found.deals:
         lines = [f"I didn't find {about} on {sites} either."]
     else:
-        lines = [f"Best deals on other sites for {about} ({market_note(found)}):"]
-        lines += [deal_line(n, deal) for n, deal in enumerate(found.deals, 1)]
+        budget = found.budget_cents
+        lines = [deals_headline(found), ""] if headline else []
+        lines.append(f"Best deals on other sites for {about} ({market_note(found)}):")
+        fitting = sum(1 for d in found.deals if not {"over_budget", "no_price"} & set(d.flags))
+        said: set[str] = set()
+        for n, deal in enumerate(found.deals, 1):
+            if "over_budget" in deal.flags and "over_budget" not in said and budget:
+                only = f"only {fitting}" if fitting else "none"
+                lines.append(f"Over your {usd(budget)} budget, since {only} fit:")
+                said.add("over_budget")
+            elif "no_price" in deal.flags and "no_price" not in said:
+                lines.append("No price listed, so ask the seller:")
+                said.add("no_price")
+            lines.append(deal_line(n, deal, budget))
         lines.append(NOT_YARDSALE)
         if any(listing.source == "craigslist" for listing in found.listings):
             lines.append(CRAIGSLIST_OFFERS)
@@ -1050,27 +1068,42 @@ def elsewhere_text(found: Found, sites: str) -> str:
 
 
 def elsewhere_card(found: Found) -> MetadataContent | None:
-    """The deals as a carousel, with their photos. The links are in the text."""
+    """The deals as a carousel, with their photos: each subtitle says the price, the site, and
+    the budget difference (or how it compares with the typical sold price). The cards module's
+    buttons send a selection back and can't open a link, so the links are in the text."""
     if not found.deals:
         return None
+    budget = getattr(found, "budget_cents", None)
     items = []
     for deal in found.deals:
         listing = deal.listing
-        price = usd(deal.total_cents)
-        if listing.shipping_cents:
-            price += " with shipping"
+        site = site_name(listing.source)
+        if listing.price_cents is None:
+            price = f"Price not listed on {site}"
+        else:
+            price = usd(deal.total_cents)
+            if listing.shipping_cents:
+                price += " with shipping"
+            price += f" on {site}"
         pct = deal.versus_market_pct
-        if pct is not None and pct >= deals.ABOUT_MARKET:
+        if against := deals.budget_phrase(listing, budget, qualify=False):
+            price += f", {against}"
+        elif pct is not None and pct >= deals.ABOUT_MARKET:
             price += f", {pct}% under typical"
         elif pct is not None and pct <= -deals.ABOUT_MARKET:
             price += f", {-pct}% above typical"
+        badges = [CarouselBadge(label=site, variant="info")]
+        if "over_budget" in deal.flags:
+            badges.append(CarouselBadge(label="Over budget", variant="warning"))
+        if "no_price" in deal.flags:
+            badges.append(CarouselBadge(label="No price", variant="warning"))
         items.append(
             CarouselItem(
                 id=f"{listing.source}-{listing.external_id}"[:80],
                 image=listing.image_url,
                 title=listing.title[:80],
                 subtitle=price,
-                badges=[CarouselBadge(label=site_name(listing.source), variant="info")],
+                badges=badges,
                 secondary_text=listing.location or None,
                 primary_cta=CtaAction(label="Watch for more", selection={"action": "watch"}),
             )
@@ -2091,7 +2124,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
         finally:
             searching.pop(key, None)
-        text = f"{reply.text}\n\n{elsewhere_text(found, finder.site_names())}"
+        # The reply opens with the best deal ("Found it: ..."), then says Yardsale had nothing.
+        headline = deals_headline(found)
+        rest = elsewhere_text(found, finder.site_names(), headline=not headline)
+        text = f"{headline}\n\n{reply.text}\n\n{rest}" if headline else f"{reply.text}\n\n{rest}"
         card = elsewhere_card(found)
         if reply.card is not None and card is not None:
             # Yardsale's own results keep their card; the deals follow as a second message.
@@ -2141,7 +2177,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             fresh = sorted(hits, key=lambda x: (x.total_cents is None, x.total_cents or 0))[:10]
             if fresh:
                 news.append(f'New for "{standing.query}":')
-                news += [listing_line(i, listing) for i, listing in enumerate(fresh, 1)]
+                news += [
+                    listing_line(i, listing, budget_cents=standing.budget_cents)
+                    for i, listing in enumerate(fresh, 1)
+                ]
             store.mark_told(standing.watch_id)
         if news:
             lines += ["", *news, NOT_YARDSALE]
