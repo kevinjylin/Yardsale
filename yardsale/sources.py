@@ -12,7 +12,10 @@ eBay actor; they could move here later, once more than one source is in use.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -23,10 +26,28 @@ import aiohttp
 APIFY_RUN_URL = "https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
 MAX_PRICE_USD = 1_000_000  # above this is a parsing error, not a price
 ACTOR_TIMEOUT = 180.0  # seconds; a scrape of one city takes tens of seconds
+APIFY_LAST_RUN_URL = "https://api.apify.com/v2/acts/{actor}/runs/last"
+APIFY_RUN_LOG_URL = "https://api.apify.com/v2/actor-runs/{run}/log"
+# Apify's free plan runs at most 5 actors at once, and a buyer's search runs 4 or 5 (every site
+# plus the eBay comps) while the Scout may run 4 more: on October 24 a probe got a 402
+# "concurrent-runs-limit-exceeded" for OfferUp. A refused run costs nothing, so it's retried
+# after each of these waits before the site counts as failed.
+BUSY_RETRY_SECONDS: tuple[float, ...] = (3.0, 6.0)
 
 
 class SourceError(RuntimeError):
-    """A source couldn't be searched. The message is shown to the buyer."""
+    """A source couldn't be searched. The message is shown to the buyer.
+
+    `kind` says why, so a failure is never reported as "nothing found": "timeout" (the run ran
+    out of time), "blocked" (the site turned the scraper away, or it returned only errors),
+    "busy" (Apify's limit on runs at once, still hit after retrying), "credit" (the Apify
+    account is out of credit), "setup" (no token, a bad input, nothing to search), or "error"
+    (anything else).
+    """
+
+    def __init__(self, message: str, kind: str = "error") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass(frozen=True)
@@ -172,10 +193,112 @@ async def run_actor(
     """Run an Apify actor and return its dataset. Raises SourceError with a readable reason.
 
     `maxTotalChargeUsd` is a cap Apify enforces, so a runaway scrape can't empty the account.
+
+    Every way a run can fail raises, with `SourceError.kind` saying why, so a caller never
+    mistakes a failed search for an empty one: an error status (a timed-out or failed run, a bad
+    input, no credit), a run Apify refused because too many are running (retried first, see
+    BUSY_RETRY_SECONDS), a dataset holding only error reports, and an empty dataset whose run
+    says its page requests failed (a blocked proxy). An empty dataset from a run that worked is
+    a real "nothing found" and comes back as [].
     """
+    for wait in (*BUSY_RETRY_SECONDS, None):
+        try:
+            return await _run_actor_once(actor, body, max_results, max_charge_usd)
+        except SourceError as ex:
+            if ex.kind != "busy" or wait is None:
+                raise
+        await asyncio.sleep(wait)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def failure(status: int, detail: str) -> SourceError:
+    """An Apify error response -> a SourceError whose kind says why (see SourceError)."""
+    error_type, message = "", detail
+    try:
+        error = json.loads(detail).get("error") or {}
+        error_type = str(error.get("type") or "")
+        message = str(error.get("message") or detail)
+    except (ValueError, AttributeError):
+        pass
+    text = f"{error_type} {message}".lower()
+    if status == 408 or "timed-out" in text or "timeout" in text:
+        kind = "timeout"
+    elif status == 429 or "concurrent" in text or "memory-limit" in text or "rate-limit" in text:
+        kind = "busy"
+    elif status == 402 or "usage" in text or "credit" in text:
+        kind = "credit"
+    elif status in (400, 401, 403, 404) and "run-failed" not in text:
+        kind = "setup"
+    else:
+        kind = "error"
+    return SourceError(f"Apify returned {status}: {one_line(message, 200)}", kind)
+
+
+_ERROR_KEYS = ("error", "errorMessage", "errorDescription", "#error")
+
+
+def error_report(items: list[Any]) -> str | None:
+    """When every item is an error report rather than a result (actors push {"error": ...} for
+    a page they couldn't load), the first error; otherwise None."""
+    if not items:
+        return None
+    reasons: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        found = next((item[key] for key in _ERROR_KEYS if item.get(key)), None)
+        if found is None:
+            return None
+        reasons.append("" if found is True else one_line(found, 120))
+    return next((reason for reason in reasons if reason), "the scraper reported only errors")
+
+
+# "Total 3 requests: 0 succeeded, 3 failed." is how Crawlee-based actors end their status.
+_REQUESTS = re.compile(r"(\d+)\s+succeeded,\s*(\d+)\s+failed")
+_BLOCK_WORDS = re.compile(
+    r"\b(?:403|429|blocked|captcha|access denied|forbidden|too many requests)\b", re.IGNORECASE
+)
+
+
+async def why_empty(
+    session: aiohttp.ClientSession, actor: str, headers: dict[str, str]
+) -> str | None:
+    """For an empty dataset: why, when the actor's latest run says its page loads failed (a
+    blocked proxy), or None for a real empty result. Reads the run's status message and the end
+    of its log, both free. The latest run is the one that just finished unless another search
+    ran the same actor at the same moment; then the reason may be that one's, which is still a
+    fair warning. Never raises."""
+    try:
+        async with session.get(APIFY_LAST_RUN_URL.format(actor=actor), headers=headers) as resp:
+            if resp.status != 200:
+                return None
+            run = (await resp.json()).get("data") or {}
+        status = str(run.get("status") or "")
+        note = one_line(run.get("statusMessage"), 200)
+        if status and status != "SUCCEEDED":
+            return f"the run ended {status.lower()}" + (f" ({note})" if note else "")
+        counts = _REQUESTS.search(note)
+        if counts is not None and int(counts.group(1)) == 0 and int(counts.group(2)) > 0:
+            return f"every page request failed ({note})"
+        run_id = str(run.get("id") or "")
+        if not run_id:
+            return None
+        async with session.get(APIFY_RUN_LOG_URL.format(run=run_id), headers=headers) as resp:
+            if resp.status != 200:
+                return None
+            tail = (await resp.text())[-3000:]
+        blocked = _BLOCK_WORDS.search(tail)
+        return f"the site turned the scraper away ({blocked.group(0)})" if blocked else None
+    except (aiohttp.ClientError, TimeoutError, ValueError, AttributeError):
+        return None
+
+
+async def _run_actor_once(
+    actor: str, body: dict[str, Any], max_results: int, max_charge_usd: str
+) -> list[Any]:
     token = os.getenv("APIFY_TOKEN", "").strip()
     if not token:
-        raise SourceError("APIFY_TOKEN is not set on the server (see .env.example)")
+        raise SourceError("APIFY_TOKEN is not set on the server (see .env.example)", "setup")
     params = {
         "timeout": "120",
         # maxItems caps what a pay-per-result actor may charge for; limit caps what the dataset
@@ -194,13 +317,22 @@ async def run_actor(
             session.post(url, params=params, json=body, headers=headers) as resp,
         ):
             if resp.status not in (200, 201):
-                detail = (await resp.text())[:200]
-                raise SourceError(f"Apify returned {resp.status}: {detail}")
+                detail = (await resp.text())[:600]
+                raise failure(resp.status, detail)
             items = await resp.json()
-    except (aiohttp.ClientError, TimeoutError) as ex:
+            if isinstance(items, list) and not items:
+                reason = await why_empty(session, actor, headers)
+                if reason:
+                    raise SourceError(f"the search came back empty: {reason}", "blocked")
+    except TimeoutError as ex:
+        raise SourceError(f"Apify didn't answer within {ACTOR_TIMEOUT:.0f}s", "timeout") from ex
+    except aiohttp.ClientError as ex:
         raise SourceError(f"couldn't reach Apify ({ex})") from ex
     if not isinstance(items, list):
         raise SourceError(f"Apify returned {type(items).__name__}, not a list of listings")
+    reported = error_report(items)
+    if reported is not None:
+        raise SourceError(f"the scraper returned only errors: {reported}", "blocked")
     return items
 
 
