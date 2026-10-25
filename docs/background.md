@@ -246,19 +246,39 @@ HTTP API described by OpenAPI (an "OpenAPI Integration", which Fetch calls a Bus
 So the server also runs a small API on `127.0.0.1:8110` when `YARDSALE_API_KEY` is set. It
 uses the same Market backend as the chat:
 
-- `GET /listings` searches active listings (asking prices only).
-- `POST /haggles` sends the Shopper to haggle with every match at once. It answers within 25
-  seconds with the result, or with `status: "running"` and a `haggle_id`.
+- `GET /listings` (`searchListings`) searches active listings (asking prices only).
+- `GET /other-sites?q=&max_usd=` (`searchOtherSites`) returns the best deals on other sites,
+  each with its site, price, total with shipping, and link, and a `score` and `reason` when the
+  deal finder gives them (both optional, so older results and unscored listings still work). It
+  answers within 25 seconds, or with `status: "running"`; the same call again joins the same
+  search. `GET /listings` points to it when nothing matches.
+- `GET /price-check?q=&zip=` (`priceCheck`, added October 24) is for sellers asking what
+  something is worth. It asks the Researcher for eBay sales of the last 90 days matching the
+  words and works out, in plain code, the typical price (median), the usual range (quartiles),
+  a suggested asking price (the median rounded like a seller would), and three example sales
+  nearest the typical price, with links. Accepted Best Offer sales are left out when there are
+  others, as in `appraise()`. The sales are matched by title, not by photo, and the answer
+  says so; a photo to `@ys-orchestrator` gets Claude's same-product check. When
+  `yardsale/scout.py` is importable and has `local_prices(query, zip_code)`, its answer is
+  added as a `local` block; otherwise the block is left out. Checks are cached for 10 minutes
+  per query, each one being a paid Apify search, and a check still running after 25 seconds
+  answers `status: "running"` and is picked up by the same call. Queries and ZIP codes stay
+  out of the log.
+- `POST /haggles` (`startHaggle`) sends the Shopper to haggle with every match at once. It
+  answers within 25 seconds with the result, or with `status: "running"` and a `haggle_id`.
 - `GET /haggles/{haggle_id}` returns the result, waiting up to 25 seconds while it's running.
-- `POST /haggles/{haggle_id}/accept` buys the best price (or a named item's) and returns the
-  payment link.
+- `POST /haggles/{haggle_id}/accept` (`acceptDeal`) buys the best price (or a named item's) and
+  returns the payment link.
 - `GET /deals/{deal_id}` says whether it's paid.
-- `GET /other-sites?q=&max_usd=` returns the best deals on other sites, for when Yardsale has
-  none. It answers within 25 seconds, or with `status: "running"`; the same call again joins
-  the same search. `GET /listings` points to it when nothing matches. Its tool needs adding to
-  `@yardsale`'s Business Tool (re-import the description) and skill.
 - `GET /openapi.json` is the description Fetch reads. It needs no key; everything else needs
   the key in `X-Yardsale-Key` (or `Authorization: Bearer`).
+
+Since October 24 the description leads with the two products (deals for buyers, prices for
+sellers) and marks the haggle and deal operations "advanced", so `@yardsale` prefers search and
+price checks; it also says, wherever photos come up, that Claude reads them and ASI:One's models
+read typed text only. The Business Tool has to be re-imported for `@yardsale` to see new
+operations; [fetch-business.md](fetch-business.md) has the workbench steps, the Skill text, and
+what Fetch Business can and can't link to our agents.
 
 Each haggle is its own buyer (`buyer_ref` `api-<haggle id>`), so its prices and deals are
 separate from chat buyers', and the API only shows deals made through it. Floors never appear,
