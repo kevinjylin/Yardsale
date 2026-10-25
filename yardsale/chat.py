@@ -887,7 +887,6 @@ def elsewhere_text(found: Found, sites: str, headline: bool = True) -> str:
 FLAG_LABELS = {
     "over_budget": "Over budget",
     "no_price": "No price",
-    "far_under": "Check it's the whole item",
     "parts": "Parts or repair",
     "accessory": "Accessory",
     "missing_words": "Partial match",

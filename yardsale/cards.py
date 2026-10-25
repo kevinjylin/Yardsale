@@ -1192,7 +1192,7 @@ def deal_detail(deal: dict[str, Any]) -> MetadataContent:
     ]
     actions: list[Action] = []
     if deal.get("source") == "craigslist":
-        actions.append(("Have my agent haggle", {"action": "negotiate_help"}))
+        actions.append(("Haggle for me", {"action": "negotiate_help"}))
     actions += [("Back to deals", {"action": "deals"}), ("Watch for more", {"action": "watch"})]
     return detail(str(deal["title"]), photo(deal.get("image")) or art("deals"), pairs, actions)
 

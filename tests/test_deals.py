@@ -135,11 +135,20 @@ def test_score_wording_about_and_above_the_market() -> None:
     assert above.versus_market_pct == -30 and above.score < about.score
 
 
-def test_far_under_is_flagged_for_the_buyer_to_check() -> None:
-    deal = score(listing("Road bike", 2000), ["road", "bike"], market_of(18500), None, TODAY)
-    assert deal is not None
-    assert "far_under" in deal.flags
-    assert "check it's the whole item" in deal.why
+def test_far_under_the_market_is_dropped_not_shown() -> None:
+    # 89% under what it sells for is a placeholder price or a scam, not a deal to show.
+    assert (
+        score(listing("Road bike", 2000), ["road", "bike"], market_of(18500), None, TODAY) is None
+    )
+    # 70% under is the edge: still shown.
+    kept = score(listing("Road bike", 5550), ["road", "bike"], market_of(18500), None, TODAY)
+    assert kept is not None and "far_under" not in kept.flags
+
+
+def test_placeholder_prices_under_five_dollars_are_dropped() -> None:
+    for cents in (0, 100, 499):
+        assert score(listing("Road bike", cents), ["road", "bike"], None, None, TODAY) is None
+    assert score(listing("Road bike", 500), ["road", "bike"], None, None, TODAY) is not None
 
 
 def test_parts_and_accessories_sink_unless_asked_for() -> None:
@@ -579,8 +588,6 @@ def test_the_headline_when_nothing_fits_or_nothing_is_priced() -> None:
 def test_the_headline_is_careful_with_near_misses() -> None:
     near = deals.headline([deal_of(FLASK, "missing_words")], 3000, None, site)
     assert near.startswith("Closest match: [Hydro Flask 32 oz]")
-    steal = deals.headline([deal_of(FLASK, "far_under")], 3000, market_of(9000), site)
-    assert steal.endswith("check it's the whole item.")
     long = listing("Hydro Flask " + "very " * 20 + "big", 1800, url="u")
     title = deals.headline([deal_of(long)], 3000, None, site).split("[")[1].split("]")[0]
     assert len(title) <= deals.HEADLINE_TITLE and title.endswith("very")
