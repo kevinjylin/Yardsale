@@ -237,6 +237,15 @@ EMAIL_OFF = (
     "Craigslist email isn't connected on this Yardsale server, so its agent can't answer "
     "Craigslist buyers yet; buyers in ASI:One and @yardsale still haggle with it."
 )
+CHAT_NOTICE_WINDOW = 86400.0  # seconds: Craigslist chat notices a seller hears about
+
+
+def _clip(said: str, limit: int = 140) -> str:
+    """One line of an email for the chat, cut at a word."""
+    said = " ".join(said.split())
+    return said if len(said) <= limit else said[:limit].rsplit(" ", 1)[0] + "…"
+
+
 CRAIGSLIST_CHAT = (
     "It can't read messages sent in Craigslist's own chat, though. If a buyer messaged you "
     "there, ask them to email the address on the post instead."
@@ -2447,15 +2456,24 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if not actions:
                 actions.append(("Craigslist post", {"action": "craigslist", **item_ref(listing)}))
         lines += craigslist_mail.seller_lines(store, active)
-        # TODO: add recent_exchanges. Once craigslist_mail.recent_exchanges(store, conv.owner,
-        # limit=5) is merged, list each Exchange here (title, buyer_label, buyer_said, we_said)
-        # so the seller sees what buyers wrote and what the agent answered.
+        # What buyers wrote and what each item's agent answered, newest first.
+        for exchange in craigslist_mail.recent_exchanges(store, conv.owner, limit=5):
+            lines.append(
+                f"- {exchange.buyer_label} on your {exchange.title}: "
+                f'"{_clip(exchange.buyer_said)}" I answered: "{_clip(exchange.we_said)}"'
+            )
         try:
             email_on = craigslist_mail.settings_from_env() is not None
         except craigslist_mail.MailConfigError:
             email_on = False
         about = [AGENT_ANSWERS_EMAIL if email_on else EMAIL_OFF]
         if posted:
+            chats = craigslist_mail.chat_notices_since(store, store.clock() - CHAT_NOTICE_WINDOW)
+            if chats:
+                about.append(
+                    f"Craigslist says {chats} chat message{'s' if chats != 1 else ''} came in "
+                    "over the last day."
+                )
             about.append(CRAIGSLIST_CHAT)
         head = (
             f"Buyers for your {active[0].title}:"
@@ -2464,6 +2482,29 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         )
         text = "\n".join([head, *lines, "", *about])
         return Reply(text, cards.buyers(about[0], lines, actions))
+
+    def post_link(conv: Conversation, text: str) -> str | None:
+        """A seller pasting their live Craigslist post's link: save which listing it is, so
+        buyers' emails about it reach its agent whatever subject they write. None when the
+        message has no post link or the conversation has nothing for sale."""
+        links = craigslist_mail.post_links(text)
+        active = store.owned(conv.owner, ACTIVE)
+        if not links or not active:
+            return None
+        listing = craigslist_mail.match_slug(store, links[0].slug) if links[0].slug else None
+        if listing is None or listing.owner != conv.owner:
+            if len(active) > 1:
+                return (
+                    "I couldn't tell which of your listings that post is for. Use the exact "
+                    'title from "craigslist" when you post, then paste the link again.'
+                )
+            listing = active[0]
+        if not craigslist_mail.record_post_link(store, listing.item_id, text):
+            return None
+        return (
+            f"Got it: that Craigslist post is your {listing.title}. Buyers' emails about it go "
+            "straight to its agent, whatever subject they write."
+        )
 
     def item_ref(listing: Listing) -> dict[str, str]:
         return {"item_id": listing.item_id}
@@ -2878,6 +2919,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             answer = craigslist_mail.post_reply(store, conv.owner, posting)
             if answer is not None:
                 return answer
+        linked = post_link(conv, text)
+        if linked is not None:
+            return linked
         command = commands.parse(text)
         if command is not None and command.error:
             return command.error

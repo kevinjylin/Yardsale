@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from tests import fakes, sim
-from yardsale import asione, chat, commands
+from yardsale import asione, chat, commands, craigslist_mail
 from yardsale.asione import SellerMessage
 from yardsale.store import Store
 
@@ -175,3 +175,45 @@ def test_choice_answers() -> None:
     assert commands.choice_answer("something else", 2) == -1
     assert commands.choice_answer("yes, approve it", 2) is None
     assert commands.choice_answer("haggle with them", 2) is None
+
+
+async def test_buyers_view_shows_what_buyers_wrote_and_chat_notices(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seller sees each answered email and hears about Craigslist chat they can't read."""
+    monkeypatch.setenv("YARDSALE_MAIL_ADDRESS", "yardsale.test@example.com")
+    monkeypatch.setenv("YARDSALE_MAIL_PASSWORD", "app-password")
+    async with sim.running_market(store) as market:
+        seller = market.user("seller")
+        await list_and_post(seller)
+        (listing,) = store.active()
+        answer = craigslist_mail.Answer(
+            "asking",
+            listing.item_id,
+            "email-abc123",
+            "It's still available at $360. Make me an offer.",
+            "key-1",
+            buyer_said="Hello is the bike still available",
+        )
+        craigslist_mail._record_exchange(store, answer)
+        craigslist_mail._record_chat_notice(store, "notice-1")
+        reply = await seller.say("someone messaged me, reply to them")
+        assert '"Hello is the bike still available"' in reply
+        assert "I answered: \"It's still available at $360" in reply
+        assert "Buyer 1 on your" in reply
+        assert "1 chat message came in over the last day" in reply
+
+
+async def test_a_pasted_post_link_is_saved_for_the_listing(
+    market: sim.Market, store: Store
+) -> None:
+    """Buyers write their own subjects, so the seller's post link is what matches their email."""
+    seller = market.user("seller")
+    await seller.say("sell this, at least $300", BIKE)
+    await seller.say("approve")
+    (listing,) = store.active()
+    link = "https://www.craigslist.org/view/d/san-francisco-trek-fx-disc/otenzZmpUXQLFoGHL2bxr7"
+    reply = await seller.say(f"here it is {link}")
+    assert "that Craigslist post is your Trek" in reply
+    found = craigslist_mail.listing_for_post(store, "otenzZmpUXQLFoGHL2bxr7")
+    assert found is not None and found.item_id == listing.item_id

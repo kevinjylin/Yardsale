@@ -583,6 +583,8 @@ def post_text(listing: Listing, title: str, settings: MailSettings | None) -> st
         "When a buyer emails, I answer within seconds: I haggle with your prices (never below "
         'your lowest), and send a payment link once they say deal. Say "my listings" to see '
         "Craigslist buyers.",
+        "Once it's up, paste the post's link here, so I know it's yours even when a buyer "
+        "writes their own subject.",
     ]
     return "\n\n".join(p.strip() for p in paragraphs if p.strip())
 
