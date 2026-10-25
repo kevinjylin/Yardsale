@@ -85,7 +85,7 @@ If the server starts with **different** addresses, the master seed is wrong (see
    | `YARDSALE_MASTER_SEED` | the agents' identities (see step 3) |
    | `YARDSALE_API_KEY` | `@yardsale`'s key for the HTTP API (`X-Yardsale-Key` header) |
    | `STRIPE_SECRET_KEY` + `YARDSALE_PAYMENTS=stripe` | test-mode payment links (`sk_test_...` only) |
-   | `YARDSALE_MAIL_ADDRESS=yardsaleagent@gmail.com` + `YARDSALE_MAIL_PASSWORD` | Craigslist email: a Gmail **app password**, not the account password |
+   | `YARDSALE_MAIL_ADDRESS=bopsai5@gmail.com` + `YARDSALE_MAIL_PASSWORD` | Craigslist email: a Gmail **app password**, not the account password |
    | `YARDSALE_ITEM_AVATARS=1` | optional; only matters with hosted item agents |
 
    Optional: `YARDSALE_HOST_ITEMS=2` (item agents get their own Agentverse profile page; creates and
@@ -152,7 +152,7 @@ a deal search about $0.10 ($0.16 with Facebook).
      prices from the Scout, a fair range, and a plain warning that $20 is far under the market.
    - Say `lowest 150` (or something sane), then `approve`. The reply gives the item agent's address.
 2. **Craigslist post:** say `craigslist`. Post the title, price, and description it gives on
-   craigslist.org by hand (Craigslist bans automated posting), with yardsaleagent@gmail.com as the
+   craigslist.org by hand (Craigslist bans automated posting), with bopsai5@gmail.com as the
    email, and click the confirmation link Craigslist emails. Paste the **title exactly**: it's how
    buyers' emails are matched to the item.
 3. **Buyer on Craigslist, from a phone:** reply to the post with a lowball ("would you take $40?"),
