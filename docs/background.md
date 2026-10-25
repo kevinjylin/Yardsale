@@ -176,6 +176,30 @@ send a full `image/...`, and each message's attachments are logged (URI, type, m
 the text). A message ASI:One sends twice (same message ID) gets
 the same answer again instead of being acted on twice.
 
+### Messages the chat doesn't recognize
+
+On October 25 a seller who had listed a ThermoFlask and posted it on Craigslist typed "someone
+messaged us message them back", then "someone messaged me about the waterbottle reply to them
+and haggle", and both times got the greeting and the home menu. Now:
+
+- **A seller asking about buyers** ("someone messaged me", "any buyers?", "did anyone reply",
+  "message them back", "reply to them and haggle") gets each live listing's Craigslist post and
+  who's emailing, with the highest offer. The reply says the item's agent answers Craigslist
+  emails by itself within seconds, so the seller doesn't need to tell it to, and that messages
+  in Craigslist's own chat can't be read (ask buyers to email). Patterns in
+  [commands.py](../yardsale/commands.py) catch these first; ASI:One's reader also has `buyers`
+  and `status` intents ("did it sell?" shows `my listings`). Either reading only shows a view.
+- **Haggling words from a seller never start the buyer agent.** "Haggle with them" from a
+  seller with nothing searched shows their buyers; with search results too, it asks which.
+- **Anything else unclear** gets a short question about what the conversation has going, with
+  a button for the likeliest one or two (a proposal waiting, buyers for a live listing, the
+  last search, deals, orders, negotiations, watches) and Something else. A bare "yes", "the
+  second one", or "no" answers it (`awaiting` "choice"); anything else drops the question. The
+  buttons only show things; approving and buying still take the proposal's or counter's own
+  "yes" or button.
+- **The greeting is for first contact only.** A conversation that already has history gets
+  plain help, never "Hi, I'm Yardsale" again.
+
 ### Several photos in one message
 
 For a student moving out, one item per message is too slow. A message can carry up to 8 photos
