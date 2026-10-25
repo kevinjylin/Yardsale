@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from uuid import uuid4
 
 from uagents_core.contrib.protocols.chat import MetadataContent
@@ -70,6 +71,14 @@ JOINED = (
     "live."
 )
 SELL_HINT = "send me a photo of something"
+# The card buttons that sign a student up. A tap on one of these is never answered with the
+# welcome again.
+SIGN_UP_ACTIONS = frozenset({"student", "not_student", "student_email"})
+
+
+def signing_up(choice: Mapping[str, object] | None) -> bool:
+    """Whether a tapped card button is one of the sign-up steps."""
+    return choice is not None and choice.get("action") in SIGN_UP_ACTIONS
 
 
 def student_welcome() -> MetadataContent:

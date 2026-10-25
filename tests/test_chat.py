@@ -30,6 +30,7 @@ from yardsale.models import Comp
 from yardsale.store import ACTIVE, CANCELED, PROPOSED, Store
 
 BIKE = fakes.photo_url("bike")
+UPLOADS = {"attachments": "true"}
 ADDRESS = re.compile(r"agent1q[0-9a-z]{50,}")
 COUNTERED = re.compile(r"countered with \$([\d,]+)")
 
@@ -162,9 +163,14 @@ async def test_a_resent_message_is_answered_again_not_redone(
     seller = market.user("seller")
     msg = sim.chat_message("sell", BIKE)
     await seller.send(msg)
-    first = [(await seller.next_reply()).text() for _ in range(2)]  # proposal, then its sales
+    first = await seller.next_reply()  # the proposal and its sales, in one message
+    assert len(sim.cards_of(first)) == 2
     await seller.send(msg)
-    assert [(await seller.next_reply()).text() for _ in range(2)] == first
+    again = await seller.next_reply()
+    # The same words, but not the cards again: ASI:One showed resent cards twice.
+    assert again.text() == first.text()
+    assert sim.cards_of(again) == []
+    assert seller.replies.empty()
     assert len(store.owned(proposal_owner(store))) == 1
 
 
@@ -415,17 +421,16 @@ async def test_a_session_start_gets_the_uploads_welcome_and_no_text(market: sim.
     assert reply.content[0].metadata == {"attachments": "true"}
 
 
-async def test_a_session_start_with_a_photo_is_welcomed_then_priced(market: sim.Market) -> None:
+async def test_a_session_start_with_a_photo_is_priced_in_one_message(market: sim.Market) -> None:
     seller = market.user("seller")
     await seller.send(sim.chat_message("sell this", fakes.storage_uri("bike"), start_session=True))
-    welcome = await seller.next_reply()
-    assert [type(c) for c in welcome.content] == [MetadataContent]
     proposal = await seller.next_reply()
     assert "suggested listing" in proposal.text()
-    # The welcome already offered uploads, so the proposal doesn't repeat it.
-    assert not any(
-        getattr(c, "metadata", None) == {"attachments": "true"} for c in proposal.content
-    )
+    # The answer offers uploads itself, rather than a second message doing it.
+    uploads = [c for c in proposal.content if getattr(c, "metadata", None) == UPLOADS]
+    assert len(uploads) == 1
+    await asyncio.sleep(0.2)
+    assert seller.replies.empty()
 
 
 async def test_a_repeated_photo_still_being_priced_says_so(

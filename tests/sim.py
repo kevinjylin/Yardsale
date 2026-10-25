@@ -60,6 +60,15 @@ def card_of(msg: ChatMessage) -> Card | None:
     return None
 
 
+def cards_of(msg: ChatMessage) -> list[Card]:
+    """Every Interactive Card a reply carries, in order."""
+    return [
+        card
+        for block in msg.content
+        if isinstance(block, MetadataContent) and (card := extract_card(block)) is not None
+    ]
+
+
 def card_text(card: Card) -> str:
     """Everything a card shows, one piece per line: titles, text, "label: value" rows, badges,
     carousel items, and button labels. What a person reading the card would see."""

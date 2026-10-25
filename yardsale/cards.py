@@ -359,6 +359,22 @@ def notice(text_shown: str, actions: Sequence[Action] = (), title: str = "") -> 
     return screen(title or "Yardsale", "warning" if trouble else "info", lead, actions=actions)
 
 
+SOMETHING_ELSE: Action = ("Something else", MAIN_MENU[1])
+
+
+def question(asked: str, actions: Sequence[Action]) -> MetadataContent:
+    """A short clarifying question, with a button for each likely meaning and Something else."""
+    return screen(
+        "Did you mean…", "info", [text(asked, "emphasis")], actions=[*actions, SOMETHING_ELSE]
+    )
+
+
+def buyers(about: str, lines: Sequence[str], actions: Sequence[Action]) -> MetadataContent:
+    """A seller's buyers: each listing's Craigslist post and who's emailing about it."""
+    body: list[Node] = [steps(list(lines))] if lines else []
+    return screen("Your buyers", "craigslist", [text(about)], body, [*actions, LISTINGS])
+
+
 # --- The menu, selling, buying -------------------------------------------------------------------
 
 
@@ -719,13 +735,17 @@ def craigslist_post(listing: Listing, title: str, email: str | None) -> Metadata
     return screen("Your Craigslist post", "craigslist", lead, body, [LISTINGS])
 
 
+COMPS_SHOWN = 6  # eBay sales in a proposal's carousel
+
+
 def comps(listing: Listing) -> MetadataContent | None:
-    """The eBay sales behind a proposal's price, with their photos."""
+    """The eBay sales behind a proposal's price, with their photos. It goes in the same message
+    as the proposal card, which has the Approve and Main menu buttons, so it has neither."""
     appraisal = listing.appraisal
     if appraisal is None or not appraisal.matches:
         return None
     items = []
-    for n, match in enumerate(appraisal.matches[:6]):
+    for n, match in enumerate(appraisal.matches[:COMPS_SHOWN]):
         sale = match.comp
         items.append(
             item(
@@ -738,16 +758,7 @@ def comps(listing: Listing) -> MetadataContent | None:
                 badges=[("Same product", "success") if match.same_product else ("Similar", "info")],
             )
         )
-    items.append(
-        item(
-            f"{listing.item_id}-approve",
-            "Looks right? List it",
-            ("Approve & list", {"action": "approve", "item_id": listing.item_id}),
-            image=art("live"),
-            subtitle=f"Asking {usd(listing.asking_cents)}",
-        )
-    )
-    return carousel("The eBay sales behind this price", appraisal.basis or None, items)
+    return carousel("The eBay sales behind this price", appraisal.basis or None, items, menu=False)
 
 
 def waiting(entries: Sequence[tuple[int, str, Listing | None]], head: str) -> MetadataContent:

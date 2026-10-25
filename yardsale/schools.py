@@ -88,9 +88,27 @@ def same_school(one: str, two: str) -> bool:
     return bool(one) and one == two
 
 
+# Longer school names that are read as letters ("UCLA", not "Ucla"). A one-word name of three
+# letters or fewer ("mit", "ucr") and the University of California's "uc" names are always read as
+# letters; in a longer name ("cal-poly") a short word is still a word.
+ACRONYMS = frozenset({"ucla", "ucsd", "ucsb", "ucsc", "uiuc", "unlv", "tamu", "utsa", "umbc"})
+# Domains whose label isn't the name people use.
+NAMES = {"ox": "Oxford", "cam": "Cambridge"}
+
+
+def _word_label(word: str, alone: bool) -> str:
+    if word in NAMES:
+        return NAMES[word]
+    short = alone and len(word) <= 3
+    if short or word in ACRONYMS or (word.startswith("uc") and len(word) <= 5):
+        return word.upper()
+    return word.title()
+
+
 def school_label(key: str) -> str:
     """A readable name for a school key, for chat replies. The key is the authority; this is
-    only how it reads. "berkeley.edu" -> "Berkeley"."""
+    only how it reads. "berkeley.edu" -> "Berkeley", "ucr.edu" -> "UCR", "mit.edu" -> "MIT"."""
     suffix = academic_suffix(key)
     name = key[: -len(suffix)] if suffix else key
-    return name.replace("-", " ").replace(".", " ").title()
+    words = name.replace("-", " ").replace(".", " ").split()
+    return " ".join(_word_label(word, len(words) == 1) for word in words)
