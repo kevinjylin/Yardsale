@@ -8,8 +8,9 @@ costs about $0.03. It searches around a ZIP code, so `where` is a ZIP code here.
 Like Craigslist, OfferUp is local and in person, and the seller is a person, so nothing found
 here is agent-negotiable. OfferUp has its own "make offer" button for the buyer to use.
 
-Parsing follows the actor's documented sample output (October 24); it hasn't been run with a
-real key yet.
+Run live on October 24: every result parsed with a price and a link. The actor ignored
+`maxItems` and returned 85 results for 10, so the dataset read is capped (sources.run_actor's
+`limit`) and the parsed list is cut to `max_results` here as well.
 """
 
 from __future__ import annotations
@@ -97,4 +98,4 @@ async def search_offerup(query: str, where: str, max_results: int) -> list[Exter
         "fetchDetails": False,  # details cost a request each; results carry price and place
     }
     items = await run_actor(ACTOR, body, max_results, MAX_CHARGE_USD)
-    return parse_listings(items)
+    return parse_listings(items)[:max_results]

@@ -56,6 +56,9 @@ def test_parses_a_real_actor_result() -> None:
     assert listing.location == "United States"
     assert listing.accepts_offers is True
     assert listing.url == SAMPLE["url"]
+    assert listing.seller_rating == 75.0  # sellerFeedbackPercent
+    assert listing.photo_count == 1  # one imageUrl
+    assert listing.posted_at == ""  # the actor gives no listing date
 
 
 def test_total_includes_shipping() -> None:

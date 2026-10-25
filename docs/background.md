@@ -210,8 +210,11 @@ Code: [chat.py](../yardsale/chat.py), [shopper.py](../yardsale/shopper.py),
 
 Code: [dealfinder.py](../yardsale/dealfinder.py) (the agent), [elsewhere.py](../yardsale/elsewhere.py)
 (the search and cache), and [deals.py](../yardsale/deals.py) (the scoring), on Rahul's
-[sources.py](../yardsale/sources.py) and [watches.py](../yardsale/watches.py). Added October 24;
-**not yet run with real Apify keys** (every test uses fake sources and fake comps).
+[sources.py](../yardsale/sources.py) and [watches.py](../yardsale/watches.py). Added October 24.
+The probe below was run live once that day (road bike, max $300, ZIP 94103, Facebook on): all
+four sources parsed with no missing prices or links (OfferUp 3 s, eBay 7 s, Craigslist 16 s,
+Facebook 20 s; 10 comps gave a $600 market from 3 same-thing sales). Every test uses fake
+sources and fake comps.
 
 After talking to a Fetch judge, agent-to-agent purchases were dropped from the pitch. The buyer
 product is: say what you want and your max, and Yardsale's agents find the best-priced,
@@ -258,7 +261,13 @@ each is a good deal. Yardsale's own listings still come first when they match.
   search per source (10 results each, plus 10 comps; about $0.10, $0.16 with Facebook) and
   prints per-source counts, what each parser could read (prices, links, photo counts,
   conditions, dates), the market price, and the top 3 with scores, so the OfferUp and Facebook
-  parsers can be checked against live actor output. Not yet run.
+  parsers can be checked against live actor output. Its first run found two things, both
+  fixed: OfferUp ignored its result cap (85 for 10; Apify's `limit` and a cut after parsing
+  bound it now), and "Road Bike Brake Levers" at 84% under the market ranked third (bike parts
+  are now accessory words, and a part priced far under the market is dropped, not shown).
+  What each site gives: Craigslist a photo count (`imageCount`) and a date but no condition;
+  eBay a condition and seller rating but no date; Facebook search results only a primary photo
+  (condition and date need its paid per-listing details). Unknown signals score as unknown.
 - `watch for it` turns the last search (or `watch for a road bike under $300`) into a standing
   search that polls every 6 hours for a week. The Market can't message a chat later, so any
   reply mentions new finds, and `my watches` shows them (then they count as told). `stop
@@ -271,7 +280,7 @@ OfferUp uses `igolaizola/offerup-scraper` (most used of the OfferUp actors: abou
 rating; about $1.40 per 1,000 results), searched around `YARDSALE_OFFERUP_ZIP` (94103 by
 default). Facebook uses Apify's own `apify/facebook-marketplace-scraper` (about 11,700 users;
 $2.60 to $6.20 per 1,000 depending on the plan), which takes a Marketplace search URL; it drops
-the seller's name. Both parse the actors' documented sample output and haven't been run live.
+the seller's name. Both were run live once on October 24 and parsed every result.
 
 ## Buying through `@yardsale` (Fetch Business)
 

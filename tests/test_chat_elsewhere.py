@@ -123,9 +123,11 @@ async def test_deals_are_scored_against_what_the_item_sells_for(
     first = next(n for n, line in enumerate(lines) if line.startswith("1. "))
     assert "$180 on Craigslist, 42% under the $310 typical sold price (Oakland, CA)" in lines[first]
     assert "$210 + $30 shipping on eBay, 23% under the $310 typical sold price" in lines[first + 1]
-    assert "looks like an accessory" in lines[first + 2]
+    # The $25 helmet is 92% under a $310 bike and an accessory: a part priced as a part, dropped.
+    assert "helmet" not in text and not lines[first + 2].startswith("3. ")
     card = card_in(reply)
     assert card is not None and isinstance(card.payload, CarouselCardPayload)
+    assert len(card.payload.items) == 2
     assert card.payload.items[0].subtitle == "$180, 42% under typical"
     assert card.payload.items[1].subtitle == "$240 with shipping, 23% under typical"
     assert ebay.calls == ["road bike"]

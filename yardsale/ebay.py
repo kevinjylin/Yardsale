@@ -82,10 +82,13 @@ def parse_listing(raw: Any) -> ExternalListing | None:
         condition=one_line(raw.get("condition"), MAX_CONDITION),
         shipping_cents=cents_or_none(raw.get("shippingCost")),
         accepts_offers=raw.get("bestOffer") is True,
-        # Quality signals for the deal finder, under the names eBay scrapers tend to use; a
-        # field this actor doesn't return is simply unknown.
+        # Quality signals for the deal finder. This actor returns one `imageUrl` and the
+        # seller's `sellerFeedbackPercent` (checked against its output on October 24); it gives
+        # no listing date, so that stays unknown.
         photo_count=photo_count(raw.get("images") or raw.get("imageUrls") or raw.get("imageUrl")),
-        seller_rating=percent(raw.get("sellerFeedbackPercentage") or raw.get("feedbackPercent")),
+        seller_rating=percent(
+            raw.get("sellerFeedbackPercent") or raw.get("sellerFeedbackPercentage")
+        ),
     )
 
 

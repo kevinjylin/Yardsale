@@ -156,6 +156,56 @@ def test_parts_and_accessories_sink_unless_asked_for() -> None:
     assert asked is not None and asked.flags == ()
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Vintage Modolo Pro Gold Drilled Road Bike Brake Levers",  # ranked 3rd on October 24
+        "Shimano 105 road bike shifters",
+        "Carbon road bike fork",
+        "Road bike frame only",
+        "Road bike wheelset",
+    ],
+)
+def test_a_part_priced_far_under_the_market_is_dropped_not_shown(title: str) -> None:
+    # 84% under the $600 typical sold price: that's a part priced as a part, not a bargain bike.
+    assert score(listing(title, 9500), ["road", "bike"], market_of(60000), None, TODAY) is None
+    # Priced like a whole bike, it's still shown, sunk and flagged, for the buyer to judge.
+    kept = score(listing(title, 40000), ["road", "bike"], market_of(60000), None, TODAY)
+    assert kept is not None and set(kept.flags) & {"parts", "accessory"}
+    # Without a market price there's no "far under", so it's only sunk.
+    sunk = score(listing(title, 9500), ["road", "bike"], None, None, TODAY)
+    assert sunk is not None and set(sunk.flags) & {"parts", "accessory"}
+
+
+@pytest.mark.parametrize(
+    ("title", "wanted", "kind"),
+    [
+        ("Road bike brake levers", ["road", "bike"], "accessory"),
+        ("Trek road bike, carbon frame", ["road", "bike"], None),  # a whole bike with a frame
+        ("Road bike frame only", ["road", "bike"], "parts"),
+        ("Dyson vacuum charger and cord", ["dyson", "vacuum"], "accessory"),
+        ("Sofa cushion covers", ["sofa"], "accessory"),
+        ("Standing desk legs", ["standing", "desk"], "accessory"),
+        ("Dyson vacuum charger", ["dyson", "charger"], None),  # asked for
+        ("Nintendo Switch, box only", ["nintendo", "switch"], "parts"),
+    ],
+)
+def test_part_words_and_phrases(title: str, wanted: list[str], kind: str | None) -> None:
+    assert deals.not_the_thing(title, set(deals.words(title)), set(wanted)) == kind
+
+
+def test_part_sales_never_set_the_market_price() -> None:
+    comps = [
+        comp("Trek road bike", 600),
+        comp("Giant road bike", 580),
+        comp("Fuji road bike", 620),
+        comp("Road bike brake levers", 40),
+        comp("Road bike frame only", 150),
+    ]
+    market = market_price(comps, "road bike")
+    assert market is not None and market.sales == 3 and market.typical_cents == 60000
+
+
 def test_missing_search_words_cost_points_and_are_named() -> None:
     full = score(listing("Trek road bike", 15000), ["road", "bike"], market_of(18500), None, TODAY)
     partial = score(listing("Trek bike", 15000), ["road", "bike"], market_of(18500), None, TODAY)
@@ -225,7 +275,8 @@ def test_rank_puts_price_against_the_market_first_then_quality() -> None:
             listing("Trek road bike 54cm", 18000),  # $180: 42% under
             listing("Specialized road bike", 18000, "offerup", condition="Like new"),  # same
             listing("Road bike", 40000),  # over the max
-            listing("Road bike helmet", 2500),  # an accessory
+            listing("Road bike helmet", 2500),  # an accessory, far under market: dropped
+            listing("Road bike helmet, large", 15000),  # an accessory priced like a bike: sunk
         ],
         "find me a road bike",
         30000,
@@ -236,9 +287,10 @@ def test_rank_puts_price_against_the_market_first_then_quality() -> None:
         "Specialized road bike",  # 42% under, and in better condition than the Trek
         "Trek road bike 54cm",
         "Giant road bike",
-        "Road bike helmet",
+        "Road bike helmet, large",
     ]
-    assert [d.versus_market_pct for d in found] == [42, 42, 23, 92]
+    assert [d.versus_market_pct for d in found] == [42, 42, 23, 52]
+    assert found[-1].total_cents == 15000 and "accessory" in found[-1].flags
 
 
 def test_rank_without_a_market_judges_matches_against_each_other() -> None:
