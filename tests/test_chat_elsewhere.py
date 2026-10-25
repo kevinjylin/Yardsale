@@ -326,7 +326,9 @@ async def test_the_log_has_no_search_words_or_max(
 ) -> None:
     with caplog.at_level(logging.DEBUG):
         await shop.user("buyer").say("find me a zebra bike under $277")
-    assert "zebra" not in caplog.text and "277" not in caplog.text
+    # The messages, not caplog.text, whose "chat.py:2779" line numbers can carry the digits.
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "zebra" not in logged and "277" not in logged
 
 
 @pytest.mark.parametrize(

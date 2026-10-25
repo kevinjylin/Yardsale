@@ -22,6 +22,7 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from yardsale import places
 from yardsale.sources import (
     ExternalListing,
     SourceError,
@@ -111,9 +112,13 @@ def search_url(query: str, city: str) -> str:
 
 
 async def search_facebook(query: str, where: str, max_results: int) -> list[ExternalListing]:
-    """Search one city's Marketplace. `where` is Marketplace's city slug, e.g. "sanfrancisco"."""
+    """Search one city's Marketplace. `where` is Marketplace's city slug, e.g. "sanfrancisco",
+    or a ZIP code, which searches the Marketplace of the city it's in (places.py)."""
     if not query.strip():
-        raise SourceError("there's nothing to search Facebook Marketplace for")
+        raise SourceError("there's nothing to search Facebook Marketplace for", "setup")
+    if re.fullmatch(r"\d{5}", where.strip()):  # a ZIP code: its city's Marketplace
+        place = places.from_zip(where.strip())
+        where = place.facebook if place and place.facebook else DEFAULT_CITY
     body = {
         "startUrls": [{"url": search_url(query, where or DEFAULT_CITY)}],
         "resultsLimit": max_results,

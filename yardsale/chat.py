@@ -109,6 +109,7 @@ from yardsale import (
     craigslist_buyer,
     craigslist_mail,
     deals,
+    elsewhere,
     maps,
     meetup,
     onboarding,
@@ -126,6 +127,7 @@ from yardsale.elsewhere import (
     Found,
     Search,
     names_of,
+    search_place,
     search_words,
     site_name,
 )
@@ -312,9 +314,10 @@ class Reply(NamedTuple):
     card: MetadataContent | None = None  # an Interactive Card shown with the text
     # Messages sent right after this one, such as the eBay sales behind a proposal's price.
     more: tuple[tuple[str, MetadataContent | None], ...] = ()
-    # (search, budget): search other sites, outside the conversation's lock, and add the best
-    # deals to this text before it's sent.
-    elsewhere: tuple[str, int | None] | None = None
+    # (search, budget, ZIP code or ""): search other sites, outside the conversation's lock,
+    # and add the best deals to this text before it's sent. The ZIP is the place the buyer
+    # named ("in Berkeley"); "" searches the server's default place.
+    elsewhere: tuple[str, int | None, str] | None = None
 
 
 def as_reply(answer: str | Reply) -> Reply:
@@ -1056,14 +1059,35 @@ def market_note(found: Found) -> str:
 
 def elsewhere_text(found: Found, sites: str, headline: bool = True) -> str:
     """The deals on other sites, opening with the headline (deals.headline) unless the caller
-    puts it first itself."""
+    puts it first itself, or why there are none. "I didn't find" is only ever said of the sites
+    that answered; a site that failed is named with why (timed out, blocked, ...), a site still
+    searching is said to be, and a search where every site failed says it couldn't search."""
     about = f'"{found.query}"{_under(found.budget_cents)}'
-    if not found.deals:
-        lines = [f"I didn't find {about} on {sites} either."]
+    answered = [site_name(name) for name in found.searched]
+    failed = elsewhere.failed_sentence(found)
+    around = f", around {found.place}" if found.place else ""
+    if not found.deals and not answered and found.pending:
+        lines = [f"I'm still searching {names_of(found.pending)} for {about}."]
+        if failed:
+            lines.append(f"({failed}.)")
+        lines.append(SEARCHING_ELSEWHERE)
+    elif not found.deals and not answered:
+        lines = [
+            f"I couldn't search other sites for {about}: {failed or 'none of them answered'}. "
+            "That doesn't mean it isn't out there; ask me again in a minute."
+        ]
+    elif not found.deals:
+        lines = [f"I didn't find {about} on {elsewhere.and_list(answered)}{around} either."]
+        if elsewhere.unfit_sentence(found):
+            lines.append(elsewhere.unfit_sentence(found))
+        if failed:
+            lines.append(f"({failed}, so I couldn't check there.)")
     else:
         budget = found.budget_cents
         lines = [deals_headline(found), ""] if headline else []
         lines.append(f"Best deals on other sites for {about} ({market_note(found)}):")
+        if found.loose:
+            lines.append("Nothing had every word of your search, so these are the closest.")
         fitting = sum(1 for d in found.deals if not {"over_budget", "no_price"} & set(d.flags))
         said: set[str] = set()
         for n, deal in enumerate(found.deals, 1):
@@ -1078,10 +1102,11 @@ def elsewhere_text(found: Found, sites: str, headline: bool = True) -> str:
         lines.append(NOT_YARDSALE)
         if any(listing.source == "craigslist" for listing in found.listings):
             lines.append(CRAIGSLIST_OFFERS)
-    if found.failed:
-        names = " and ".join(site_name(name) for name in found.failed)
-        lines.append(f"({names} couldn't be searched just now.)")
-    if found.pending:
+        if found.place:
+            lines.append(f"(Local sites searched around {found.place}.)")
+        if failed:
+            lines.append(f"({failed}, so these are from {elsewhere.and_list(answered)} only.)")
+    if found.pending and (found.deals or answered):
         lines.append(f"(Still searching {names_of(found.pending)}; I'll send anything better.)")
     lines.append(watch_offer(sites))
     return "\n".join(lines)
@@ -1890,7 +1915,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return listings
         return students.listings_for(store, listings, conv.owner)
 
-    def find(conv: Conversation, query: str, budget_cents: int | None) -> str | Reply:
+    def find(
+        conv: Conversation, query: str, budget_cents: int | None, near: str = ""
+    ) -> str | Reply:
+        """Yardsale's listings for a search, then other sites'. `near` is the ZIP code of a
+        place the buyer's message named, when the query (ASI:One's reading) lost it."""
+        near = search_place(query) or near
         found = search(for_sale(conv), query, budget_cents)
         if conv.awaiting in ("max", "counter"):
             # A new search ends the haggle: a bare "$300" is now this search's budget, and
@@ -1901,7 +1931,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         conv.selected = found[0].item_id if len(found) == 1 else None
         conv.last_query = search_words(query) or conv.last_query
         if not found and finder.enabled and search_words(query):
-            return look_elsewhere(conv, query, budget_cents, "Nothing on Yardsale matches")
+            return look_elsewhere(conv, query, budget_cents, "Nothing on Yardsale matches", near)
         if not found:
             under = f" under {usd(budget_cents)}" if budget_cents else ""
             about = f' for "{query}"' if query else ""
@@ -1916,7 +1946,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             words = search_words(query)
             conv.last_query = words
             text = f"{reply.text}\n\nI'm also checking {finder.site_names()} for more."
-            return reply._replace(text=text, elsewhere=(words, budget_cents))
+            return reply._replace(text=text, elsewhere=(words, budget_cents, near))
         return reply
 
     def pick(conv: Conversation, number: int) -> str:
@@ -2120,7 +2150,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     # --- Other sites ------------------------------------------------------------------------
 
-    def look_elsewhere(conv: Conversation, query: str, budget: int | None, lead: str) -> Reply:
+    def look_elsewhere(
+        conv: Conversation, query: str, budget: int | None, lead: str, near: str = ""
+    ) -> Reply:
         """Search other sites after this reply's text, outside the lock (handle_safely)."""
         words = search_words(query)
         conv.last_query = words
@@ -2128,7 +2160,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         text = (
             f'{lead} "{words}"{_under(budget)} right now, so I\'m checking {finder.site_names()}.'
         )
-        return Reply(text, elsewhere=(words, budget))
+        return Reply(text, elsewhere=(words, budget, near))
 
     def asked_for(conv: Conversation, command: commands.Command) -> tuple[str, int | None]:
         """The search and budget a "search other sites" or "watch" message is about: its own
@@ -2148,7 +2180,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         conv.budget = budget or conv.budget
         return Reply(
             f'Checking {finder.site_names()} for "{query}"{_under(budget)}.',
-            elsewhere=(query, budget),
+            elsewhere=(query, budget, search_place(command.text)),
         )
 
     def with_deals(reply: Reply, found: Found) -> Reply:
@@ -2199,10 +2231,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         sites answer: by the finder's deadline (elsewhere.SOURCE_WITHIN), with slower sites'
         deals after that. A search that's already answered (asked before) goes in the reply."""
         assert reply.elsewhere is not None
-        query, budget = reply.elsewhere
+        query, budget, near = reply.elsewhere
         reply = reply._replace(elsewhere=None)
         try:
-            running = finder.search(query, budget)
+            running = finder.search(query, budget, near)
         except SourceError as ex:
             return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
         if running.ready() or deliver is None:
@@ -2588,7 +2620,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         # Not a command, or not one that fits this conversation: ASI:One reads it.
         wanted = await read(text, False)
         if wanted.intent == "buy":  # always a search; haggling is only ever an explicit command
-            return find(conv, wanted.query, to_cents(wanted.budget_usd))
+            return find(conv, wanted.query, to_cents(wanted.budget_usd), search_place(text))
         if wanted.intent == "sell":
             asking, floor = to_cents(wanted.asking_usd), to_cents(wanted.floor_usd)
             if selling and (asking or floor):

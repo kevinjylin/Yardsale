@@ -89,7 +89,8 @@ async def list_bike(market: sim.Market, asking: int = 360, lowest: int = 300) ->
 @pytest.mark.parametrize(
     ("text", "query"),
     [
-        ("find me the best deal on Jordan 4s under $200", "jordan 4s"),
+        # The sites get the core words, with "4s" read as the model number 4 (deals.site_query).
+        ("find me the best deal on Jordan 4s under $200", "jordan 4"),
         ("best price on a hydro flask", "hydro flask"),
         ("The buyer wants Jordans under $200", "jordan"),  # ASI:One's planner, relaying
     ],

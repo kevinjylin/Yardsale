@@ -111,7 +111,8 @@ def test_parses_a_real_actor_result() -> None:
     assert listing.external_id == "58481048"
     assert listing.title == "Paw patrol tricycle"
     assert listing.price_cents == 2000
-    assert listing.location == "sunset / parkside"
+    # The town from the slug: the actor's `location` was another post's on October 24.
+    assert listing.location == "San Francisco"
     assert listing.latitude == 37.7441 and listing.longitude == -122.4863
     assert listing.posted_at == "2026-10-24"
     assert listing.image_url == REAL["images"][0]  # type: ignore[index]

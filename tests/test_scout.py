@@ -115,10 +115,20 @@ def test_source_prices_are_quartiles_and_the_closest_have_links() -> None:
     assert scout.source_prices("ebay", "Trek FX 2 Disc hybrid bike", [BIKES[-1]]) is None
 
 
-def test_zip_codes_scope_offerup_only() -> None:
+def test_zip_codes_scope_the_local_sites_only() -> None:
+    """Craigslist searches within a radius of a ZIP code too (craigslist.search_url)."""
     assert scout.scope_for("offerup", "94110") == "94110"
     assert scout.scope_for("offerup", "9411") == ""
-    assert scout.scope_for("craigslist", "94110") == ""
+    assert scout.scope_for("craigslist", "94110") == "94110"
+    assert scout.scope_for("ebay", "94110") == ""
+
+
+def test_the_classifieds_get_the_core_words_and_ebay_the_exact_ones() -> None:
+    """Craigslist found nothing for the Identifier's full query on October 24."""
+    exact = "Air Jordan 4 Military Blue 2024 FV5029-141"
+    assert scout.query_for("ebay", exact) == exact
+    assert scout.query_for("craigslist", exact) == "air jordan 4 military blue"
+    assert scout.query_for("offerup", "Hydro Flask 32 oz") == "hydro flask"
 
 
 def test_seller_zip_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,7 +159,7 @@ async def test_the_scout_answers_with_every_site_at_once(store: Store) -> None:
     assert elapsed < 0.4  # both delays overlap
     assert report.request_id == "r1" and sorted(report.failed) == ["facebook", "offerup"]
     assert [(p.source, p.count) for p in report.sources] == [("craigslist", 5), ("ebay", 2)]
-    assert craigslist.calls == [("Trek FX 2 Disc hybrid bike", "", 20)]
+    assert craigslist.calls == [("trek fx 2 disc hybrid bike", "94110", 20)]
     assert ebay.calls == [("Trek FX 2 Disc hybrid bike", "", 20)]
 
 
@@ -186,7 +196,7 @@ async def test_a_priced_photo_carries_live_asking_prices(store: Store) -> None:
         "right now"
     )
     assert [p.source for p in view.sources] == ["craigslist"]
-    assert site.calls == [("Trek FX 2 Disc hybrid bike medium", "", 20)]
+    assert site.calls == [("trek fx 2 disc hybrid bike medium", "", 20)]
     # A restart reads the same view back.
     again = store.get(proposed.item_id)
     assert again is not None and again.market == view

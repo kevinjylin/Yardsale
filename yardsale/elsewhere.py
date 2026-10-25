@@ -16,6 +16,14 @@ are `pending`, and listings are scored without the comps if those are late. `Sea
 answers once every site has answered, failed, or run past SOURCE_LIMIT. Nothing is cancelled at
 the deadline, since a cancelled request doesn't stop a paid Apify run.
 
+Each answer says, per site (`Found.sites`), whether it answered with listings ("ok", with how
+many fit), answered with none ("empty"), couldn't be searched ("failed", with why: timed out,
+blocked, busy, out of credit, ...), or is still searching ("pending"). Only sites that answered
+may be said to have nothing.
+
+A place the buyer names ("in Berkeley", "near 94704") is a ZIP code (places.py), and the local
+sites (ZIP_SOURCES) search around it; without one, YARDSALE_ZIP, else each site's default.
+
 Every source call is a paid Apify run (about $0.03 to $0.05 for 20 results), and the comps
 search is another (about $0.08 for 20 sales), so:
 
@@ -35,20 +43,21 @@ search words are never logged; the log says how many listings came back.
 
     uv run python -m yardsale.elsewhere --probe "road bike" --max 300
 
-runs one small paid search per source (about 10 results each) plus one small comps search, and
-prints what each parser made of the live actor output. Set APIFY_TOKEN first; the output says
-roughly what it cost.
+runs one small paid search per source (about 10 results each) plus one small comps search
+through the same DealFinder, and prints each site's outcome, what each parser made of the live
+actor output, and the top deals. Set APIFY_TOKEN first; the output says roughly what it cost.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from yardsale import deals
+from yardsale import craigslist, deals, places
 from yardsale.deals import LIMIT, MarketPrice, ScoredDeal
 from yardsale.models import Comp
 from yardsale.search import CHEAP, STOPWORDS, words
@@ -66,7 +75,18 @@ MAX_CACHED = 64  # searches kept at once
 PER_SOURCE = 20  # results asked of each source, which is what each search costs
 COMPS = 20  # eBay sold listings asked for per search, about $0.004 each
 MIN_PRICE_CENTS = deals.MIN_PRICE_CENTS
-ZIP_SOURCES = frozenset({"offerup"})  # sources whose `where` is a ZIP code
+# Sources that search around a ZIP code when the buyer names a place (craigslist.py reads one
+# as "within MILES of it", facebook.py as its city's Marketplace).
+ZIP_SOURCES = frozenset({"offerup", "craigslist", "facebook"})
+# What each kind of failure (SourceError.kind) is called in a reply.
+FAILURE_WORDS = {
+    "timeout": "timed out",
+    "blocked": "blocked",
+    "busy": "too many searches at once",
+    "credit": "out of search credit",
+    "setup": "not set up here",
+    "error": "an error",
+}
 
 # (query, condition, max_results) -> eBay sold listings; researcher.search_ebay_sold
 Comps = Callable[[str, str, int], Awaitable[list[Comp]]]
@@ -81,13 +101,28 @@ SITE_NAMES = {
 # Words that name sites or ask to search them, so "search ebay for a road bike" is a search
 # for "road bike".
 SITE_WORDS = {
-    "ebay", "craigslist", "offerup", "offer", "up", "facebook", "fb", "marketplace", "other",
+    "ebay", "craigslist", "offerup", "offer", "facebook", "fb", "marketplace", "other",
     "site", "sites", "website", "websites", "elsewhere", "online", "check", "try", "look",
     "else", "anywhere", "place", "places", "and", "too", "also", "watch", "watching", "keep",
-    "let", "know", "if", "one", "show", "shows", "pop", "pops", "come", "comes", "notify",
+    "let", "know", "if", "show", "shows", "pop", "pops", "come", "comes", "notify",
     "tell", "when", "it", "that", "this", "out", "on", "at", "from", "max", "under",
-    "below", "budget", "most", "than", "less", "more", "no",
+    "below", "budget", "most", "than", "less", "more", "no", "near", "around", "nearby",
+    "local", "locally",
 }  # fmt: skip
+# Phrases removed before the words are read: amounts with their "under" ("under $30", "max
+# 300", "$30", "30 bucks"), "offer up", "if one shows up", and the Bay Area (each site's default
+# region already). "up" and "one" used to be site words, which made "xbox one" "xbox".
+_NOT_SEARCHED = re.compile(
+    r"\b(?:under|below|max(?:imum)?|budget(?:\s+of)?(?:\s+is)?|up\s+to|at\s+most|less\s+than|"
+    r"no\s+more\s+than|for)\s*\$\s?\d[\d,]*(?:\.\d+)?|"
+    r"\b(?:under|below|max(?:imum)?|budget(?:\s+of)?(?:\s+is)?|up\s+to|at\s+most|less\s+than|"
+    r"no\s+more\s+than)\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:dollars|bucks|usd))?\b|"
+    r"\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars|bucks|usd)\b|"
+    r"\boffer\s*up\b|\b(?:if\s+)?(?:one|any|it|something)?\s*(?:shows?|pops?|comes?)\s+up\b|"
+    r"\b(?:in|around|near)?\s*(?:the\s+)?(?:sf\s+)?bay\s+area\b",
+    re.IGNORECASE,
+)
+_TOKEN = re.compile(r"[a-z0-9]+(?:[.-][a-z0-9]+)*")
 
 
 def site_name(source: str) -> str:
@@ -95,13 +130,43 @@ def site_name(source: str) -> str:
 
 
 def search_words(query: str) -> str:
-    """The words worth searching other sites for: no filler, no site names, no amounts."""
-    kept = [
-        w
-        for w in words(query)
-        if w not in STOPWORDS and w not in CHEAP and w not in SITE_WORDS and not w.isdigit()
-    ]
+    """The words worth searching other sites for: no filler, no site names, no amounts, no
+    place ("in Berkeley", "near 94704": places.split reads that). Model numbers and sizes
+    stay ("jordan 4", "trek fx 2", "size 10"): dropping every number made "air jordan 4 retro"
+    a search for "air jordan retro", which found Jordan 11s and 12s on October 24."""
+    _, text = places.split(query)
+    text = _NOT_SEARCHED.sub(" ", text).lower().replace("'", "").replace("\u2019", "")
+    kept: list[str] = []
+    # "10.5" and "FV5029-141" stay whole, so a size or style code isn't read as two numbers.
+    for token in _TOKEN.findall(text):
+        word = token if any(c in token for c in ".-") else "".join(words(token))
+        if word and word not in STOPWORDS and word not in CHEAP and word not in SITE_WORDS:
+            kept.append(word)
     return " ".join(kept)
+
+
+def search_place(query: str) -> str:
+    """The ZIP code of the place a buyer's message names, or ""."""
+    return places.zip_for(query)
+
+
+@dataclass(frozen=True)
+class SiteResult:
+    """How one site's search went. "ok": it answered with listings (`raw` of them, `kept` of
+    those fit the search and budget). "empty": it answered with none, a real "nothing there".
+    "failed": it couldn't be searched, and `reason` says why (SourceError.kind: timeout,
+    blocked, busy, credit, setup, error). "pending": still searching when the answer went out.
+    Only "ok" and "empty" sites may be said to have nothing."""
+
+    source: str
+    status: str  # ok | empty | failed | pending
+    raw: int = 0
+    kept: int = 0
+    reason: str = ""
+
+    @property
+    def answered(self) -> bool:
+        return self.status in ("ok", "empty")
 
 
 @dataclass(frozen=True)
@@ -117,6 +182,8 @@ class Found:
     market: MarketPrice | None = None  # None when no recent eBay sales matched
     comps_note: str = ""  # why there's no market price, when there isn't
     pending: tuple[str, ...] = ()  # sources still searching when this answer went out
+    sites: tuple[SiteResult, ...] = ()  # per site, in the order searched; () from older peers
+    place: str = ""  # where the local sites searched: "Berkeley (94704)", "the SF Bay Area"
 
     @property
     def comps_late(self) -> bool:
@@ -130,6 +197,61 @@ class Found:
     def typical_cents(self) -> int | None:
         return self.market.typical_cents if self.market else None
 
+    @property
+    def loose(self) -> bool:
+        """The deals are only close matches: nothing said half the search words."""
+        return bool(self.deals) and all("loose_match" in deal.flags for deal in self.deals)
+
+    def site(self, source: str) -> SiteResult:
+        for result in self.sites:
+            if result.source == source:
+                return result
+        if source in self.failed:
+            return SiteResult(source, "failed", reason="error")
+        return SiteResult(source, "pending" if source in self.pending else "ok")
+
+    def failures(self) -> list[tuple[str, str]]:
+        """(source, reason) for each site that couldn't be searched."""
+        return [(name, self.site(name).reason or "error") for name in self.failed]
+
+
+def failure_words(reason: str) -> str:
+    return FAILURE_WORDS.get(reason, FAILURE_WORDS["error"])
+
+
+def and_list(names: list[str]) -> str:
+    """ "eBay", "eBay and Craigslist", "eBay, Craigslist, and OfferUp"."""
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + ", and " + names[-1]
+
+
+def failed_sentence(found: Found) -> str:
+    """ "OfferUp couldn't be searched just now (timed out)", "OfferUp and Craigslist couldn't
+    be searched just now (OfferUp: timed out; Craigslist: blocked)", or ""."""
+    failures = found.failures()
+    if not failures:
+        return ""
+    names = and_list([site_name(name) for name, _ in failures])
+    if len(failures) == 1:
+        why = failure_words(failures[0][1])
+    else:
+        why = "; ".join(f"{site_name(name)}: {failure_words(reason)}" for name, reason in failures)
+    return f"{names} couldn't be searched just now ({why})"
+
+
+def unfit_sentence(found: Found) -> str:
+    """For a search with no deals: what each site that answered had. "Craigslist had 14
+    listings, none that fit; eBay had none." """
+    parts = []
+    for site in found.sites:
+        if site.status == "empty":
+            parts.append(f"{site_name(site.source)} had none")
+        elif site.status == "ok":
+            plural = "s" if site.raw != 1 else ""
+            parts.append(f"{site_name(site.source)} had {site.raw} listing{plural}, none that fit")
+    return "; ".join(parts) + "." if parts else ""
+
 
 def best(
     listings: list[ExternalListing],
@@ -140,6 +262,30 @@ def best(
 ) -> list[ExternalListing]:
     """The best priced listings within the budget, best first (deals.fitting, no reasons)."""
     return [d.listing for d in deals.fitting(listings, query, budget_cents, market, limit=limit)]
+
+
+def linked(listing: ExternalListing, zip_code: str) -> ExternalListing:
+    """A Craigslist post the actor gave no link gets a search link for its title, instead of
+    being dropped by the deal finder (deals.score needs a link)."""
+    if listing.url or listing.source != craigslist.SOURCE:
+        return listing
+    return replace(listing, url=craigslist.search_link(listing, zip_code))
+
+
+# A site's answer: (its listings, "") or (None, why it failed: a SourceError kind).
+Answer = tuple[list[ExternalListing] | None, str]
+
+
+def site_result(name: str, answer: Answer | None, fitting: list[ScoredDeal]) -> SiteResult:
+    if answer is None:
+        return SiteResult(name, "pending")
+    listings, reason = answer
+    if listings is None:
+        return SiteResult(name, "failed", reason=reason or "error")
+    if not listings:
+        return SiteResult(name, "empty")
+    kept = sum(1 for deal in fitting if deal.listing.source == name)
+    return SiteResult(name, "ok", raw=len(listings), kept=kept)
 
 
 class Search:
@@ -157,6 +303,8 @@ class Search:
         loop = asyncio.get_running_loop()
         self.query = query
         self.budget_cents = budget_cents
+        self.zip_code = zip_code
+        self.place = places.describe(zip_code)
         self.started = loop.time()
         self.deadline = self.started + finder.within
         self.names = list(finder.sources)
@@ -219,20 +367,29 @@ class Search:
         return self._partial[1]
 
     def _found(self) -> Found:
-        answers = {
+        answers: dict[str, Answer] = {
             name: task.result()
             for name, task in self._sources.items()
             if task.done() and not task.cancelled()
         }
-        searched = tuple(name for name in self.names if answers.get(name) is not None)
-        failed = tuple(name for name in self.names if name in answers and answers[name] is None)
+        searched = tuple(n for n in self.names if n in answers and answers[n][0] is not None)
+        failed = tuple(n for n in self.names if n in answers and answers[n][0] is None)
         pending = tuple(name for name in self.names if name not in answers)
-        listings = [listing for name in searched for listing in answers[name] or []]
+        listings = [
+            linked(listing, self.zip_code)
+            for name in searched
+            for listing in answers[name][0] or []
+        ]
         if self._market.done() and not self._market.cancelled():
             market, note = self._market.result()
         else:
             market, note = None, COMPS_LATE
         chosen = deals.rank(listings, self.query, self.budget_cents, market)
+        # Every listing that fits, so each site's count is known; the buyer sees `chosen`.
+        fitting = deals.fitting(
+            listings, self.query, self.budget_cents, market, limit=len(listings) or 1
+        )
+        sites = tuple(site_result(name, answers.get(name), fitting) for name in self.names)
         return Found(
             self.query,
             self.budget_cents,
@@ -243,14 +400,20 @@ class Search:
             market,
             note,
             pending,
+            sites,
+            self.place,
         )
 
     async def _finish(self) -> Found:
         await asyncio.gather(*self._sources.values(), self._market)
         found = self.so_far()
+        each = ", ".join(
+            f"{s.source} {s.reason}" if s.reason else f"{s.source} {s.kept}/{s.raw}"
+            for s in found.sites
+        )
         log.info(
             f"other sites: {len(found.deals)} of {found.considered} listing(s) kept from "
-            f"{len(found.searched)} source(s), {len(found.failed)} failed, "
+            f"{len(found.searched)} source(s), {len(found.failed)} failed ({each}), "
             f"{'with' if found.market else 'without'} a market price, "
             f"in {asyncio.get_running_loop().time() - self.started:.1f}s"
         )
@@ -286,6 +449,7 @@ class DealFinder:
         self.clock = clock
         self.within = within  # seconds until a search's first answer
         self.limit = limit  # seconds until a site still searching counts as failed
+        self.per_source = PER_SOURCE
         self._searches: dict[SearchKey, tuple[float, Search]] = {}
         self._comps: dict[str, tuple[float, asyncio.Task[MarketPrice | None]]] = {}
 
@@ -298,8 +462,11 @@ class DealFinder:
         return names_of(list(self.sources))
 
     def _key(self, query: str, budget_cents: int | None, zip_code: str) -> SearchKey:
-        """The same words in any order, the same budget, and the same ZIP are the same search."""
-        return " ".join(sorted(set(search_words(query).split()))), budget_cents, zip_code.strip()
+        """The same words in any order, the same budget, and the same ZIP are the same search.
+        The ZIP is the caller's, else the place the words name ("in Berkeley"), else the
+        server's YARDSALE_ZIP, else "" (each site's default)."""
+        zip_code = zip_code.strip() or search_place(query) or places.server_zip()
+        return " ".join(sorted(set(search_words(query).split()))), budget_cents, zip_code
 
     def _forget_old(self) -> None:
         now = self.clock()
@@ -370,27 +537,28 @@ class DealFinder:
         )
         return market
 
-    async def _one(
-        self, name: str, source: Source, query: str, zip_code: str
-    ) -> list[ExternalListing] | None:
-        """One site's listings, or None when it failed or ran past the limit. Asked once."""
+    async def _one(self, name: str, source: Source, query: str, zip_code: str) -> Answer:
+        """(one site's listings, "") or (None, why it failed or that it ran past the limit: a
+        SourceError kind). Asked once, with the search's core words (deals.site_query)."""
         where = self.where.get(name, "")
         if zip_code and name in ZIP_SOURCES:
             where = zip_code
         started = time.monotonic()
+        asked = deals.site_query(query) or query
         try:
-            listings = await asyncio.wait_for(source(query, where, PER_SOURCE), self.limit)
+            listings = await asyncio.wait_for(source(asked, where, self.per_source), self.limit)
         except SourceError as ex:
-            log.warning(f"other sites: {name} couldn't be searched ({ex})")
-            return None
+            # The reason never has the search words: they're only in the request body.
+            log.warning(f"other sites: {name} couldn't be searched ({ex.kind}: {ex})")
+            return None, ex.kind
         except TimeoutError:
             log.warning(f"other sites: {name} didn't answer within {self.limit:.0f}s")
-            return None
+            return None, "timeout"
         except Exception:
             log.exception(f"other sites: {name} failed")
-            return None
+            return None, "error"
         log.info(f"other sites: {name} answered in {time.monotonic() - started:.1f}s")
-        return listings
+        return listings, ""
 
     async def _market_or_none(self, query: str) -> tuple[MarketPrice | None, str]:
         """The market price, or None and why. A comps failure never fails the search."""
@@ -408,10 +576,7 @@ class DealFinder:
 
 def names_of(sources: list[str] | tuple[str, ...]) -> str:
     """ "eBay, Craigslist, and OfferUp": sites by name, for a sentence."""
-    names = [site_name(name) for name in sources]
-    if len(names) <= 2:
-        return " and ".join(names)
-    return ", ".join(names[:-1]) + ", and " + names[-1]
+    return and_list([site_name(name) for name in sources])
 
 
 # --- Probe: one small live run per source, by hand ----------------------------------------------
@@ -429,68 +594,75 @@ def probe_cost_usd(sources: list[str]) -> str:
     return f"${cents / 100:.2f}"
 
 
-async def probe(query: str, budget_cents: int | None, zip_code: str) -> int:
-    """Run every source once, small, against the live actors, and print what came back: counts,
-    parse failures, the market price, and the top deals with their scores. Paid."""
+async def probe(
+    query: str,
+    budget_cents: int | None,
+    zip_code: str,
+    only: list[str] | None = None,
+    with_comps: bool = True,
+) -> int:
+    """Run every source once, small, against the live actors, through the same DealFinder the
+    server uses, and print what came back: each site's outcome (listings, kept, or why it
+    failed), what each parser could read, the market price, the place searched, and the top
+    deals with their scores. Paid."""
     from yardsale import bureau_server  # pulls in the whole server; fine by hand
     from yardsale.researcher import search_ebay_sold
 
-    sources = bureau_server.other_sites()
+    sources = {
+        name: source
+        for name, source in bureau_server.other_sites().items()
+        if not only or name in only
+    }
     names = list(sources)
+    words = search_words(query)
     print(
-        f"Probing {', '.join(site_name(n) for n in names)} for {query!r}"
+        f"Probing {', '.join(site_name(n) for n in names)} for {words!r} "
+        f"(the sites get {deals.site_query(words)!r})"
         f"{f' under ${budget_cents // 100}' if budget_cents else ''}, "
-        f"{PROBE_PER_SOURCE} results each plus {PROBE_PER_SOURCE} eBay sold comps: "
+        f"{PROBE_PER_SOURCE} results each{' plus eBay sold comps' if with_comps else ''}: "
         f"about {probe_cost_usd(names)} of Apify credit."
     )
+    seen: dict[str, list[ExternalListing]] = {}
 
-    async def small(name: str) -> tuple[str, list[ExternalListing] | str]:
-        where = zip_code if zip_code and name in ZIP_SOURCES else ""
-        started = time.monotonic()
-        try:
-            listings = await sources[name](search_words(query), where, PROBE_PER_SOURCE)
-        except Exception as ex:
-            return name, f"FAILED after {time.monotonic() - started:.1f}s: {ex}"
-        print(f"  {site_name(name)}: {len(listings)} parsed in {time.monotonic() - started:.1f}s")
-        return name, listings
+    def recording(name: str) -> Source:
+        async def search(words: str, where: str, limit: int) -> list[ExternalListing]:
+            seen[name] = await sources[name](words, where, limit)
+            return seen[name]
 
-    async def small_comps() -> list[Comp] | str:
-        try:
-            return await search_ebay_sold(search_words(query), "any", PROBE_PER_SOURCE)
-        except Exception as ex:
-            return f"FAILED: {ex}"
+        return search
 
-    answers, comps = await asyncio.gather(
-        asyncio.gather(*(small(name) for name in names)), small_comps()
+    finder = DealFinder(
+        {name: recording(name) for name in names},
+        comps=search_ebay_sold if with_comps else None,
     )
-    found: list[ExternalListing] = []
-    for name, answer in answers:
-        if isinstance(answer, str):
-            print(f"  {site_name(name)}: {answer}")
+    finder.per_source = PROBE_PER_SOURCE
+    started = time.monotonic()
+    found = await finder.find(query, budget_cents, zip_code)
+    print(f"Searched {found.place} in {time.monotonic() - started:.1f}s:")
+    for site in found.sites:
+        if site.status == "failed":
+            print(f"  {site_name(site.source)}: FAILED ({site.reason})")
             continue
-        found += answer
-        unpriced = sum(1 for x in answer if x.price_cents is None)
-        linkless = sum(1 for x in answer if not x.url)
-        photos = sum(1 for x in answer if x.photo_count)
+        answer = seen.get(site.source, [])
         print(
-            f"    {unpriced} without a price, {linkless} without a link, {photos} with photo "
-            f"counts, {sum(1 for x in answer if x.condition)} with a condition, "
+            f"  {site_name(site.source)}: {site.status}, {site.raw} listing(s), {site.kept} fit; "
+            f"{sum(1 for x in answer if x.price_cents is None)} without a price, "
+            f"{sum(1 for x in answer if not x.url)} without a link, "
+            f"{sum(1 for x in answer if x.image_url)} with a photo, "
+            f"{sum(1 for x in answer if x.condition)} with a condition, "
             f"{sum(1 for x in answer if x.posted_at)} with a date"
         )
-    if isinstance(comps, str):
-        print(f"  eBay sold comps: {comps}")
-        market = None
-    else:
-        market = deals.market_price(comps, query)
-        price = f"${market.typical_cents / 100:.2f} from {market.basis}" if market else "none"
-        print(f"  eBay sold comps: {len(comps)} parsed; market price: {price}")
-    top = deals.rank(found, query, budget_cents, market, limit=3)
-    print(f"Top {len(top)} of {len(found)}:")
-    for n, deal in enumerate(top, 1):
-        print(f"  {n}. [{deal.score:+.0f}] {deal.listing.title}")
-        print(f"     {deals.reason(deal, site_name(deal.listing.source))}")
+    market = found.market
+    price = f"${market.typical_cents / 100:.2f} from {market.basis}" if market else "none"
+    print(f"  eBay sold comps: market price {price} {found.comps_note}")
+    print(deals.headline(found.deals, budget_cents, market, site_name))
+    closest = " (close matches only)" if found.loose else ""
+    print(f"Top {len(found.deals)} of {found.considered}{closest}:")
+    for n, deal in enumerate(found.deals, 1):
+        print(f"  {n}. [{deal.score:+.0f}] {deal.listing.title} {list(deal.flags)}")
+        print(f"     {deals.reason(deal, site_name(deal.listing.source), budget_cents)}")
         print(f"     {deal.listing.url}")
-    return 0 if found else 1
+    return 0 if found.deals else 1
 
 
 if __name__ == "__main__":
@@ -501,9 +673,12 @@ if __name__ == "__main__":
     parser.add_argument("--probe", metavar="QUERY", help="run one small paid search per source")
     parser.add_argument("--max", type=int, help="the buyer's max, in whole dollars")
     parser.add_argument("--zip", default="", help="a ZIP code for sources that search around one")
+    parser.add_argument("--sites", default="", help="only these sources, comma separated")
+    parser.add_argument("--no-comps", action="store_true", help="skip the eBay sold comps")
     args = parser.parse_args()
     if not args.probe:
         parser.error("--probe QUERY is the only command")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s [%(name)s] %(message)s")
     budget = args.max * 100 if args.max else None
-    sys.exit(asyncio.run(probe(args.probe, budget, args.zip)))
+    only = [name.strip() for name in args.sites.split(",") if name.strip()]
+    sys.exit(asyncio.run(probe(args.probe, budget, args.zip, only, not args.no_comps)))

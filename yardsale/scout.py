@@ -24,12 +24,11 @@ from typing import Any
 
 from uagents import Agent, Context, Protocol
 
+from yardsale import deals
 from yardsale.agentverse import service_agent
-from yardsale.deals import ACCESSORIES, RED_FLAGS
-from yardsale.elsewhere import search_words
+from yardsale.elsewhere import ZIP_SOURCES, search_words
 from yardsale.models import ScoutListing, ScoutReport, ScoutRequest, ServiceError, SourcePrices
 from yardsale.pricing import price_range, usd
-from yardsale.search import words
 from yardsale.sources import ExternalListing, Source, SourceError, deduplicated
 
 log = logging.getLogger("yardsale.scout")
@@ -53,28 +52,39 @@ def seller_zip() -> str:
 
 
 def scope_for(source: str, zip_code: str) -> str:
-    """What to pass a source as `where`. OfferUp searches around a ZIP code; the others take a
-    city or site name that only their own environment settings choose."""
-    if source == "offerup" and _ZIP.fullmatch(zip_code or ""):
+    """What to pass a source as `where`. OfferUp, Craigslist, and Facebook search around a ZIP
+    code (elsewhere.ZIP_SOURCES); eBay takes a site name its own setting chooses."""
+    if source in ZIP_SOURCES and _ZIP.fullmatch(zip_code or ""):
         return zip_code
     return ""
 
 
 def relevant(query: str, listings: list[ExternalListing]) -> list[ExternalListing]:
     """The listings that look like the same kind of item with a real price: at least half of
-    the search words in the title, and none of the words that make it a part or an add-on."""
-    wanted = set(search_words(query).split())
+    the search words in the title, matched the way the deal finder matches them (synonyms,
+    "4's" for "4"), and none of the words that make it a part or an add-on (deals.py)."""
+    wanted = deals.search_terms(search_words(query))
     kept: list[ExternalListing] = []
     for listing in deduplicated(listings):
         if listing.price_cents is None or listing.price_cents < MIN_PRICE_CENTS:
             continue
-        have = set(words(listing.title))
-        if (have & (RED_FLAGS | ACCESSORIES)) - wanted:
+        have = deals.title_words(listing.title)
+        if deals.not_the_thing(listing.title, have, set(wanted)) is not None:
             continue
-        if wanted and len(wanted - have) * 2 > len(wanted):
+        if not deals.fits(wanted, listing.title):
             continue
         kept.append(listing)
     return kept
+
+
+def query_for(source: str, query: str) -> str:
+    """What to search a site for. eBay gets the Identifier's words as they are, since its
+    search handles style codes; the classifieds get the core words (deals.site_query), because
+    Craigslist found nothing for "Air Jordan 4 Military Blue 2024 FV5029-141" on October 24 and
+    OfferUp found one listing."""
+    if source == "ebay":
+        return query
+    return deals.site_query(search_words(query)) or query
 
 
 def source_prices(source: str, query: str, listings: list[ExternalListing]) -> SourcePrices | None:
@@ -129,7 +139,13 @@ async def scout_prices(
     limit = max(1, min(request.max_results, MAX_PER_SOURCE))
     tasks: list[asyncio.Task[list[ExternalListing] | None]] = [
         asyncio.ensure_future(
-            _one(name, sources[name], request.query, scope_for(name, request.zip_code), limit)
+            _one(
+                name,
+                sources[name],
+                query_for(name, request.query),
+                scope_for(name, request.zip_code),
+                limit,
+            )
         )
         for name in names
     ]
@@ -222,8 +238,7 @@ def build_scout(sources: dict[str, Source], offline: bool) -> Agent:
             return
         counted = ", ".join(f"{p.source} {p.count}" for p in found) or "none"
         ctx.logger.info(
-            f"Live asking prices for {msg.query!r}: {counted}"
-            + (f"; failed: {', '.join(failed)}" if failed else "")
+            f"Live asking prices: {counted}" + (f"; failed: {', '.join(failed)}" if failed else "")
         )
         await ctx.send(
             sender,

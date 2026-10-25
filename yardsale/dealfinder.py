@@ -28,8 +28,8 @@ from uagents import Agent, Context, Protocol
 
 from yardsale.agentverse import service_agent
 from yardsale.deals import MarketPrice, ScoredDeal
-from yardsale.elsewhere import DealFinder, Found
-from yardsale.models import DealsFound, FindDeals, FoundDeal, ServiceError
+from yardsale.elsewhere import DealFinder, Found, SiteResult
+from yardsale.models import DealsFound, FindDeals, FoundDeal, ServiceError, SiteOutcome
 from yardsale.sources import ExternalListing, SourceError
 
 log = logging.getLogger("yardsale.dealfinder")
@@ -102,6 +102,11 @@ def deals_found(request_id: str, found: Found) -> DealsFound:
         typical_cents=market.typical_cents if market else None,
         comps_used=market.sales if market else 0,
         comps_note=found.comps_note,
+        sites=[
+            SiteOutcome(source=s.source, status=s.status, raw=s.raw, kept=s.kept, reason=s.reason)
+            for s in found.sites
+        ],
+        place=found.place,
     )
 
 
@@ -125,6 +130,8 @@ def found_from(msg: DealsFound) -> Found:
         considered=msg.considered,
         market=market,
         comps_note=msg.comps_note,
+        sites=tuple(SiteResult(s.source, s.status, s.raw, s.kept, s.reason) for s in msg.sites),
+        place=msg.place,
     )
 
 
