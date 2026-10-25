@@ -99,7 +99,16 @@ from uagents_core.contrib.protocols.chat.cards import (
     ListItem as CardListItem,
 )
 
-from yardsale import advice, commands, craigslist_buyer, craigslist_mail, deals, watches
+from yardsale import (
+    advice,
+    commands,
+    craigslist_buyer,
+    craigslist_mail,
+    deals,
+    onboarding,
+    students,
+    watches,
+)
 from yardsale.asione import ReadMessage
 from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
@@ -122,6 +131,7 @@ from yardsale.models import (
 from yardsale.payments import PaymentError, commission_text
 from yardsale.photos import PhotoError, download_from_storage, download_photo, prepare_photo
 from yardsale.pricing import PriceError, parse_usd, to_cents, usd
+from yardsale.schools import SendCode
 from yardsale.search import search
 from yardsale.sources import ExternalListing, SourceError
 from yardsale.store import (
@@ -1056,7 +1066,12 @@ def _form_price(value: SelectionValue | None) -> int | None:
 # --- The protocol --------------------------------------------------------------------------------
 
 
-def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) -> AgentProtocol:
+def build_chat_protocol(
+    backend: Backend,
+    read: ReadMessage,
+    fetch: FetchPhoto,
+    send_code: SendCode = onboarding.log_code_for_development,
+) -> AgentProtocol:
     proto = AgentProtocol(spec=chat_protocol_spec)
     store = backend.store
     locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -2125,6 +2140,22 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         action, item_id = str(choice.get("action", "")), str(choice.get("item_id", ""))
         if not choice:
             return "OK."
+        # Signing up. Nothing else can happen until a conversation has a verified school.
+        if action == "student":
+            return Reply(onboarding.ASK_FOR_EMAIL, onboarding.email_form())
+        if action == "not_student":
+            return onboarding.NOT_A_STUDENT_YET
+        if action == "student_email":
+            text, card = await onboarding.start_verification(
+                store, conv.owner, str(choice.get("email", "")), send_code
+            )
+            return Reply(text, card)
+        if action == "student_code":
+            try:
+                student = students.confirm(store, conv.owner, str(choice.get("code", "")))
+            except students.StudentError as ex:
+                return Reply(str(ex), onboarding.code_form())
+            return onboarding.verified_text(student.school)
         if action in ("approve", "cancel"):
             listing = store.get(item_id)
             if listing is None or listing.owner != conv.owner or listing.status != PROPOSED:
@@ -2440,9 +2471,24 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         async with locks[key]:
             conv = load(key)
             first_message = not conv.greeted
+            new_student = (
+                first_message and onboarding.campus_mode() and store.student(conv.owner) is None
+            )
             if first_message:
                 conv.greeted = True
                 save(conv)
+        if new_student:
+            # Same-school only, so the first thing to settle is which school. The card goes out
+            # before any slow work, and whatever else was in the message is still answered.
+            await ctx.send(
+                sender,
+                text_message(
+                    onboarding.ARE_YOU_A_STUDENT,
+                    offer_uploads=True,
+                    card=onboarding.student_welcome(),
+                ),
+            )
+            first_message = False  # uploads were offered with the welcome
         if any(isinstance(item, StartSessionContent) for item in msg.content):
             await ctx.send(sender, uploads_welcome())
             first_message = False  # the welcome already offered uploads
