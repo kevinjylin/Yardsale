@@ -324,6 +324,97 @@ def accepts_deal(text: str) -> bool:
     return bool(_ACCEPTS.search(lowered)) and not _NOT_ACCEPTING.search(lowered)
 
 
+# A seller asking about the people answering a listing: "someone messaged me", "any buyers?",
+# "did anyone reply", "message them back", "reply to them and haggle". These only ever show the
+# seller a view; the item's agent answers Craigslist emails by itself.
+_SOMEONE = r"(?:someone|somebody|anyone|anybody|a\s+buyer|buyers?|people|a\s+(?:guy|girl|person))"
+_BUYER_PERSON = (
+    r"(?:them|him|her|the\s+buyers?|my\s+buyers?|buyers|the\s+(?:guy|girl|person)|"
+    r"whoever\s+(?:messaged|emailed|wrote))"
+)
+_BUYERS = re.compile(
+    r"\b" + _SOMEONE + r"\s+(?:has\s+|have\s+|just\s+|already\s+)?"
+    r"(?:messaged|emailed|texted|replied|responded|wrote|written|contacted|reached\s+out|dm'?d|"
+    r"offered|made\s+an\s+offer|is\s+interested|wants\s+(?:it|to\s+buy))\b|"
+    r"\b(?:any|got\s+any|have\s+i\s+got\s+any|do\s+i\s+have\s+any|new)\s+"
+    r"(?:buyers?|offers?|messages?|replies|responses|emails?|interest|bites)\b|"
+    r"\bdid\s+(?:anyone|anybody|someone|somebody|a\s+buyer|any\s+buyers?)\s+"
+    r"(?:message|email|reply|respond|write|offer|text|contact|bite)\b|"
+    r"\b(?:message|text|email|reply\s+to|respond\s+to|answer|write\s+(?:to|back\s+to)|"
+    r"get\s+back\s+to)\s+" + _BUYER_PERSON + r"\b|"
+    r"\b(?:haggle|negotiate|bargain)\s+with\s+(?:the\s+buyers?|my\s+buyers?|buyers|"
+    r"the\s+(?:guy|girl|person)|whoever)\b|"
+    r"\bwho(?:'s|\s+is|\s+has)?\s+(?:interested|messaged|emailed|offered)\b|"
+    r"\b(?:my|the)\s+buyers\b"
+)
+# "haggle with them" is a buyer's haggle after a search, or a seller's buyers: the chat decides.
+_VAGUE_HAGGLE = re.compile(
+    r"^(?:(?:can\s+you|please|and)\s+)?(?:haggle|negotiate|bargain)\s+with\s+(?:them|him|her)$"
+)
+_STATUS = re.compile(
+    r"\b(?:did|has|have)\s+(?:it|they|anything|(?:my|the)\s+[\w'-]+(?:\s+[\w'-]+)?)\s+"
+    r"(?:sold|sell)\b|"
+    r"\b(?:is|are)\s+(?:it|they|(?:my|the)\s+[\w'-]+(?:\s+[\w'-]+)?)\s+"
+    r"(?:sold|still\s+(?:up|listed|for\s+sale|on\s+(?:sale|craigslist|yardsale)))\b|"
+    r"\bhow(?:'s|\s+is|\s+are)\s+my\s+(?:listings?|items?|stuff|sales?|[\w'-]+)\b|"
+    r"\b(?:any\s+(?:luck|news|updates?)|status\s+of\s+my|(?:listing|my)\s+status|"
+    r"what'?s\s+the\s+status)\b"
+)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.lower().split()).rstrip(".!?")
+
+
+def asks_about_buyers(text: str) -> bool:
+    """True for a seller asking about buyers answering a listing ("someone messaged me about the
+    bottle, reply to them and haggle")."""
+    return bool(_BUYERS.search(_flat(text)))
+
+
+def vague_haggle(text: str) -> bool:
+    """True for "haggle with them", which can mean a buyer's search results or a seller's
+    buyers."""
+    return bool(_VAGUE_HAGGLE.search(_flat(text)))
+
+
+def asks_about_status(text: str) -> bool:
+    """True for a seller asking how a listing is doing ("did it sell?", "how's my listing")."""
+    return bool(_STATUS.search(_flat(text)))
+
+
+_YES_ANSWER = re.compile(
+    r"^(?:yes|yep|yeah|yup|ya|y|sure|ok(?:ay)?|correct|right|exactly|that'?s\s+(?:it|right)|"
+    r"that\s+one)(?:\s*,?\s*(?:please|thanks?|thank\s+you))?$"
+)
+_NO_ANSWER = re.compile(
+    r"^(?:no|nope|nah|neither|none|neither\s+one|none\s+of\s+(?:them|those)|something\s+else|"
+    r"not\s+that|no\s+thanks?)$"
+)
+_ORDINALS = {"first": 1, "1st": 1, "1": 1, "second": 2, "2nd": 2, "2": 2, "third": 3, "3rd": 3}
+_ORDINAL_ANSWER = re.compile(
+    r"^(?:the\s+)?(?:#|option\s*|number\s*)?(first|second|third|1st|2nd|3rd|[123]|last)"
+    r"(?:\s+(?:one|option|button))?(?:\s*,?\s*please)?$"
+)
+
+
+def choice_answer(text: str, count: int) -> int | None:
+    """A bare answer to a question with `count` choices: the 0-based choice ("yes" is the first,
+    "the second one" the second), -1 for "no" or "something else", or None when the message
+    says something else."""
+    lowered = _flat(text)
+    if _YES_ANSWER.match(lowered):
+        return 0
+    if _NO_ANSWER.match(lowered):
+        return -1
+    found = _ORDINAL_ANSWER.match(lowered)
+    if found is None:
+        return None
+    word = found.group(1)
+    index = count - 1 if word == "last" else _ORDINALS[word] - 1
+    return index if 0 <= index < count else None
+
+
 def numbered_prices(text: str) -> Command | None:
     """A price for one of several waiting proposals, by number: "lowest 2 $40", "ask 3 $60",
     "#2: ask $60, lowest $45", "lowest $40 on 2", "approve 2 at $50". None if no number is named
