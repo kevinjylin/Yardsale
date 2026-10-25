@@ -237,6 +237,26 @@ async def test_a_failing_or_slow_scout_never_blocks_a_proposal(
         assert (view.range_low_cents, view.range_high_cents) == (31000, 37000)
 
 
+async def test_a_slow_site_is_left_out_and_the_rest_still_count(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Market searches the Scout's sites in this process with a deadline, so a fast site's
+    prices make the proposal and a slow one doesn't hold it up."""
+    monkeypatch.setattr(bureau_server, "SCOUT_TIMEOUT", 0.3)
+    slow = Site(BIKES, delay=30.0)
+    async with sim.running_market(
+        store, scout_sources={"craigslist": Site(BIKES), "facebook": slow}
+    ) as m:
+        seller = Peer("seller", *SELLER_KINDS)
+        started = asyncio.get_running_loop().time()
+        await seller.send(m.address, photo())
+        proposed = await seller.receive(Proposed)
+        assert asyncio.get_running_loop().time() - started < 2.0
+    listing = store.get(proposed.item_id)
+    assert listing is not None and listing.market is not None
+    assert listing.market.asking_count == 5 and len(slow.calls) == 1  # Craigslist's alone
+
+
 async def test_without_sources_nothing_is_searched_and_the_sold_side_still_counts(
     market: sim.Market, store: Store
 ) -> None:

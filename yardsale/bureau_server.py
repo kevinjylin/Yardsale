@@ -57,7 +57,7 @@ from uagents.registration import BatchAlmanacApiRegistrationPolicy
 from uagents_core.registration import BatchRegistrationPolicy
 from uagents_core.types import DeliveryStatus
 
-from yardsale import business_api, config, students, watches
+from yardsale import business_api, config, scout, students, watches
 from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
@@ -146,7 +146,7 @@ Progress = Callable[[str, str], Awaitable[None]]  # (stage, text) -> tell the se
 IDENTIFY_TIMEOUT = 180.0
 RESEARCH_TIMEOUT = 240.0
 APPRAISE_TIMEOUT = 240.0
-SCOUT_TIMEOUT = 240.0  # runs beside the Researcher; a slow or failed Scout never blocks a proposal
+SCOUT_TIMEOUT = 20.0  # seconds the Scout's sites get beside the Researcher; slower ones left out
 NEGOTIATE_TIMEOUT = 15.0  # item agents in this Bureau answer in milliseconds
 HOSTED_NEGOTIATE_TIMEOUT = 60.0  # hosted ones answer through Agentverse mailboxes
 RETRY_DELETES_EVERY = 60.0  # seconds between tries to delete closed listings' hosted agents
@@ -660,22 +660,21 @@ async def haggle_for(
 
 
 async def scout_quietly(ctx: Context, run: str, query: str, zip_code: str) -> ScoutReport | None:
-    """Ask the Market Scout for live asking prices. None if it fails or runs late: the Scout
-    informs a proposal, it never blocks one."""
-    rt = runtime()
-    if not rt.services.scout:
+    """Live asking prices from the Market Scout's sites, searched in this process with
+    SCOUT_TIMEOUT seconds for every site: a site still searching then counts as failed, so a
+    slow site never holds up a proposal. None if the Scout has no sites or fails.
+
+    Not through the Scout agent: its one reply waits for the slowest site, and the Researcher's
+    answer would wait with it. The agent stays registered for other agents."""
+    if not scout.SOURCES:
         return None
+    request = ScoutRequest(request_id=f"{run}-scout", query=query, zip_code=zip_code)
     try:
-        return await call_service(
-            ctx,
-            rt.services.scout,
-            ScoutRequest(request_id=f"{run}-scout", query=query, zip_code=zip_code),
-            ScoutReport,
-            SCOUT_TIMEOUT,
-        )
-    except PipelineError as ex:
-        ctx.logger.warning(f"No live asking prices for photo {run}: {ex}")
+        found, failed = await scout.scout_prices(scout.SOURCES, request, SCOUT_TIMEOUT)
+    except Exception as ex:
+        ctx.logger.warning(f"No live asking prices for photo {run} ({type(ex).__name__})")
         return None
+    return ScoutReport(request_id=request.request_id, query=query, sources=found, failed=failed)
 
 
 async def price_photo(
