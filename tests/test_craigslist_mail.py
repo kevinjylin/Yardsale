@@ -166,7 +166,9 @@ async def test_the_seller_gets_a_post_to_paste(
     async with sim.running_market(store, mail=SETTINGS, mailbox=FakeMailbox()) as market:
         shop = Shop(market, FakeMailbox(), fakes.FakePayments())
         reply = await shop.list_and_post()
-        assert "Price: 360" in reply and INBOX in reply and "post it yourself" in reply
+        assert "\n\nPrice: $360\n\n" in reply and INBOX in reply and "post it yourself" in reply
+        assert "\n\nTitle: " in reply and "\n\nDescription:\n\n" in reply  # one per paragraph
+        assert "choose email" in reply and "turn it off" in reply  # no Craigslist chat
         assert "$300" not in reply.split("Description:")[1]  # the post never shows the floor
         assert PASSWORD not in reply
         # Asking again gives the same title; "my listings" shows it's posted.
@@ -279,7 +281,8 @@ async def test_mail_that_isnt_a_buyers_relay_email_is_left_alone(shop: Shop) -> 
     ctx = shop.market.agent._build_context()
     assert await rt.craigslist.poll(ctx) == 0
     assert await rt.craigslist.poll(ctx) == 0
-    assert shop.mailbox.sent == [] and shop.mailbox.seen == set()  # still unread
+    # Only Craigslist's confirmation of our own post is read (and marked read); the rest wait.
+    assert shop.mailbox.sent == [] and shop.mailbox.seen == {"2"}
 
 
 async def test_the_same_email_is_answered_once(shop: Shop) -> None:
@@ -461,3 +464,247 @@ def test_a_relayed_email_parses(store: Store) -> None:
     message = message_from_bytes(raw, policy=policy.default)
     assert isinstance(message, EmailMessage)
     assert craigslist_mail.relay_address(message) == "abc@reply.craigslist.org"
+
+
+# --- Which post an email is about: the relay's footer link, Craigslist's own mail ---------------
+
+# The buyer email that reached the inbox live: the buyer typed their own subject.
+LIVE_RELAY = "171c6bbe6c5d33209dcb920dfa95f907@reply.craigslist.org"
+THERMOFLASK = "ThermoFlask Double Wall Insulated Stainless Steel Water Bottle 40oz"
+POST_ID = "otenzZmpUXQLFoGHL2bxr7"
+LIVE_LINK = f"https://www.craigslist.org/view/d/san-francisco-thermoflask-double-wall/{POST_ID}"
+RULE = "-" * 72
+FOOTER = (
+    f"{RULE}\n"
+    "Original craigslist post: {link}\n"
+    "About craigslist mail: "
+    "https://www.craigslist.org/about/help/posting/features/contact-info/email/mail-relay\n"
+    "Please flag unwanted messages (spam, scam, other): "
+    "https://post.craigslist.org/mailflag?flagCode=34&smtpid=8a7b6c5d4e\n"
+    f"{RULE}\n"
+)
+ROBOT = '"craigslist - automated message, do not reply" <robot@craigslist.org>'
+
+
+def live_email(
+    text: str = "Hello is the thermoflask still available",
+    subject: str = "Waterbottle",
+    link: str = LIVE_LINK,
+    sender: str = LIVE_RELAY,
+) -> bytes:
+    message = EmailMessage()
+    message["From"] = f"Joshua Bumatay <{sender}>"
+    message["To"] = "171c6bbe6c5d33209dcb920dfa95f907@sale.craigslist.org"
+    message["Subject"] = subject
+    message["Message-ID"] = make_msgid(domain="craigslist.org")
+    message["X-CL-ID"] = "a1b2c3d4"
+    message.set_content(f"{text}\n{FOOTER.format(link=link)}")
+    return bytes(message)
+
+
+def robot_email(subject: str, text: str, msg_id: str | None = None) -> bytes:
+    message = EmailMessage()
+    message["From"] = ROBOT
+    message["To"] = INBOX
+    message["Subject"] = subject
+    message["Message-ID"] = msg_id or make_msgid(domain="craigslist.org")
+    message.set_content(text)
+    return bytes(message)
+
+
+def flask_store(posted: bool = True) -> Store:
+    store = Store()
+    store.add_listing(Listing("flask", "seller", "s", "r", PROPOSED, THERMOFLASK, 1100, 800))
+    store.activate("flask", "seller", "agent1qflask")
+    if posted:
+        craigslist_mail.post(store, store.get("flask"))  # type: ignore[arg-type]
+    return store
+
+
+class Agent:
+    """A stand-in for the item's agent: counters every offer at $10."""
+
+    def __init__(self) -> None:
+        self.calls: list[Offer | AcceptCounter] = []
+
+    async def negotiate(
+        self, ctx: Context, item_id: str, request: Offer | AcceptCounter
+    ) -> Counter | Deal | OfferRejected:
+        self.calls.append(request)
+        return Counter(item_id=item_id, counter_cents=1000, note="", expires_at="x")
+
+
+def inbox_for(
+    store: Store, clock: list[float] | None = None
+) -> tuple[CraigslistMail, FakeMailbox, Agent]:
+    mailbox, agent = FakeMailbox(), Agent()
+    now = clock if clock is not None else [0.0]
+    mail = CraigslistMail(
+        store, Checkout(store, None), SETTINGS, agent.negotiate, mailbox, clock=lambda: now[0]
+    )
+    return mail, mailbox, agent
+
+
+CTX = cast(Context, None)
+
+
+async def test_the_live_email_with_the_buyers_own_subject_is_answered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    store = flask_store()
+    mail, mailbox, agent = inbox_for(store)
+    mailbox.deliver(live_email())
+    assert await mail.poll(CTX) == 1
+    reply = mailbox.sent[0]
+    assert reply["To"] == LIVE_RELAY and reply["Subject"] == "Re: Waterbottle"
+    text = body(reply)
+    assert "still available" in text and "$11" in text
+    assert agent.calls == []  # nothing in the footer (40oz, flagCode=34) was read as an offer
+    assert mailbox.seen == {"1"}
+    # Matched by the link's slug, so its post ID is saved: the next email matches by ID alone.
+    listing = craigslist_mail.listing_for_post(store, POST_ID)
+    assert listing is not None and listing.item_id == "flask"
+    elsewhere = LIVE_LINK.replace("san-francisco-thermoflask-double-wall", "oakland-misc")
+    mailbox.deliver(live_email("would you take $9?", "hi", elsewhere))
+    assert await mail.poll(CTX) == 1
+    assert isinstance(agent.calls[0], Offer) and agent.calls[0].offer_cents == 900
+    assert "$10" in body(mailbox.sent[1])
+    # The seller sees both, newest first; nothing of it is in the log.
+    later, first = craigslist_mail.recent_exchanges(store, "seller")
+    assert first.buyer_said == "Hello is the thermoflask still available"
+    assert first.kind == "asking" and "$11" in first.we_said and first.title == THERMOFLASK
+    assert later.buyer_said == "would you take $9?" and later.kind == "counter"
+    assert first.buyer_label == later.buyer_label == "Buyer 1"
+    assert craigslist_mail.recent_exchanges(store, "someone else") == []
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    for secret in (LIVE_RELAY, "Waterbottle", "thermoflask", POST_ID, "$9", "$11"):
+        assert secret.lower() not in logs.lower(), secret
+
+
+async def test_a_posting_confirmation_saves_the_post_id() -> None:
+    store = flask_store()
+    mail, mailbox, _ = inbox_for(store)
+    title = craigslist_mail.posted_title(store, "flask")
+    mailbox.deliver(
+        robot_email(
+            f"cl posting: {title}",
+            "Your posting is live.\n"
+            "Manage it: https://post.craigslist.org/manage/7791234567/abcde?action=display\n"
+            f"View it: {LIVE_LINK}\n",
+        )
+    )
+    assert await mail.poll(CTX) == 0 and mailbox.seen == {"1"} and mailbox.sent == []
+    for post_id in (POST_ID, "7791234567"):
+        listing = craigslist_mail.listing_for_post(store, post_id)
+        assert listing is not None and listing.item_id == "flask"
+    # A buyer's email whose subject and slug name nothing still matches by the ID.
+    other = LIVE_LINK.replace("san-francisco-thermoflask-double-wall", "sf-misc")
+    mailbox.deliver(live_email("still have it?", "hey", other))
+    assert await mail.poll(CTX) == 1 and "still available" in body(mailbox.sent[0])
+
+
+async def test_craigslist_chat_notices_are_counted_and_marked_read() -> None:
+    store = flask_store()
+    mail, mailbox, _ = inbox_for(store)
+    notice = robot_email(
+        "new craigslist chat message",
+        "You have a new message in craigslist chat. view chats "
+        f"https://www.craigslist.org/d/APPOK/#chat=1~email~{INBOX}",
+        msg_id="<chat-1@craigslist.org>",
+    )
+    mailbox.deliver(notice)
+    mailbox.deliver(notice)  # delivered twice: counted once
+    assert await mail.poll(CTX) == 0
+    assert mailbox.seen == {"1", "2"} and mailbox.sent == []
+    assert craigslist_mail.chat_notices_since(store, 0.0) == 1
+    assert craigslist_mail.chat_notices_since(store, store.clock() + 1) == 0
+
+
+async def test_an_unmatched_email_is_retried_once_its_post_is_recorded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    store = flask_store(posted=False)
+    mail, mailbox, _ = inbox_for(store)
+    mailbox.deliver(live_email())
+    assert await mail.poll(CTX) == 0 and mailbox.seen == set()
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "not matched to a post (post link not recorded, subject words 1)" in logs
+    caplog.clear()
+    assert await mail.poll(CTX) == 0
+    assert "not matched" not in caplog.text  # nothing new to match against: not read again
+    craigslist_mail.post(store, store.get("flask"))  # type: ignore[arg-type]
+    assert await mail.poll(CTX) == 1 and mailbox.seen == {"1"}
+
+
+async def test_an_unmatched_email_is_retried_after_a_while_and_after_a_pasted_link(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    store = flask_store(posted=False)
+    clock = [0.0]
+    mail, mailbox, _ = inbox_for(store, clock)
+    link = LIVE_LINK.replace("san-francisco-thermoflask-double-wall", "oakland-misc")
+    mailbox.deliver(live_email(link=link))
+    assert await mail.poll(CTX) == 0
+    caplog.clear()
+    clock[0] += craigslist_mail.RETRY_SKIPPED
+    assert await mail.poll(CTX) == 0
+    assert "not matched to a post" in caplog.text  # read again after RETRY_SKIPPED
+    assert not craigslist_mail.record_post_link(store, "flask", "https://example.com/x/d/a/b")
+    assert not craigslist_mail.record_post_link(store, "nope", link)
+    assert craigslist_mail.record_post_link(store, "flask", f"here it is: {link}")
+    assert craigslist_mail.posted_title(store, "flask") == THERMOFLASK  # now recorded as posted
+    assert await mail.poll(CTX) == 1 and mailbox.seen == {"1"}
+
+
+def test_craigslists_footer_is_never_read_as_an_offer() -> None:
+    link = "https://sfbay.craigslist.org/sfc/bik/d/san-francisco-trek-fx-2-for-40/7791234567.html"
+    plain = "Hello is the thermoflask still available\n" + FOOTER.format(link=link)
+    assert new_text(plain) == "Hello is the thermoflask still available"
+    assert offer_cents(new_text(plain)) is None
+    # Without the rule line, and with a price-looking footer, the footer is still dropped.
+    bare = f"Is it available?\nOriginal craigslist post: {link}\nAbout craigslist mail: $40"
+    assert new_text(bare) == "Is it available?"
+    message = EmailMessage()
+    message.set_content(
+        "<p>Is it available?</p><hr><p>Original craigslist post: "
+        f'<a href="{link}">view post ($40)</a></p>',
+        subtype="html",
+    )
+    text = new_text(craigslist_mail.body_text(message))
+    assert text == "Is it available?" and offer_cents(text) is None
+    (found,) = craigslist_mail.post_links(f'<a href="{link}">view post</a>')  # from the tag
+    assert found == craigslist_mail.PostLink("7791234567", "san-francisco-trek-fx-2-for-40")
+
+
+def test_post_links() -> None:
+    links = craigslist_mail.post_links
+    assert links(LIVE_LINK) == [
+        craigslist_mail.PostLink(POST_ID, "san-francisco-thermoflask-double-wall")
+    ]
+    assert links("https://www.craigslist.org/d/APPOK/#chat=1~email~x") == []  # chat, no post
+    assert links("https://post.craigslist.org/mailflag?flagCode=34&smtpid=abc") == []
+    other = "https://www.craigslist.org/view/d/oakland-desk/abcdefghijk"
+    found = links(f"like {other} ?\n{FOOTER.format(link=LIVE_LINK)}")
+    assert [link.post_id for link in found] == [POST_ID, "abcdefghijk"]  # the footer's first
+
+
+def test_a_slug_matches_only_when_one_post_fits_best(store: Store) -> None:
+    for item_id, title in (
+        ("a", "Trek FX 2"),
+        ("b", "Trek FX 3"),
+        ("c", "Trek FX 2 Disc"),
+        ("d", THERMOFLASK),
+    ):
+        store.add_listing(Listing(item_id, "o", "s", item_id, PROPOSED, title, 36000, 30000))
+        store.activate(item_id, "o", f"agent1q{item_id}")
+        craigslist_mail.post(store, store.get(item_id))  # type: ignore[arg-type]
+    match = craigslist_mail.match_slug
+    assert match(store, "san-francisco-trek-fx-2-disc").item_id == "c"  # type: ignore[union-attr]
+    assert match(store, "oakland-trek-fx-3").item_id == "b"  # type: ignore[union-attr]
+    assert match(store, "oakland-trek-fx") is None  # fits a, b, and c alike
+    assert match(store, "berkeley-thermoflask-double-wa").item_id == "d"  # type: ignore[union-attr]
+    assert match(store, "sf-bottle") is None  # one word of a longer title isn't enough
+    assert match(store, "") is None
