@@ -37,16 +37,38 @@ when it also carries a part word it's dropped: that's the part, priced as a part
 
 Repeats of the same item across sites (the same words and the same price, or near enough) are
 dropped, keeping the better-scored one.
+
+The budget
+----------
+A listing's total is its price plus known shipping. Craigslist, OfferUp, and Facebook listings
+without a shipping price are pickup only, so their total is known; an eBay listing that doesn't
+say what shipping costs is compared on its price alone, and says so ("before shipping"). Deals
+that fit the budget come first. When fewer than FILL_TO fit, the best ones up to OVER_BUDGET_PCT
+over it fill in after them, flagged "over_budget", so the buyer sees how close the market is.
+A listing with no price ("contact me") isn't hidden: it comes last, flagged "no_price".
+
+How a deal is shown
+-------------------
+`headline` is the one sentence a reply opens with: the best deal, its link, its site, its price,
+and what it saves against the budget, or without a budget against the typical sold price
+("$40 under the typical $90 sold price"). It claims a saving only when the numbers show one.
+`describe` is each listing's line: price, site, shipping ("+ $12 shipping", "free shipping",
+"pickup only", "shipping unknown"), the budget difference, condition, location, age, the
+score's reason, and a short suffix naming what the site didn't say ("condition not listed, no
+photo").
 """
 
 from __future__ import annotations
 
+import dataclasses
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from fractions import Fraction
 
 from yardsale.models import Comp
-from yardsale.pricing import median, quartiles, round_cents, usd
+from yardsale.pricing import LOCAL_SOURCES, median, quartiles, round_cents, usd
 from yardsale.search import CHEAP, STOPWORDS, words
 from yardsale.sources import ExternalListing, deduplicated
 
@@ -64,6 +86,12 @@ LIMIT = 5  # deals shown to the buyer
 MARKET_NEEDED = 3  # sales with every search word; fewer, and half-matches count too
 SIMILAR_TITLES = 0.8  # Jaccard overlap of title words that makes two listings the same item
 SAME_PRICE_PCT = 3  # and totals within this many percent
+FILL_TO = 3  # fewer deals than this within budget, and the closest over it fill in, flagged
+OVER_BUDGET_PCT = 50  # the most over budget a filler can be, in percent
+UNPRICED_MAX = 2  # listings with no price shown after the priced ones, at most
+HEADLINE_TITLE = 60  # characters of a title in the headline's link
+# Flags that make a deal a near miss, so the headline doesn't say "Found it".
+NEAR_MISS = frozenset({"parts", "accessory", "missing_words"})
 
 # The words around an amount ("under $300", "max 300"), which no title would carry.
 BUDGET_WORDS = {
@@ -129,8 +157,11 @@ class ScoredDeal:
     total_cents: int  # price plus known shipping
     score: float  # higher is better
     versus_market_pct: int | None  # positive: under the typical sold price; None: no market
-    why: str  # one line, without the price and site (the caller shows those its own way)
-    flags: tuple[str, ...] = field(default=())  # parts | accessory | missing_words | far_under
+    # The score's reason: the market comparison, photos, seller rating, and cautions. Price,
+    # site, shipping, condition, location, and age come from the listing (`describe`).
+    why: str
+    # parts | accessory | missing_words | far_under | over_budget | no_price
+    flags: tuple[str, ...] = field(default=())
 
 
 def search_terms(query: str) -> list[str]:
@@ -239,11 +270,7 @@ def quality(listing: ExternalListing, today: date) -> tuple[int, list[str]]:
     points += condition
     if listing.condition:
         notes.append(listing.condition.lower())
-    photos = (
-        listing.photo_count
-        if listing.photo_count is not None
-        else (1 if listing.image_url else None)
-    )
+    photos = _photos(listing)
     if photos:
         points += 5 if photos >= 8 else 4 if photos >= 4 else 2
         if photos >= 2:
@@ -261,6 +288,23 @@ def quality(listing: ExternalListing, today: date) -> tuple[int, list[str]]:
         points += 3 if age <= 3 else 2 if age <= 14 else 1 if age <= 45 else 0
         notes.append(_age_phrase(age))
     return points, notes
+
+
+def _photos(listing: ExternalListing) -> int | None:
+    if listing.photo_count is not None:
+        return listing.photo_count
+    return 1 if listing.image_url else None
+
+
+def signal_notes(listing: ExternalListing) -> list[str]:
+    """The quality notes that aren't on a listing's line already: photos and seller rating."""
+    notes: list[str] = []
+    photos = _photos(listing)
+    if photos and photos >= 2:
+        notes.append(f"{photos} photos")
+    if listing.seller_rating is not None:
+        notes.append(f"seller rated {listing.seller_rating:g}%")
+    return notes
 
 
 def _market_phrase(pct: int, typical_cents: int) -> str:
@@ -313,9 +357,9 @@ def score(
         relative = percent_under(reference_cents, total)
         points += max(-RELATIVE_POINTS, min(RELATIVE_POINTS, relative * RELATIVE_POINTS / 50))
 
-    quality_points, quality_notes = quality(listing, today)
+    quality_points, _ = quality(listing, today)
     points += quality_points
-    notes += quality_notes
+    notes += signal_notes(listing)  # condition and age are on the listing's line already
 
     if part == "parts":
         points -= RED_FLAG
@@ -359,6 +403,37 @@ def without_repeats(deals: list[ScoredDeal]) -> list[ScoredDeal]:
     return kept
 
 
+def unpriced(listing: ExternalListing, wanted: list[str], today: date) -> ScoredDeal | None:
+    """A listing with no price ("contact me"), scored on quality and fit only and flagged
+    "no_price", so it can be shown last instead of hidden. None when a buyer couldn't use it:
+    no link, too few search words, or a part or accessory (with no price to judge it by)."""
+    if listing.price_cents is not None or not listing.url:
+        return None
+    have = set(words(listing.title))
+    missing = [w for w in wanted if w not in have]
+    if wanted and len(missing) * 2 > len(wanted):
+        return None
+    if not_the_thing(listing.title, have, set(wanted)) is not None:
+        return None
+    points, _ = quality(listing, today)
+    flags = ["no_price"]
+    notes = signal_notes(listing)
+    if missing:
+        points -= MISSING_WORD * len(missing)
+        flags.append("missing_words")
+        notes.append(f"title doesn't say {' or '.join(repr(w) for w in missing)}")
+    return ScoredDeal(listing, 0, float(points), None, ", ".join(notes), tuple(flags))
+
+
+def _best_first(scored: list[ScoredDeal]) -> list[ScoredDeal]:
+    return sorted(scored, key=lambda d: (-d.score, d.total_cents, d.listing.url))
+
+
+def _more(kept: list[ScoredDeal], extra: list[ScoredDeal], room: int) -> list[ScoredDeal]:
+    """Up to `room` of `extra` (best first) that aren't repeats of what's kept."""
+    return without_repeats(kept + _best_first(extra))[len(kept) :][: max(room, 0)]
+
+
 def rank(
     listings: list[ExternalListing],
     query: str,
@@ -366,15 +441,20 @@ def rank(
     market: MarketPrice | None = None,
     today: date | None = None,
     limit: int = LIMIT,
+    fill_to: int = FILL_TO,
+    unpriced_too: bool = True,
 ) -> list[ScoredDeal]:
     """The best deals for a buyer, best first: priced, within budget (shipping included),
     matching at least half the search words, scored as the module docstring says, repeats
-    dropped, at most `limit`."""
+    dropped, at most `limit`. When fewer than `fill_to` fit the budget, the best up to
+    OVER_BUDGET_PCT over it follow, flagged "over_budget"; then up to UNPRICED_MAX listings
+    with no price, flagged "no_price"."""
     today = today or date.today()
     wanted = search_terms(query)
+    unique = deduplicated(listings)
     candidates = [
         listing
-        for listing in deduplicated(listings)
+        for listing in unique
         if listing.total_cents is not None
         and (budget_cents is None or listing.total_cents <= budget_cents)
     ]
@@ -400,16 +480,240 @@ def rank(
         for listing in candidates
         if (deal := score(listing, wanted, market, reference, today)) is not None
     ]
-    scored.sort(key=lambda d: (-d.score, d.total_cents, d.listing.url))
-    return without_repeats(scored)[:limit]
+    chosen = without_repeats(_best_first(scored))[:limit]
+    room = min(fill_to, limit) - len(chosen)
+    if budget_cents is not None and room > 0:
+        most = budget_cents * (100 + OVER_BUDGET_PCT) // 100
+        over = [
+            dataclasses.replace(deal, flags=(*deal.flags, "over_budget"))
+            for listing in unique
+            if listing.total_cents is not None and budget_cents < listing.total_cents <= most
+            if (deal := score(listing, wanted, market, reference, today)) is not None
+        ]
+        chosen += _more(chosen, over, room)
+    if unpriced_too:
+        no_price = [
+            deal for listing in unique if (deal := unpriced(listing, wanted, today)) is not None
+        ]
+        chosen += _more(chosen, no_price, min(UNPRICED_MAX, limit - len(chosen)))
+    return chosen
 
 
-def reason(deal: ScoredDeal, site: str) -> str:
-    """The whole line: "$120 + $20 shipping on Craigslist, 35% under the $185 typical sold
-    price, like new, 6 photos"."""
-    listing = deal.listing
-    price = usd(listing.price_cents or 0)
+def fitting(
+    listings: list[ExternalListing],
+    query: str,
+    budget_cents: int | None,
+    market: MarketPrice | None = None,
+    limit: int = LIMIT,
+) -> list[ScoredDeal]:
+    """`rank` with only priced listings within the budget: no fillers, no unpriced posts."""
+    return rank(listings, query, budget_cents, market, limit=limit, fill_to=0, unpriced_too=False)
+
+
+# --- How a deal is shown ------------------------------------------------------------------------
+
+
+def markdown_link(title: str, url: str, limit: int = 70) -> str:
+    """[title](url), with brackets taken out of the title and a long one cut at a word."""
+    title = re.sub(r"[\[\]()]", "", title).strip()
+    if len(title) > limit:
+        title = (title[:limit].rsplit(" ", 1)[0] or title[:limit]).rstrip(" ,;:-")
+    return f"[{title}]({url})" if url else title
+
+
+def shipping_known(listing: ExternalListing) -> bool:
+    """Whether the total is what the buyer pays: shipping is given, or it's a pickup site."""
+    return listing.shipping_cents is not None or listing.source in LOCAL_SOURCES
+
+
+def shipping_phrase(listing: ExternalListing) -> str:
+    """ "+ $12 shipping", "free shipping", "pickup only", or "shipping unknown"."""
     if listing.shipping_cents:
-        price += f" + {usd(listing.shipping_cents)} shipping"
-    line = f"{price} on {site}"
-    return f"{line}, {deal.why}" if deal.why else line
+        return f"+ {usd(listing.shipping_cents)} shipping"
+    if listing.shipping_cents == 0:
+        return "free shipping"
+    if listing.source in LOCAL_SOURCES:
+        return "pickup only"
+    return "shipping unknown"
+
+
+def under_budget_cents(listing: ExternalListing, budget_cents: int | None) -> int | None:
+    """How far under the budget the total is (negative when over); None without a budget or a
+    price. With shipping unknown, it's the price alone (see shipping_known)."""
+    total = listing.total_cents
+    if budget_cents is None or total is None:
+        return None
+    return budget_cents - total
+
+
+def budget_phrase(listing: ExternalListing, budget_cents: int | None, qualify: bool = True) -> str:
+    """ "$45 under budget", "$5 over budget with shipping", "$20 under budget before shipping",
+    or "" without a budget or a price. `qualify` False leaves out "with shipping" (for a price
+    already shown with shipping); "before shipping" always stays."""
+    diff = under_budget_cents(listing, budget_cents)
+    if diff is None:
+        return ""
+    if not shipping_known(listing):
+        tail = " before shipping"
+    elif listing.shipping_cents and qualify:
+        tail = " with shipping"
+    else:
+        tail = ""
+    if diff > 0:
+        return f"{usd(diff)} under budget{tail}"
+    if diff == 0:
+        return f"right at your budget{tail}"
+    return f"{usd(-diff)} over budget{tail}"
+
+
+def missing_fields(listing: ExternalListing) -> list[str]:
+    """What the site didn't say: any of price, photo, condition, location."""
+    missing = []
+    if listing.price_cents is None:
+        missing.append("price")
+    if not _photos(listing):
+        missing.append("photo")
+    if not listing.condition.strip():
+        missing.append("condition")
+    if not listing.location.strip():
+        missing.append("location")
+    return missing
+
+
+MISSING_WORDS = {
+    "photo": "no photo",
+    "condition": "condition not listed",
+    "location": "location not listed",
+}
+
+
+def missing_note(listing: ExternalListing) -> str:
+    """ "condition not listed, no photo": the suffix a line ends with. A missing price is said
+    where the price goes, so it isn't repeated here."""
+    return ", ".join(MISSING_WORDS[f] for f in missing_fields(listing) if f in MISSING_WORDS)
+
+
+def details(listing: ExternalListing, today: date | None = None) -> list[str]:
+    """Condition, location, how long ago it was posted, and whether the site takes offers."""
+    found = [part for part in (listing.condition.strip(), listing.location.strip()) if part]
+    if listing.posted_at:
+        age = _days_old(listing.posted_at, today or date.today())
+        if age is not None:
+            found.append(_age_phrase(age))
+    if listing.accepts_offers:
+        found.append("takes offers")
+    return found
+
+
+def _sentence(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def describe(
+    listing: ExternalListing,
+    site: str,
+    why: str = "",
+    budget_cents: int | None = None,
+    today: date | None = None,
+) -> str:
+    """One listing, without its link: "$180 on Craigslist, pickup only, $120 under budget.
+    Used, Oakland, CA, posted 2 days ago. 42% under the $310 typical sold price, 6 photos.
+    (no photo)"."""
+    if listing.price_cents is None:
+        first = f"price not listed on {site}"
+    else:
+        first = usd(listing.price_cents)
+        if listing.shipping_cents:
+            first += f" + {usd(listing.shipping_cents)} shipping"
+        first += f" on {site}"
+    head = [first]
+    if not listing.shipping_cents:
+        head.append(shipping_phrase(listing))
+    if against := budget_phrase(listing, budget_cents):
+        head.append(against)
+    sentences = [", ".join(head)]
+    if found := details(listing, today):
+        sentences.append(_sentence(", ".join(found)))
+    if why:
+        sentences.append(_sentence(why))
+    text = ". ".join(sentences) + "."
+    note = missing_note(listing)
+    return f"{text} ({note})" if note else text
+
+
+def reason(
+    deal: ScoredDeal, site: str, budget_cents: int | None = None, today: date | None = None
+) -> str:
+    """A deal's whole line without its link (describe)."""
+    return describe(deal.listing, site, deal.why, budget_cents, today)
+
+
+def headline(
+    found: Sequence[ScoredDeal],
+    budget_cents: int | None,
+    market: MarketPrice | None,
+    site: Callable[[str], str],
+) -> str:
+    """The sentence a reply opens with: the best deal, its link, and what it saves.
+
+    "Found it: [Hydro Flask 32 oz](...) on Craigslist for $18, $12 under your $30 budget
+    (Berkeley, pickup)." Without a budget it's compared with the typical sold price, and
+    without either it says where and how much. A saving is claimed only from the numbers:
+    shipping that isn't known is said ("before shipping"), and when nothing fits the budget it
+    says so and names the closest. "" when there are no deals.
+    """
+    if not found:
+        return ""
+    priced = [d for d in found if d.listing.price_cents is not None]
+    if not priced:
+        first = found[0].listing
+        link = markdown_link(first.title, first.url, HEADLINE_TITLE)
+        return f"Found {link} on {site(first.source)}, but the price isn't listed: ask the seller."
+    fits = [d for d in priced if (under_budget_cents(d.listing, budget_cents) or 0) >= 0]
+    best = fits[0] if fits else priced[0]
+    listing = best.listing
+    price = listing.price_cents or 0
+    total = listing.total_cents or price
+    link = markdown_link(listing.title, listing.url, HEADLINE_TITLE)
+    if listing.shipping_cents:
+        cost = f"for {usd(total)} with shipping"
+    elif listing.shipping_cents == 0:
+        cost = f"for {usd(price)} with free shipping"
+    else:
+        cost = f"for {usd(price)}"
+    before = "" if shipping_known(listing) else " before shipping"
+    compare = ""
+    if budget_cents is not None:
+        diff = budget_cents - total
+        if diff > 0:
+            compare = f"{usd(diff)} under your {usd(budget_cents)} budget{before}"
+        elif diff == 0:
+            compare = f"right at your {usd(budget_cents)} budget{before}"
+        else:
+            compare = f"{usd(-diff)} over it{before}"
+    elif market is not None and market.typical_cents > 0:
+        typical = market.typical_cents
+        if abs(percent_under(typical, total)) < ABOUT_MARKET:
+            compare = f"about the typical {usd(typical)} sold price{before}"
+        elif typical > total:
+            compare = f"{usd(typical - total)} under the typical {usd(typical)} sold price{before}"
+        else:
+            compare = f"{usd(total - typical)} above the typical {usd(typical)} sold price{before}"
+    tags = [listing.location.strip()] if listing.location.strip() else []
+    if listing.shipping_cents is None:
+        if listing.source in LOCAL_SOURCES:
+            tags.append("pickup")
+        elif not compare:
+            tags.append("shipping unknown")
+    sentence = f"{link} on {site(listing.source)} {cost}"
+    if compare:
+        sentence += f", {compare}"
+    if tags:
+        sentence += f" ({', '.join(tags)})"
+    if not fits:
+        return f"Nothing fits your {usd(budget_cents or 0)} budget yet. Closest: {sentence}."
+    lead = "Closest match" if NEAR_MISS & set(best.flags) else "Found it"
+    text = f"{lead}: {sentence}."
+    if "far_under" in best.flags:
+        text += " It's far under the usual price, so check it's the whole item."
+    return text

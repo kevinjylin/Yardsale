@@ -117,9 +117,11 @@ def test_score_says_how_far_under_the_typical_sold_price() -> None:
     )
     assert deal is not None
     assert deal.total_cents == 12000 and deal.versus_market_pct == 35
-    assert deal.why.startswith("35% under the $185 typical sold price, like new")
+    # Condition and age are on the line from the listing, so the reason doesn't repeat them.
+    assert deal.why == "35% under the $185 typical sold price"
     assert reason(deal, "Craigslist") == (
-        "$100 + $20 shipping on Craigslist, 35% under the $185 typical sold price, like new"
+        "$100 + $20 shipping on Craigslist. Like new. 35% under the $185 typical sold price. "
+        "(no photo, location not listed)"
     )
     assert deal.flags == ()
 
@@ -349,3 +351,236 @@ def test_repeats_keep_the_better_scored_one() -> None:
     worse = ScoredDeal(listing("Road bike", 20000, "craigslist"), 20000, 10.0, None, "")
     better = ScoredDeal(listing("Road bike", 20000, "ebay"), 20000, 20.0, None, "")
     assert deals.without_repeats([better, worse]) == [better]
+
+
+# --- The budget: shipping, over-budget fillers, unpriced posts -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "shipping", "phrase", "known"),
+    [
+        ("ebay", 1200, "+ $12 shipping", True),
+        ("ebay", 0, "free shipping", True),
+        ("ebay", None, "shipping unknown", False),
+        ("craigslist", None, "pickup only", True),
+        ("offerup", None, "pickup only", True),
+        ("facebook", None, "pickup only", True),
+        ("offerup", 800, "+ $8 shipping", True),
+    ],
+)
+def test_shipping_is_said_known_free_pickup_or_unknown(
+    source: str, shipping: int | None, phrase: str, known: bool
+) -> None:
+    item = listing("Road bike", 10000, source, shipping_cents=shipping)
+    assert deals.shipping_phrase(item) == phrase
+    assert deals.shipping_known(item) is known
+
+
+def test_the_budget_counts_known_shipping_and_flags_unknown() -> None:
+    budget = 10000
+    pickup = listing("Road bike", 5500)
+    shipped = listing("Road bike", 9800, "ebay", shipping_cents=700)
+    unknown = listing("Road bike", 8000, "ebay")
+    exact = listing("Road bike", 10000, "ebay", shipping_cents=0)
+    assert deals.under_budget_cents(pickup, budget) == 4500
+    assert deals.budget_phrase(pickup, budget) == "$45 under budget"
+    assert deals.under_budget_cents(shipped, budget) == -500
+    assert deals.budget_phrase(shipped, budget) == "$5 over budget with shipping"
+    assert deals.budget_phrase(shipped, budget, qualify=False) == "$5 over budget"
+    assert deals.under_budget_cents(unknown, budget) == 2000  # the price alone
+    assert deals.budget_phrase(unknown, budget) == "$20 under budget before shipping"
+    assert deals.budget_phrase(unknown, budget, qualify=False) == "$20 under budget before shipping"
+    assert deals.budget_phrase(exact, budget) == "right at your budget"
+    assert deals.budget_phrase(pickup, None) == ""
+    assert deals.under_budget_cents(listing("Road bike", None), budget) is None
+
+
+def test_over_budget_listings_fill_in_only_when_fewer_than_three_fit() -> None:
+    over = [
+        listing("Trek road bike", 33000),  # 10% over
+        listing("Giant road bike", 36000),  # 20% over
+        listing("Cannondale road bike", 44000),  # 47% over
+        listing("Pinarello road bike", 46000),  # 53% over: too far to show
+    ]
+    one_fits = rank([listing("Fuji road bike", 25000), *over], "road bike", 30000, today=TODAY)
+    assert one_fits[0].listing.title == "Fuji road bike"
+    assert len(one_fits) == deals.FILL_TO
+    assert "over_budget" not in one_fits[0].flags
+    assert all("over_budget" in d.flags for d in one_fits[1:])
+    assert "Pinarello road bike" not in {d.listing.title for d in one_fits}
+
+    fits = [listing(f"Road bike {n}", 20000 + n * 1000) for n in range(3)]
+    enough = rank([*fits, *over], "road bike", 30000, today=TODAY)
+    assert len(enough) == 3 and not any("over_budget" in d.flags for d in enough)
+
+    none_fit = rank(over, "road bike", 30000, today=TODAY)
+    assert len(none_fit) == 3 and all("over_budget" in d.flags for d in none_fit)
+
+    # Without a budget nothing is over it.
+    assert not any("over_budget" in d.flags for d in rank(over, "road bike", None, today=TODAY))
+
+
+def test_an_unpriced_post_is_kept_but_always_last() -> None:
+    found = rank(
+        [
+            listing(
+                "Trek road bike, like new, 54cm, ready to ride",
+                None,
+                condition="Like new",
+                photo_count=12,
+                posted_at="2026-10-24",
+            ),
+            listing("Road bike", 28000),
+            listing("Road bike helmet", None),  # an accessory with no price: left out
+            listing("Specialized road bike", None),
+            listing("Giant road bike", None),  # a third unpriced one: past UNPRICED_MAX
+        ],
+        "road bike",
+        30000,
+        today=TODAY,
+    )
+    titles = [d.listing.title for d in found]
+    assert titles[0] == "Road bike"  # the priced one first, though the unpriced one is nicer
+    assert len(titles) == 1 + deals.UNPRICED_MAX
+    assert titles[1] == "Trek road bike, like new, 54cm, ready to ride"
+    assert all("no_price" in d.flags and d.listing.price_cents is None for d in found[1:])
+    assert "Road bike helmet" not in titles
+
+
+def test_rank_can_keep_only_priced_listings_under_the_budget() -> None:
+    found = rank(
+        [listing("Road bike", 33000), listing("Trek road bike", None)],
+        "road bike",
+        30000,
+        fill_to=0,
+        unpriced_too=False,
+    )
+    assert found == []
+
+
+# --- How a deal is shown ------------------------------------------------------------------------
+
+
+def test_missing_fields_and_their_suffix() -> None:
+    bare = listing("Road bike", None)
+    assert deals.missing_fields(bare) == ["price", "photo", "condition", "location"]
+    assert deals.missing_note(bare) == "no photo, condition not listed, location not listed"
+    full = listing(
+        "Road bike", 10000, image_url="https://img.test/1.jpg", condition="Used", location="SF"
+    )
+    assert deals.missing_fields(full) == [] and deals.missing_note(full) == ""
+
+
+def test_a_line_says_price_shipping_budget_condition_place_age_and_reason() -> None:
+    item = listing(
+        "Trek FX 2",
+        18000,
+        condition="Used",
+        location="Berkeley",
+        posted_at="2026-10-22",
+        photo_count=6,
+    )
+    deal = score(item, ["trek"], market_of(31000), None, TODAY)
+    assert deal is not None
+    assert reason(deal, "Craigslist", 30000, TODAY) == (
+        "$180 on Craigslist, pickup only, $120 under budget. Used, Berkeley, posted 2 days ago. "
+        "42% under the $310 typical sold price, 6 photos."
+    )
+    ebay = listing("Trek FX 2", 9000, "ebay", accepts_offers=True)
+    assert deals.describe(ebay, "eBay", "", 10000, TODAY) == (
+        "$90 on eBay, shipping unknown, $10 under budget before shipping. Takes offers. "
+        "(no photo, condition not listed, location not listed)"
+    )
+    shipped = listing("Trek FX 2", 9000, "ebay", shipping_cents=1500, location="Reno, NV")
+    assert deals.describe(shipped, "eBay", "", 10000, TODAY).startswith(
+        "$90 + $15 shipping on eBay, $5 over budget with shipping. Reno, NV."
+    )
+    free = listing("Trek FX 2", 9000, "ebay", shipping_cents=0)
+    assert deals.describe(free, "eBay").startswith("$90 on eBay, free shipping.")
+    assert deals.describe(listing("Trek FX 2", None), "Craigslist", "", 10000).startswith(
+        "price not listed on Craigslist, pickup only."
+    )
+
+
+def site(source: str) -> str:
+    return {"craigslist": "Craigslist", "ebay": "eBay", "offerup": "OfferUp"}[source]
+
+
+def deal_of(item: ExternalListing, *flags: str) -> ScoredDeal:
+    total = item.total_cents if item.total_cents is not None else 0
+    return ScoredDeal(item, total, 10.0, None, "", tuple(flags))
+
+
+FLASK = listing(
+    "Hydro Flask 32 oz", 1800, "craigslist", url="https://cl.test/flask", location="Berkeley"
+)
+
+
+def test_the_headline_with_a_budget() -> None:
+    assert deals.headline([deal_of(FLASK)], 3000, None, site) == (
+        "Found it: [Hydro Flask 32 oz](https://cl.test/flask) on Craigslist for $18, $12 under "
+        "your $30 budget (Berkeley, pickup)."
+    )
+    shipped = listing("Hydro Flask", 1800, "ebay", 700, url="https://e.test/1")
+    assert deals.headline([deal_of(shipped)], 3000, None, site) == (
+        "Found it: [Hydro Flask](https://e.test/1) on eBay for $25 with shipping, $5 under your "
+        "$30 budget."
+    )
+    free = listing("Hydro Flask", 1800, "ebay", 0, url="https://e.test/2")
+    assert deals.headline([deal_of(free)], 1800, None, site) == (
+        "Found it: [Hydro Flask](https://e.test/2) on eBay for $18 with free shipping, right at "
+        "your $18 budget."
+    )
+    unknown = listing("Hydro Flask", 1800, "ebay", url="https://e.test/3")
+    assert deals.headline([deal_of(unknown)], 3000, None, site) == (
+        "Found it: [Hydro Flask](https://e.test/3) on eBay for $18, $12 under your $30 budget "
+        "before shipping."
+    )
+
+
+def test_the_headline_without_a_budget_compares_with_the_typical_sold_price() -> None:
+    cheap = listing("Hydro Flask", 5000, url="https://cl.test/2", location="Oakland")
+    assert deals.headline([deal_of(cheap)], None, market_of(9000), site) == (
+        "Found it: [Hydro Flask](https://cl.test/2) on Craigslist for $50, $40 under the typical "
+        "$90 sold price (Oakland, pickup)."
+    )
+    dear = listing("Hydro Flask", 10000, url="https://cl.test/3")
+    assert "$10 above the typical $90 sold price" in deals.headline(
+        [deal_of(dear)], None, market_of(9000), site
+    )
+    about = listing("Hydro Flask", 8800, url="https://cl.test/4")
+    assert "about the typical $90 sold price" in deals.headline(
+        [deal_of(about)], None, market_of(9000), site
+    )
+    # Nothing to compare with: where and how much, no saving claimed.
+    item = listing("Hydro Flask", 5000, "ebay", url="u")
+    plain = deals.headline([deal_of(item)], None, None, site)
+    assert plain == "Found it: [Hydro Flask](u) on eBay for $50 (shipping unknown)."
+
+
+def test_the_headline_when_nothing_fits_or_nothing_is_priced() -> None:
+    over = listing("Hydro Flask", 3500, "ebay", url="https://e.test/4")
+    text = deals.headline([deal_of(over, "over_budget")], 3000, None, site)
+    assert text == (
+        "Nothing fits your $30 budget yet. Closest: [Hydro Flask](https://e.test/4) on eBay for "
+        "$35, $5 over it before shipping."
+    )
+    unpriced = listing("Hydro Flask", None, url="https://cl.test/5")
+    assert deals.headline([deal_of(unpriced, "no_price")], 3000, None, site) == (
+        "Found [Hydro Flask](https://cl.test/5) on Craigslist, but the price isn't listed: ask "
+        "the seller."
+    )
+    # A priced deal is the headline even when an unpriced one came first.
+    both = [deal_of(unpriced, "no_price"), deal_of(FLASK)]
+    assert deals.headline(both, 3000, None, site).startswith("Found it: [Hydro Flask 32 oz]")
+    assert deals.headline([], 3000, None, site) == ""
+
+
+def test_the_headline_is_careful_with_near_misses() -> None:
+    near = deals.headline([deal_of(FLASK, "missing_words")], 3000, None, site)
+    assert near.startswith("Closest match: [Hydro Flask 32 oz]")
+    steal = deals.headline([deal_of(FLASK, "far_under")], 3000, market_of(9000), site)
+    assert steal.endswith("check it's the whole item.")
+    long = listing("Hydro Flask " + "very " * 20 + "big", 1800, url="u")
+    title = deals.headline([deal_of(long)], 3000, None, site).split("[")[1].split("]")[0]
+    assert len(title) <= deals.HEADLINE_TITLE and title.endswith("very")
