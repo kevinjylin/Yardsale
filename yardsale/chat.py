@@ -251,8 +251,15 @@ ALREADY_WORKING = (
 )
 SOMETHING_BROKE = "Sorry, something went wrong on my side. Please send that again."
 APPROVE_PROMPT = (
-    'Reply "approve" to put it up for sale, "ask $X" or "lowest $X" to change a price ("rules" '
-    'for a form), or "cancel".'
+    'Reply "approve" to put it up for sale (I\'ll offer to write a Craigslist post next), "ask $X" '
+    'or "lowest $X" to change a price ("rules" for a form), or "cancel".'
+)
+_NOT_NOW = re.compile(
+    r"(?:not\s+(?:now|yet|today)|later|maybe\s+later|skip(?:\s+it)?|no\s+thanks)\b"
+)
+CRAIGSLIST_NOT_NOW = (
+    "OK. It's listed on Yardsale, where buyers in ASI:One and @yardsale can find it, and its agent "
+    'answers them for you. Say "craigslist" any time for a ready-to-paste post.'
 )
 BATCH_PROMPT = (
     'Reply "approve all" to put them all up for sale, or name one by number: "approve 2", '
@@ -317,7 +324,8 @@ class Conversation:
     results: list[str] = field(default_factory=list)  # item IDs from the last search, as numbered
     selected: str | None = None  # the item an offer without a number is for
     counter: dict[str, Any] | None = None  # {"item_id", "cents"}: the open counter-offer
-    awaiting: str | None = None  # "proposal", "counter", or "max": what a bare reply answers
+    # "proposal", "counter", "max", or "craigslist" (offered a post): what a bare reply answers
+    awaiting: str | None = None
     quotes: dict[str, int] = field(default_factory=dict)  # item ID -> price on offer to this buyer
     budget: int | None = None  # the buyer's max from their last search or haggle
     # Seller's photos by number ("approve 2"): proposal item IDs, "" for photos that aren't one.
@@ -727,10 +735,12 @@ def agent_line(listing: Listing) -> str:
 def listed_text(listing: Listing, registered: bool, offline: bool) -> str:
     lines = [
         f"Your {listing.title} is for sale at {usd(listing.asking_cents)}.",
+        "Its own agent now answers buyers for you: it haggles with reasons from the market and "
+        f"never goes below your {usd(listing.floor_cents)} minimum, which buyers never see.",
+        "Next: want it on Craigslist too? I'll write the post for you to paste, and buyers' "
+        'emails come straight to your agent. Reply "yes", or "not now". Say "my listings" any '
+        "time to check on it.",
         agent_line(listing),
-        f"It agrees to any offer of {usd(listing.floor_cents)} or more. Below that it counters, "
-        "coming down a little each round without ever revealing your lowest price. Say "
-        '"my listings" any time to check on it.',
     ]
     if listing.host == AGENTVERSE:
         return "\n".join(lines)
@@ -741,6 +751,25 @@ def listed_text(listing: Listing, registered: bool, offline: bool) -> str:
     elif not registered:
         lines.append("(The Almanac hasn't confirmed it yet. The server retries every hour.)")
     return "\n".join(lines)
+
+
+def craigslist_card(listing: Listing) -> MetadataContent:
+    """The offer, right after listing, to write the item's Craigslist post."""
+    choice: dict[str, Any] = {"item_id": listing.item_id}
+    return create_card_content(
+        ReviewCardPayload(
+            title=f"Post your {listing.title} on Craigslist?",
+            summary_rows=[
+                ReviewSummaryRow(label="Price", value=usd(listing.asking_cents)),
+                ReviewSummaryRow(label="Buyers' emails", value="answered by your agent"),
+            ],
+            approve_cta=CtaAction(
+                label="Write my post", selection={"action": "craigslist", **choice}, primary=True
+            ),
+            reject_cta=CtaAction(label="Not now", selection={"action": "no_craigslist", **choice}),
+        ),
+        card_id=uuid4(),
+    )
 
 
 def results_text(found: list[Listing], query: str, owner: str) -> str:
@@ -1402,13 +1431,30 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             on_ebay = "\n" + await list_on_ebay(conv, listing)
         return listing, registered, on_ebay
 
-    async def approve(ctx: Context, conv: Conversation, proposal: Listing) -> str:
+    async def approve(ctx: Context, conv: Conversation, proposal: Listing) -> str | Reply:
         live = await go_live(ctx, conv, proposal)
         if isinstance(live, str):
             return live
         listing, registered, on_ebay = live
+        conv.awaiting = "craigslist"  # a bare "yes" now means: write the Craigslist post
+        text = listed_text(listing, registered, backend.offline) + on_ebay + waiting_too(conv)
+        return Reply(text, craigslist_card(listing))
+
+    def craigslist_post(conv: Conversation, item_id: str | None) -> str:
+        """The ready-to-paste Craigslist post for one of the seller's live listings (the newest
+        when no item is named)."""
         conv.awaiting = None
-        return listed_text(listing, registered, backend.offline) + on_ebay + waiting_too(conv)
+        active = store.owned(conv.owner, ACTIVE)
+        listing = next((each for each in active if each.item_id == item_id), None)
+        if listing is None and item_id is None and active:
+            listing = active[0]
+        if listing is None:
+            return "That item isn't for sale anymore."
+        try:
+            settings = craigslist_mail.settings_from_env()
+        except craigslist_mail.MailConfigError:
+            settings = None
+        return craigslist_mail.post_text(listing, craigslist_mail.post(store, listing), settings)
 
     # --- Several proposals, by number ------------------------------------------------------
 
@@ -2190,6 +2236,11 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if action == "approve":
                 return await approve(ctx, conv, listing)
             return cancel_proposal(conv, listing)
+        if action == "craigslist":
+            return craigslist_post(conv, item_id)
+        if action == "no_craigslist":
+            conv.awaiting = None
+            return CRAIGSLIST_NOT_NOW
         if action == "accept":
             cents = choice.get("cents")
             counter = conv.counter
@@ -2308,11 +2359,17 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if kind == "approve":
             if proposal is not None:
                 return await approve(ctx, conv, proposal)
+            if conv.awaiting == "craigslist" and "approve" not in text.lower():
+                return craigslist_post(conv, None)  # "yes" to the Craigslist offer
             if conv.unpriced is not None:
                 return 'Tell me your price first, like "ask $40".'
             if conv.counter is not None:
                 return await accept_typed(ctx, conv, None)
             return "There's nothing waiting for approval. Attach a photo of something to sell."
+        not_now = _NOT_NOW.match(text.strip().lower()) is not None
+        if (kind == "cancel" or not_now) and proposal is None and conv.awaiting == "craigslist":
+            conv.awaiting = None
+            return CRAIGSLIST_NOT_NOW
         if kind == "cancel":
             if conv.unpriced is not None:
                 conv.unpriced = None

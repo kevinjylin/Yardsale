@@ -534,3 +534,34 @@ async def test_a_minimum_far_under_the_market_gets_a_plain_warning(market: sim.M
         "were around $340."
     ) in reply
     assert "is for sale at $360" in await seller.say("approve")  # the seller's price still wins
+
+
+async def test_listing_offers_to_write_the_craigslist_post(
+    market: sim.Market, store: Store
+) -> None:
+    """Approving leads the seller to the next step, Craigslist, instead of ending at the agent."""
+    seller = market.user("seller")
+    await seller.say("sell this, at least $300", BIKE)
+    reply = await seller.exchange(sim.chat_message("approve"))
+    assert "want it on Craigslist too?" in reply.text()
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, ReviewCardPayload)
+    write = card.payload.approve_cta.selection
+    (listing,) = store.active()
+    assert write == {"action": "craigslist", "item_id": listing.item_id}
+    post = await seller.say("yes")
+    assert "Price:" in post and listing.title in post
+    # Asked again by the card later, it writes the same post; "yes" no longer means anything.
+    assert "Price:" in await seller.tap(write)
+    assert "nothing waiting for approval" in await seller.say("yes")
+
+
+async def test_not_now_keeps_it_on_yardsale(market: sim.Market, store: Store) -> None:
+    seller = market.user("seller")
+    await seller.say("sell this, at least $300", BIKE)
+    await seller.say("approve")
+    assert "listed on Yardsale" in await seller.say("not now")
+    assert store.active()  # still for sale
+    await seller.say("sell this, at least $300", fakes.photo_url("bike-two"))
+    await seller.say("approve")
+    assert "listed on Yardsale" in await seller.say("no")
