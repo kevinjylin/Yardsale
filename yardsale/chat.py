@@ -2140,6 +2140,13 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return onboarding.NOT_A_STUDENT_YET
         if action == "student_email":
             text, card = onboarding.join(store, conv.owner, str(choice.get("email", "")))
+            student = store.student(conv.owner)
+            if student is not None and not store.campus_loaded(student.school):
+                # The first student from a school starts its mapping. It takes the better part
+                # of a minute against Overpass, so it runs behind the reply rather than in it.
+                warming = asyncio.ensure_future(onboarding.warm(store, student.school))
+                follow_ups.add(warming)
+                warming.add_done_callback(follow_ups.discard)
             return Reply(text, card)
         if action in ("approve", "cancel"):
             listing = store.get(item_id)

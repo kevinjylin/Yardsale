@@ -37,7 +37,7 @@ from uagents_core.contrib.protocols.chat.cards import (
     create_card_content,
 )
 
-from yardsale import meetup, schools, students
+from yardsale import campus, schools, students
 from yardsale.schools import SchoolError
 from yardsale.store import Store
 
@@ -66,12 +66,8 @@ NOT_A_STUDENT_YET = (
 ASK_FOR_EMAIL = "Great. What's your school email? I only use it to tell which university you're at."
 JOINED = (
     "You're in, at {school}. You can sell ({sell}) and buy from other {school} students.\n\n"
-    "When you trade, I'll suggest meeting at {where} on campus. Nobody has to say where they "
+    "When you trade I'll suggest somewhere on campus to meet, so nobody has to say where they "
     "live."
-)
-JOINED_NO_CAMPUS = (
-    "You're in, at {school}. You can sell ({sell}) and buy from other {school} students.\n\n"
-    "I don't have a map of your campus yet, so you'll agree a meeting spot in the chat."
 )
 SELL_HINT = "send me a photo of something"
 
@@ -135,16 +131,18 @@ def email_form() -> MetadataContent:
     )
 
 
-def joined_text(school: str, where: str = "") -> str:
-    """What a student is told once they're in, including where their campus meets."""
-    label = schools.school_label(school)
-    if not where:
-        return JOINED_NO_CAMPUS.format(school=label, sell=SELL_HINT)
-    return JOINED.format(school=label, sell=SELL_HINT, where=where)
+def joined_text(school: str) -> str:
+    """What a student is told once they're in."""
+    return JOINED.format(school=schools.school_label(school), sell=SELL_HINT)
 
 
 def join(store: Store, owner: str, email: str) -> tuple[str, MetadataContent | None]:
     """Sign a student up from an email. Returns the reply and a card if one is needed again.
+
+    This answers at once and never waits on a map service. A cold campus fetch measured 42-53
+    seconds against Overpass, which is past the chat's reply budget, and a student doesn't need
+    a meeting spot until they actually trade. The caller schedules `warm` instead, so the first
+    student from a school starts the mapping without waiting for it.
 
     A bad address comes back as a message rather than an error, because the student simply
     needs to try again.
@@ -153,8 +151,11 @@ def join(store: Store, owner: str, email: str) -> tuple[str, MetadataContent | N
         student = students.join(store, owner, email)
     except SchoolError as ex:
         return str(ex), email_form()
-    try:
-        where = meetup.describe(students.where_to_meet(store, student.school))
-    except students.StudentError:
-        where = ""
-    return joined_text(student.school, where), None
+    return joined_text(student.school), None
+
+
+async def warm(store: Store, school: str, find: campus.FindCampus = campus.find_and_load) -> None:
+    """Map a school's campus if it isn't mapped yet. Meant to be run in the background, so it
+    returns nothing and never raises: campus.find_and_load already swallows a failure, and
+    students.warm_campus logs what it cached."""
+    await students.warm_campus(store, school, find)
