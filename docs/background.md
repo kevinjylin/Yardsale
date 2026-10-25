@@ -81,6 +81,7 @@ That's the visual proof judges will remember.
 | Researcher                  | Our Bureau server, Agentverse mailbox       | 1                      |
 | Appraiser                   | Our Bureau server, Agentverse mailbox       | 1                      |
 | Shopper (the buyer agent, `@ys-shopper`) | Our Bureau server, Agentverse mailbox | 1             |
+| Deal Finder (`@ys-dealfinder`) | Our Bureau server, Agentverse mailbox. Searches other sites and scores the deals. | 1 |
 | Item agents (one per item)  | Our Bureau server, Almanac only; or hosted on Agentverse (`YARDSALE_HOST_ITEMS`) | 0 in the server; 1 each hosted |
 | Buyers                      | ASI:One acts for them                       | 0                      |
 
@@ -198,34 +199,66 @@ Code: [chat.py](../yardsale/chat.py), [shopper.py](../yardsale/shopper.py),
    provider; the server also checks every minute. Paid deals record the commission and the
    seller's payout, which the seller sees under `my listings`.
 
-## When Yardsale has nothing: other sites
+## When Yardsale has nothing: other sites (the Deal Finder)
 
-Code: [elsewhere.py](../yardsale/elsewhere.py), on Rahul's [sources.py](../yardsale/sources.py)
-and [watches.py](../yardsale/watches.py). Added October 24; **not yet run with real Apify keys**
-(every test uses fake sources).
+Code: [dealfinder.py](../yardsale/dealfinder.py) (the agent), [elsewhere.py](../yardsale/elsewhere.py)
+(the search and cache), and [deals.py](../yardsale/deals.py) (the scoring), on Rahul's
+[sources.py](../yardsale/sources.py) and [watches.py](../yardsale/watches.py). Added October 24;
+**not yet run with real Apify keys** (every test uses fake sources and fake comps).
 
-Yardsale will rarely have the exact thing a buyer wants, so the buyer product is: Yardsale's own
-listings first (their agents haggle), then the best deals on other sites within the max.
+After talking to a Fetch judge, agent-to-agent purchases were dropped from the pitch. The buyer
+product is: say what you want and your max, and Yardsale's agents find the best-priced,
+best-quality items across eBay, Craigslist, OfferUp, and Facebook Marketplace and explain why
+each is a good deal. Yardsale's own listings still come first when they match.
 
-- A chat search or haggle that finds nothing on Yardsale searches every source once, at the
-  same time: eBay, Craigslist, OfferUp, and Facebook Marketplace with `YARDSALE_FACEBOOK=1`.
+- A chat search or haggle that finds nothing on Yardsale sends the **Deal Finder agent**
+  (`yardsale-dealfinder`, `@ys-dealfinder`, its own Agentverse mailbox, the sixth) a
+  `FindDeals` (query, max, ZIP) and gets `DealsFound` back. It searches every source once, at
+  the same time: eBay, Craigslist, OfferUp, and Facebook Marketplace with `YARDSALE_FACEBOOK=1`.
   `search other sites`, `check ebay and craigslist`, or `search ebay for a road bike under
   $300` asks for it directly (always every source, whichever site is named).
-- The reply lists the five best, with links: listings priced at least $1, at or under the max
-  with shipping, sharing at least half the search words; then fewest missing words, titles that
-  look like parts or accessories ("helmet", "for parts") last, then cheapest total. A carousel
-  card shows their photos. The reply says they aren't Yardsale listings, so no agent haggles for
-  them; Craigslist sellers take offers by email.
+- **The market price.** Alongside the sources, the finder runs the Researcher's eBay
+  sold-listings search (the same Apify actor, 20 sales from the last 90 days) for the search
+  words, once per words, cached 10 minutes. The sales whose titles carry every search word
+  (or at least half, when fewer than 3 do) set the typical sold price: their median, shipping
+  included, skipping lots, parts, accessories, and accepted-Best-Offer sales when there are
+  others. No Claude call: keyword overlap stands in for the Appraiser's judgement, since the
+  buyer side has no photo.
+- **The score** (`deals.py`): price against the market first (up to 50 points at 50% or more
+  under the typical sold price, negative above it; without a market price, up to 20 against
+  the median of the listings that match every search word), then quality (about 20 points:
+  the site's condition words, photo count, seller rating when given, a title with enough words,
+  how recently it was posted), then fit (−30 per search word the title lacks; more than half
+  missing is dropped). "Parts", "for repair", "broken", "lot" cost 60; accessories of the thing
+  ("road bike helmet" for "road bike") cost 40, unless asked for. More than 70% under the
+  market is flagged "check it's the whole item". The same item on two sites (title words 80%
+  alike and totals within 3%) is shown once.
+- The reply lists the five best, with links, each with a one-line reason: "$180 on Craigslist,
+  42% under the $310 typical sold price, like new, 6 photos, posted 2 days ago". The header
+  says what they were judged against ("typical sold price on eBay: $310, from 4 sales"). A
+  carousel card shows their photos with the percentage. The reply says they aren't Yardsale
+  listings, so no agent haggles for them; Craigslist sellers take offers by email.
 - The search runs after the conversation's lock is released. If it takes longer than
   `REPLY_WITHIN`, the first reply says it's searching and the deals follow as a second message.
-- Each run costs about $0.03 to $0.05 per site, so results are cached 10 minutes per (search
-  words, budget), and a search still running is joined, not started again. A search where no
-  site answered isn't cached. The log has counts only, never the words or the max.
+  The Market waits up to 240 s for the agent, like the Researcher.
+- Each run costs about $0.03 to $0.05 per site plus about $0.08 for the comps, so results are
+  cached 10 minutes per (search words, budget, ZIP) and comps per search words, and a search
+  still running is joined, not started again. A search where no site answered isn't cached,
+  and neither is a failed comps search. The log has counts only, never the words or the max;
+  the Market's client (`DealsClient`) keeps the same interface, so the chat and the API don't
+  know the search runs in another agent.
+- `uv run python -m yardsale.elsewhere --probe "road bike" --max 300` runs one small paid
+  search per source (10 results each, plus 10 comps; about $0.10, $0.16 with Facebook) and
+  prints per-source counts, what each parser could read (prices, links, photo counts,
+  conditions, dates), the market price, and the top 3 with scores, so the OfferUp and Facebook
+  parsers can be checked against live actor output. Not yet run.
 - `watch for it` turns the last search (or `watch for a road bike under $300`) into a standing
   search that polls every 6 hours for a week. The Market can't message a chat later, so any
   reply mentions new finds, and `my watches` shows them (then they count as told). `stop
   watching 1` stops one. The carousel's "Watch for more" button does the same.
-- `@yardsale` gets the same through `GET /other-sites` (`searchOtherSites`).
+- `@yardsale` gets the same through `GET /other-sites` (`searchOtherSites`): each listing
+  with `versus_market_pct`, `score`, `reason`, and `flags`, plus `typical_sold_usd` and
+  `comps_used`.
 
 OfferUp uses `igolaizola/offerup-scraper` (most used of the OfferUp actors: about 190 users, 5.0
 rating; about $1.40 per 1,000 results), searched around `YARDSALE_OFFERUP_ZIP` (94103 by
