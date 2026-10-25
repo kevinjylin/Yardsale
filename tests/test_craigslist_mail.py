@@ -239,8 +239,10 @@ async def test_an_offer_at_the_floor_is_agreed_and_deal_sets_up_the_meetup(
     assert "$300 works for me" in agreed
     assert shop.bike().status == ACTIVE  # agreed isn't sold
     sold = body(await shop.buyer_says("Deal! I'll take it."))
-    assert "is yours for $300" in sold and "pay the seller in person" in sold
-    assert "public place near you" in sold  # the seller gave no school
+    assert "is yours for $300" in sold and "Let's meet to hand it over" in sold
+    assert "public spot near you" in sold  # the seller gave no school
+    for word in ("pay", "cash", "venmo"):  # what Craigslist's scam filters look for
+        assert word not in sold.lower()
     # Live October 25, Craigslist's relay dropped the reply that carried a payment link.
     assert "http" not in sold
     deal = shop.market.store.deal_for(shop.bike().item_id)

@@ -916,17 +916,18 @@ class CraigslistAgent:
         self.negotiate = negotiate
 
     def _handoff(self, listing: Listing, price_cents: int) -> str:
-        """The reply that closes a deal: where to meet, and that they pay in person."""
+        """The reply that closes a deal: where to meet. No payment words ("pay", "cash",
+        "Venmo") and no links: on October 25 Craigslist's relay dropped the reply with a Stripe
+        link, and its scam filters look for both. The buyer pays the seller when they meet."""
         place = meeting_place(self.store, listing)
         where = (
             f"How about {place}? It's public and easy to find."
             if place
-            else "Suggest a public place near you, like a coffee shop or a library."
+            else "Where's a public spot near you that works, like a coffee shop or a library?"
         )
         return (
-            f"Deal! The {listing.title} is yours for {usd(price_cents)}. You'll pay the seller "
-            f"in person when you pick it up (cash or Venmo). {where} Reply with a day and time "
-            "that work for you."
+            f"Deal! The {listing.title} is yours for {usd(price_cents)}. Let's meet to hand it "
+            f"over. {where} What day and time work for you?"
         )
 
     def _meeting(self, listing: Listing) -> str:
@@ -935,7 +936,7 @@ class CraigslistAgent:
         at = f" at {place}" if place else ""
         return (
             f"Thanks! I've passed that on to the seller, who'll meet you{at} to hand over the "
-            f"{listing.title}. Bring cash or Venmo."
+            f"{listing.title}."
         )
 
     def _now_closed(self, listing: Listing) -> tuple[str, str]:
