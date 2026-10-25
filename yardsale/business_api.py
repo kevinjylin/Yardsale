@@ -41,8 +41,10 @@ from typing import Any
 from aiohttp import web
 from uagents import Context
 
+from yardsale import deals
 from yardsale.chat import LOWEST_SHARE_REACH, STATUS_TEXT, Backend, haggle_text
 from yardsale.common import PipelineError
+from yardsale.deals import ScoredDeal
 from yardsale.ebay_seller import EbayError
 from yardsale.elsewhere import Found, search_words, site_name
 from yardsale.hosting import profile_url
@@ -145,26 +147,47 @@ def _external_json(listing: ExternalListing) -> dict[str, Any]:
     return data
 
 
+def _deal_json(deal: ScoredDeal) -> dict[str, Any]:
+    """A scored deal: the listing plus why it's a good one (deals.py)."""
+    data = _external_json(deal.listing)
+    data["versus_market_pct"] = deal.versus_market_pct
+    data["score"] = deal.score
+    data["reason"] = deals.reason(deal, site_name(deal.listing.source))
+    data["flags"] = list(deal.flags)
+    return data
+
+
 def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
     failed = [site_name(name) for name in found.failed]
-    if found.listings:
+    if found.deals:
         next_step = (
-            "Show the buyer these deals with their links. They aren't Yardsale listings: "
-            "Yardsale's agents can't haggle for them or take payment, so the buyer opens the link "
-            "to buy from the seller. Craigslist sellers usually take offers by email."
+            "Show the buyer these deals with their links and each one's reason. They aren't "
+            "Yardsale listings: Yardsale's agents can't haggle for them or take payment, so the "
+            "buyer opens the link to buy from the seller. Craigslist sellers usually take offers "
+            "by email."
         )
     else:
         next_step = "Nothing fits on other sites either. Try other words or a higher max."
     unsearched = f" ({', '.join(failed)} couldn't be searched)" if failed else ""
+    market = found.market
+    if market is not None:
+        against = (
+            f"Each is priced against the typical sold price on eBay, {usd(market.typical_cents)} "
+            f"from {market.basis}."
+        )
+    else:
+        against = "No recent eBay sales matched, so prices are compared with each other."
     return {
         "status": "done",
-        "count": len(found.listings),
-        "listings": [_external_json(listing) for listing in found.listings],
+        "count": len(found.deals),
+        "listings": [_deal_json(deal) for deal in found.deals],
         "searched": [site_name(name) for name in found.searched],
         "failed": failed,
+        "typical_sold_usd": dollars(market.typical_cents) if market else None,
+        "comps_used": market.sales if market else 0,
         "summary": (
-            f"{len(found.listings)} deal(s) on {sites}{unsearched}. Best match first, then "
-            "cheapest total price."
+            f"{len(found.deals)} deal(s) on {sites}{unsearched}, best first: price against the "
+            f"market, then quality, then fit. {against}"
         ),
         "next_step": next_step,
     }
@@ -669,6 +692,27 @@ _EXTERNAL = {
         "condition": {"type": "string"},
         "accepts_offers": {"type": "boolean", "description": "The site lets the buyer offer"},
         "image_url": {"type": "string"},
+        "versus_market_pct": {
+            "type": "integer",
+            "nullable": True,
+            "description": (
+                "Percent under what the item typically sold for on eBay in the last 90 days, "
+                "shipping included; negative means above it; null when no sales matched"
+            ),
+        },
+        "score": {"type": "number", "description": "Higher is better; the list is sorted by it"},
+        "reason": {
+            "type": "string",
+            "description": (
+                'One line to show the buyer: "$120 on Craigslist, 35% under the $185 typical '
+                'sold price, like new, 6 photos"'
+            ),
+        },
+        "flags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "parts, accessory, missing_words, or far_under: reasons for caution",
+        },
     },
 }
 _HAGGLE = {
@@ -911,11 +955,14 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     "summary": "Find the best deals on other sites when Yardsale has none",
                     "description": (
                         "Use it when searchListings or startHaggle finds nothing on Yardsale. "
-                        "Searches eBay, Craigslist, OfferUp, and other sites once and returns the "
-                        "best few listings at or under max_usd (price plus shipping), best match "
-                        "first. These are NOT Yardsale listings: no haggling or payment through "
-                        "Yardsale, so give the buyer the links. Answers within about 25 seconds; "
-                        "if status is running, call it again with the same q and max_usd."
+                        "Yardsale's Deal Finder agent searches eBay, Craigslist, OfferUp, and "
+                        "other sites once, prices each listing against what the item typically "
+                        "sold for on eBay in the last 90 days, and returns the best few at or "
+                        "under max_usd (price plus shipping), best first, each with a one-line "
+                        "reason. These are NOT Yardsale listings: no haggling or payment through "
+                        "Yardsale, so give the buyer the links and reasons. Answers within about "
+                        "25 seconds; if status is running, call it again with the same q and "
+                        "max_usd."
                     ),
                     "parameters": [
                         {
@@ -942,6 +989,18 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                                     "listings": {"type": "array", "items": _EXTERNAL},
                                     "searched": {"type": "array", "items": {"type": "string"}},
                                     "failed": {"type": "array", "items": {"type": "string"}},
+                                    "typical_sold_usd": {
+                                        "type": "number",
+                                        "nullable": True,
+                                        "description": (
+                                            "What the item typically sold for on eBay in the "
+                                            "last 90 days; the deals are priced against it"
+                                        ),
+                                    },
+                                    "comps_used": {
+                                        "type": "integer",
+                                        "description": "How many sales that price is from",
+                                    },
                                     "summary": {"type": "string"},
                                     "next_step": {"type": "string"},
                                 },

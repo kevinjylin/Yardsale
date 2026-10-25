@@ -99,10 +99,11 @@ from uagents_core.contrib.protocols.chat.cards import (
     ListItem as CardListItem,
 )
 
-from yardsale import commands, craigslist_buyer, craigslist_mail, watches
+from yardsale import commands, craigslist_buyer, craigslist_mail, deals, watches
 from yardsale.asione import ReadMessage
 from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
+from yardsale.deals import ScoredDeal
 from yardsale.ebay_seller import EbayError, EbaySeller
 from yardsale.elsewhere import DealFinder, Found, search_words, site_name
 from yardsale.models import (
@@ -931,27 +932,42 @@ def _under(budget_cents: int | None) -> str:
     return f" under {usd(budget_cents)}" if budget_cents else ""
 
 
-def deal_line(n: int, listing: ExternalListing) -> str:
-    """One listing on another site: its link, price, site, and what the site says about it."""
+def listing_line(n: int, listing: ExternalListing, why: str = "") -> str:
+    """One listing on another site: its link, price, site, `why` it's a good deal when scored
+    (deals.py; a watch's finds aren't), and where it is."""
     price = usd(listing.price_cents) if listing.price_cents is not None else "no price given"
     if listing.shipping_cents:
         price += f" + {usd(listing.shipping_cents)} shipping"
-    notes = [note for note in (listing.condition, listing.location) if note]
+    notes = [listing.location] if listing.location else []
+    if not why and listing.condition:
+        notes.insert(0, listing.condition)
     if listing.accepts_offers:
         notes.append("takes offers")
-    extra = f" ({', '.join(notes)})" if notes else ""
-    return (
-        f"{n}. {_link(listing.title, listing.url)}: {price} on {site_name(listing.source)}{extra}"
-    )
+    extra = f" ({'; '.join(notes)})" if notes else ""
+    link = _link(listing.title, listing.url)
+    about = f", {why}" if why else ""
+    return f"{n}. {link}: {price} on {site_name(listing.source)}{about}{extra}"
+
+
+def deal_line(n: int, deal: ScoredDeal) -> str:
+    return listing_line(n, deal.listing, deal.why)
+
+
+def market_note(found: Found) -> str:
+    """What the deals were judged against: "typical sold price on eBay: $185, from 7 sales"."""
+    if found.market is None:
+        return "no recent eBay sales to compare prices with"
+    sales = f"{found.market.sales} sale{'s' if found.market.sales != 1 else ''}"
+    return f"typical sold price on eBay: {usd(found.market.typical_cents)}, from {sales}"
 
 
 def elsewhere_text(found: Found, sites: str) -> str:
     about = f'"{found.query}"{_under(found.budget_cents)}'
-    if not found.listings:
+    if not found.deals:
         lines = [f"I didn't find {about} on {sites} either."]
     else:
-        lines = [f"Best deals on other sites for {about}:"]
-        lines += [deal_line(n, listing) for n, listing in enumerate(found.listings, 1)]
+        lines = [f"Best deals on other sites for {about} ({market_note(found)}):"]
+        lines += [deal_line(n, deal) for n, deal in enumerate(found.deals, 1)]
         lines.append(NOT_YARDSALE)
         if any(listing.source == "craigslist" for listing in found.listings):
             lines.append(CRAIGSLIST_OFFERS)
@@ -964,14 +980,19 @@ def elsewhere_text(found: Found, sites: str) -> str:
 
 def elsewhere_card(found: Found) -> MetadataContent | None:
     """The deals as a carousel, with their photos. The links are in the text."""
-    if not found.listings:
+    if not found.deals:
         return None
     items = []
-    for listing in found.listings:
-        total = listing.total_cents
-        price = usd(total) if total is not None else "no price given"
+    for deal in found.deals:
+        listing = deal.listing
+        price = usd(deal.total_cents)
         if listing.shipping_cents:
             price += " with shipping"
+        pct = deal.versus_market_pct
+        if pct is not None and pct >= deals.ABOUT_MARKET:
+            price += f", {pct}% under typical"
+        elif pct is not None and pct <= -deals.ABOUT_MARKET:
+            price += f", {-pct}% above typical"
         items.append(
             CarouselItem(
                 id=f"{listing.source}-{listing.external_id}"[:80],
@@ -1981,7 +2002,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             fresh = sorted(hits, key=lambda x: (x.total_cents is None, x.total_cents or 0))[:10]
             if fresh:
                 news.append(f'New for "{standing.query}":')
-                news += [deal_line(i, listing) for i, listing in enumerate(fresh, 1)]
+                news += [listing_line(i, listing) for i, listing in enumerate(fresh, 1)]
             store.mark_told(standing.watch_id)
         if news:
             lines += ["", *news, NOT_YARDSALE]
