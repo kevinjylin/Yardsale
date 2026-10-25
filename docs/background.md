@@ -6,13 +6,17 @@ including seller approval, haggling, payment, hosting, and saved state.
 The Cal Hacks 13.0 plan (the pitch, what Fetch Business offers, what's missing, and the build
 order) is in [calhacks-plan.md](calhacks-plan.md).
 
-**Two products (decided October 24).** Sellers photograph their things and set minimums; each
-item gets an agent that lists it (on ASI:One, on `@yardsale`, and in a Craigslist post the
-seller pastes by hand) and haggles with every buyer automatically, never below the minimum.
-Buyers either find, haggle for, and buy Yardsale listings in ASI:One or through `@yardsale`, or,
-when nothing on Yardsale fits, use the deal finder: it searches eBay, Craigslist, and OfferUp
-under the buyer's max and can email a Craigslist seller to negotiate for them. Selling on the
-seller's own eBay is built but secondary. What's built and what's in progress is in
+**Two products (decided October 24).** Sellers photograph their things and set minimums; the
+agents price each item from eBay sold sales and live local asking prices (the Market Scout, in
+progress), tell the seller when a minimum is far off, and give it an agent that lists it (on
+ASI:One, on `@yardsale`, and in a Craigslist post the seller pastes by hand) and haggles with
+every buyer, never below the minimum. Buyers say what they want and their max, and the deal
+finder searches eBay, Craigslist, OfferUp, and Facebook Marketplace through Apify, scores each
+listing against what it actually sells for (in progress), and can email a Craigslist seller to
+negotiate for them. Agent-to-agent buying on ASI:One (the Shopper haggling with item agents and
+buying) is built and ran live, but after a Fetch judge's feedback it's no longer pitched; selling
+on the seller's own eBay is built but secondary. The sections below describe the code as it is,
+including the parts not pitched. What's built and what's in progress is in
 [calhacks-plan.md](calhacks-plan.md#the-pitch).
 
 ## The idea
