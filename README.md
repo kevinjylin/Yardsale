@@ -27,14 +27,16 @@ Yardsale keeps a commission on the sales it collects payment for; the seller get
 - **Built and run live** (October 23–24): photos from the real ASI:One app priced with real
   Claude and Apify keys; seller approval; item agents, some hosted on Agentverse; `@yardsale`
   on Fetch Business calling Yardsale's API; and a Stripe test payment end to end.
-- **Built, tested only with fakes:** several photos in one message; the item agent answering
-  Craigslist buyers by email ([Craigslist by email](#craigslist-by-email)); the deal finder in
-  the chat and `@yardsale` (eBay and Craigslist tried on real Actor results, OfferUp and
-  Facebook not yet run live); and emailing Craigslist sellers for a buyer
-  ([Negotiating with Craigslist sellers](#negotiating-with-craigslist-sellers)).
-- **In progress:** the Market Scout (live local asking prices in a seller's price), telling a
-  seller when their minimum is far off, deal scores against eBay sold prices, and a price check
-  tool for `@yardsale`.
+- **Built, tested offline** (the tests use fake Apify, Claude, and ASI:One answers): several
+  photos in one message; the Market Scout (live asking prices beside the sold comps) and the
+  warning when a seller's minimum is far off; counters that cite the market; the item agent
+  answering Craigslist buyers by email ([Craigslist by email](#craigslist-by-email)); the Deal
+  Finder with its scores in the chat and `@yardsale`; `priceCheck` for `@yardsale`; and emailing
+  Craigslist sellers for a buyer
+  ([Negotiating with Craigslist sellers](#negotiating-with-craigslist-sellers)). The Scout and
+  Deal Finder agents connected to Agentverse as mailbox agents on October 24 (seven in all). The
+  Deal Finder's one live probe parsed all four sources; OfferUp ignored the result cap and bike
+  parts ranked too high, and fixes are in progress.
 - **Also built, not on the main path:** agent-to-agent buying, where Yardsale's buyer agent
   haggles with item agents in ASI:One and buys (run live October 24;
   [How buying works](#how-buying-works)), and listing on the seller's own eBay, waiting on eBay
@@ -58,9 +60,9 @@ Yardsale was started during [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/
 | [yardsale-identifier](https://agentverse.ai/agents/details/agent1q2efftklrnnu6z95xu43lxj4gk8jn94hjhap3n90mvfrf8t8n29mz97x60k/profile) | `@ys-identifier` | `agent1q2efftklrnnu6z95xu43lxj4gk8jn94hjhap3n90mvfrf8t8n29mz97x60k` | Claude works out what's in a photo and writes an eBay search for it. |
 | [yardsale-researcher](https://agentverse.ai/agents/details/agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2/profile) | `@ys-researcher` | `agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2` | Finds what that product sold for on eBay in the last 90 days, through Apify. |
 | [yardsale-appraiser](https://agentverse.ai/agents/details/agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k/profile) | `@ys-appraiser` | `agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k` | Claude picks which sales are the same product; code sets the asking price and the floor. |
-| [yardsale-shopper](https://agentverse.ai/agents/details/agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs/profile) | `@ys-shopper` | `agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs` | The buyer agent: haggles with several item agents at once for a shopper, never above their max. New; it connects to Agentverse the next time the server starts live. |
-| yardsale-scout | `@ys-scout` | logged on the next live start | The Market Scout: finds what similar items are listed for right now on Craigslist, OfferUp, Facebook Marketplace, and eBay (Apify), so the price is checked against live competition, not only past sales. New; it connects to Agentverse the next time the server starts live. |
-| yardsale-dealfinder | `@ys-dealfinder` | (set on the first live start) | The Deal Finder: searches eBay, Craigslist, OfferUp, and Facebook Marketplace for a buyer's search, prices each listing against what it sold for on eBay, and explains the best deals. New; its address and profile appear the next time the server starts live. |
+| [yardsale-shopper](https://agentverse.ai/agents/details/agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs/profile) | `@ys-shopper` | `agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs` | The buyer agent: haggles with several item agents at once for a shopper, never above their max. |
+| [yardsale-scout](https://agentverse.ai/agents/details/agent1qt80yx8uhmx63zmjg22gaa958llaq24qpfp67xq0x0karj4n55fdq5aswtq/profile) | `@ys-scout` | `agent1qt80yx8uhmx63zmjg22gaa958llaq24qpfp67xq0x0karj4n55fdq5aswtq` | The Market Scout: finds what similar items are listed for right now on Craigslist, OfferUp, Facebook Marketplace, and eBay (Apify), so the price is checked against live competition, not only past sales. |
+| [yardsale-dealfinder](https://agentverse.ai/agents/details/agent1q0n2cws3nm9lrg4332jfl90asxvmrr0zmnzn69yhptaw2y6jds92wtqyjkd/profile) | `@ys-dealfinder` | `agent1q0n2cws3nm9lrg4332jfl90asxvmrr0zmnzn69yhptaw2y6jds92wtqyjkd` | The Deal Finder: searches eBay, Craigslist, OfferUp, and Facebook Marketplace for a buyer's search, prices each listing against what it sold for on eBay, and explains the best deals. |
 
 Every approved listing also gets its own **item agent**, which holds the seller's private floor
 and haggles with buyers. By default item agents run in the Bureau and register on Fetch's Almanac
