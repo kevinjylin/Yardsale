@@ -179,10 +179,11 @@ any of them. With several proposals waiting, a plain `approve` asks which one. E
 separate paid pricing run (about $0.08 of Apify plus two Claude calls), so 8 photos cost 8 times
 as much.
 
-Proposals, search results, and counter-offers also carry Interactive Cards from the installed
-`uagents_core` chat cards module: Approve or Cancel, Details, Accept. A tap does exactly what the
-typed command does, with the same checks. Whether ASI:One shows the cards is unverified, so the
-text always works on its own.
+Every reply is an Interactive Card with a picture and buttons, starting from a home menu (Sell
+something, Find a deal, My listings, My orders, Watches), and every card has a Main menu button.
+A tap does exactly what the typed command does, with the same checks, and the text line always
+works on its own. Card pictures are in [assets/cards](assets/cards); see
+[background.md](docs/background.md#every-reply-is-a-card).
 
 Pricing can take over a minute, and ASI:One's planner gives up after about 60 seconds. So the
 Market acknowledges every message at once and replies within 40 seconds: with the result, or with

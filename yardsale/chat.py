@@ -22,10 +22,11 @@ Paying: once a deal closes, the Market's checkout (checkout.py) makes a payment 
 Link or Stripe, test mode) and the chat shows it. "paid" checks with the provider.
 
 commands.py reads commands without a model. Anything else goes to ASI:One (asione.py).
-Proposals, search results, haggles, counter-offers, and payments also carry Interactive Cards
-from uagents_core's chat cards module: Approve, the eBay sales behind a price, a form for the
-seller's prices, Details, Buy, and "I've paid". Tapping one does exactly what typing the command
-does, with the same checks; the text works on its own wherever cards don't show.
+Every reply is a short line of text and an Interactive Card (cards.py): the menu, the sell and
+buy screens, proposals, listings, results, offers, haggles, payments, orders, watches, and deals
+on other sites, each with a picture and buttons, and a Main menu button on all but the menu.
+Tapping a button does exactly what typing the command does, with the same checks; the text
+names the commands, so it works on its own wherever cards don't show.
 
 ASI:One sends an upload as a ResourceContent whose file sits in Agentverse storage, readable only
 by the agent it was sent to, or as a web link in the resource or in the text when its planner
@@ -73,35 +74,14 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 from uagents_core.contrib.protocols.chat.cards import (
-    BadgeNode,
-    ButtonAction,
-    ButtonNode,
-    CarouselBadge,
-    CarouselCardPayload,
-    CarouselItem,
-    CtaAction,
-    CustomCardPayload,
-    DividerNode,
-    FormCardPayload,
-    FormField,
-    GroupNode,
-    HeadingNode,
-    ListNode,
-    ReviewCardPayload,
-    ReviewSummaryRow,
-    SectionNode,
     SelectionValue,
-    TextNode,
-    create_card_content,
     extract_card_response,
-)
-from uagents_core.contrib.protocols.chat.cards import (
-    ListItem as CardListItem,
 )
 
 from yardsale import (
     advice,
     campus,
+    cards,
     commands,
     craigslist_buyer,
     craigslist_mail,
@@ -109,6 +89,7 @@ from yardsale import (
     maps,
     meetup,
     onboarding,
+    schools,
     students,
     watches,
 )
@@ -123,7 +104,6 @@ from yardsale.models import (
     Appraisal,
     Counter,
     Deal,
-    HaggleOutcome,
     HaggleResult,
     ItemDetails,
     ListPhoto,
@@ -226,14 +206,9 @@ _MENTIONS_PHOTO = re.compile(
 )
 
 HELP = (
-    "Hi, I'm Yardsale.\n"
-    "To sell: attach a photo of the item. I'll work out what it is, price it from recent eBay "
-    'sales, and suggest a listing for you to approve. You can add your own price, like "at '
-    f'least $40". Moving out? Attach up to {MAX_PHOTOS} photos at once, one item each. Say '
-    '"connect ebay" to also list on your own eBay account.\n'
-    "To buy: tell me what you're looking for and your max, like \"find me a road bike, haggle "
-    "for me, max $250\". My buyer agent haggles with every matching seller's agent at once and "
-    "shows you the best price. You can also make your own offers."
+    "Hi, I'm Yardsale. To sell, attach a photo (up to "
+    f'{MAX_PHOTOS} at once) and say your minimum, like "at least $40". To buy, tell me what you '
+    'want and your max, like "find me a road bike, max $250". Or pick from the menu.'
 )
 NEEDS_PHOTO = "Attach a photo of the item and I'll price it from recent eBay sales."
 PHOTO_MISSING = (
@@ -251,8 +226,11 @@ ALREADY_WORKING = (
 )
 SOMETHING_BROKE = "Sorry, something went wrong on my side. Please send that again."
 APPROVE_PROMPT = (
-    'Reply "approve" to put it up for sale (I\'ll offer to write a Craigslist post next), "ask $X" '
-    'or "lowest $X" to change a price ("rules" for a form), or "cancel".'
+    'Tap Approve, or reply "approve" to put it up for sale, "ask $X" or "lowest $X" to change a '
+    'price, or "cancel".'
+)
+_MENU = re.compile(
+    r"^(?:(?:open\s+|show\s+(?:me\s+)?)?(?:the\s+)?(?:main\s+)?menu|home|start over)\b"
 )
 _NOT_NOW = re.compile(
     r"(?:not\s+(?:now|yet|today)|later|maybe\s+later|skip(?:\s+it)?|no\s+thanks)\b"
@@ -333,6 +311,7 @@ class Conversation:
     needs_price: dict[str, Any] = field(default_factory=dict)  # number -> item without a price
     ebay_zip: str | None = None  # the seller's ZIP code, for their eBay listings
     last_query: str = ""  # the buyer's last search words, for "search other sites" and "watch"
+    deals: list[dict[str, Any]] = field(default_factory=list)  # the last deals on other sites
 
     @property
     def owner(self) -> str:
@@ -486,46 +465,67 @@ def _link(title: str, url: str) -> str:
     return f"[{title}]({url})" if url else title
 
 
-def proposal_text(listing: Listing, n: int | None = None) -> str:
-    """The proposal, with what the market says and a plain word when the seller's own price is
-    far off it. `n` is the proposal's number when the seller has several."""
+def proposal_lines(listing: Listing) -> tuple[str, str, str]:
+    """The proposal's asking line, lowest line, and what the price is based on."""
     appraisal = listing.appraisal
-    condition = f" ({listing.item.condition} condition)" if listing.item else ""
     asking_note = SOURCES[listing.asking_from]
     if listing.asking_from == "seller" and appraisal and appraisal.asking_cents is not None:
         asking_note += f"; recent eBay sales suggest {usd(appraisal.asking_cents)}"
-    lines = [
-        f"Here's my suggested listing for your {listing.title}{condition}:",
-        f"- Asking price: {usd(listing.asking_cents)} ({asking_note})",
-        f"- Lowest price you'll take: {usd(listing.floor_cents)} "
-        f"({SOURCES[listing.floor_from]}; buyers never see it)",
-    ]
+    asking = f"Asking price: {usd(listing.asking_cents)} ({asking_note})"
+    lowest = (
+        f"Lowest price you'll take: {usd(listing.floor_cents)} "
+        f"({SOURCES[listing.floor_from]}; buyers never see it)"
+    )
     if appraisal is None or appraisal.asking_cents is None:
-        lines.append("I couldn't find close eBay sales, so this uses your price.")
-    else:
-        spread = ""
-        if appraisal.low_cents is not None and appraisal.high_cents is not None:
-            spread = f", most between {usd(appraisal.low_cents)} and {usd(appraisal.high_cents)}"
-        lines.append(f"Based on {appraisal.basis}{spread}. Closest sales:")
+        return asking, lowest, "I couldn't find close eBay sales, so this uses your price."
+    spread = ""
+    if appraisal.low_cents is not None and appraisal.high_cents is not None:
+        spread = f", most between {usd(appraisal.low_cents)} and {usd(appraisal.high_cents)}"
+    return asking, lowest, f"Based on {appraisal.basis}{spread}."
+
+
+def proposal_text(listing: Listing, n: int | None = None) -> str:
+    """The text above a proposal's card: what it is, the prices, and links to the closest
+    sales (card text can't be tapped). `n` is the proposal's number when there are several."""
+    condition = f" ({listing.item.condition} condition)" if listing.item else ""
+    lines = [
+        f"Here's my suggested listing for your {listing.title}{condition}: asking "
+        f"{usd(listing.asking_cents)}, lowest {usd(listing.floor_cents)} (only you see it)."
+    ]
+    appraisal = listing.appraisal
+    if appraisal is not None and appraisal.asking_cents is not None and appraisal.matches:
+        lines.append("Closest eBay sales:")
         lines += [
             f"- {_link(match.comp.title, match.comp.url)}: {usd(match.comp.price_cents)}"
             for match in appraisal.matches[:3]
         ]
-    lines += advice.market_lines(listing)
-    feedback = advice.price_feedback(listing, n)
-    if feedback:
-        lines.append(feedback)
-    lines.append(APPROVE_PROMPT)
+    lines += [line for line in advice.market_lines(listing) if line.startswith("- [")]
+    if n is None:
+        lines.append(APPROVE_PROMPT)
+    else:
+        lines.append(
+            f'Tap Approve, or reply "approve {n}", "ask {n} $X", "lowest {n} $X", or "cancel {n}".'
+        )
     return "\n".join(lines)
+
+
+def proposal_card(listing: Listing, n: int | None = None) -> MetadataContent:
+    asking, lowest, basis = proposal_lines(listing)
+    market = [line for line in advice.market_lines(listing) if not line.startswith("- ")]
+    return cards.proposal(
+        listing,
+        n,
+        asking=asking,
+        lowest=lowest,
+        basis=basis,
+        market=market,
+        feedback=advice.price_feedback(listing, n),
+    )
 
 
 def numbered_proposal_text(listing: Listing, n: int) -> str:
     """A proposal named by its number, for a seller with several photos."""
-    prompt = (
-        f'Reply "approve {n}" to put it up for sale, "ask {n} $X" or "lowest {n} $X" to change a '
-        f'price, or "cancel {n}".'
-    )
-    return f"#{n}: " + proposal_text(listing, n).removesuffix(APPROVE_PROMPT) + prompt
+    return f"#{n}: " + proposal_text(listing, n)
 
 
 def unpriced_hint(market: MarketView | None) -> str:
@@ -573,93 +573,10 @@ def batch_notes(count: int, text: str) -> str:
 
 
 def proposal_reply(listing: Listing) -> Reply:
-    """The proposal with its Approve card, then the eBay sales behind the price."""
-    comps = comps_card(listing)
+    """The proposal with its card, then the eBay sales behind the price."""
+    comps = cards.comps(listing)
     more = ((comps_text(listing), comps),) if comps is not None else ()
     return Reply(proposal_text(listing), proposal_card(listing), more)
-
-
-def proposal_card(listing: Listing) -> MetadataContent:
-    rows = [
-        ReviewSummaryRow(label="Asking price", value=usd(listing.asking_cents)),
-        ReviewSummaryRow(
-            label="Lowest price (buyers never see it)", value=usd(listing.floor_cents)
-        ),
-    ]
-    appraisal = listing.appraisal
-    if appraisal is not None and appraisal.asking_cents is not None:
-        used = f"{len(appraisal.matches)} ({appraisal.confidence} confidence)"
-        rows.append(ReviewSummaryRow(label="eBay sales used", value=used))
-    choice: dict[str, Any] = {"item_id": listing.item_id}
-    return create_card_content(
-        ReviewCardPayload(
-            title=f"List your {listing.title}?",
-            summary_rows=rows,
-            approve_cta=CtaAction(
-                label="Approve", selection={"action": "approve", **choice}, primary=True
-            ),
-            reject_cta=CtaAction(label="Cancel", selection={"action": "cancel", **choice}),
-        ),
-        card_id=uuid4(),
-    )
-
-
-def results_card(found: list[Listing]) -> MetadataContent:
-    return create_card_content(
-        CarouselCardPayload(
-            title="For sale",
-            items=[
-                CarouselItem(
-                    id=listing.item_id,
-                    title=listing.title,
-                    subtitle=usd(listing.asking_cents),
-                    secondary_text=listing.item.condition if listing.item else None,
-                    primary_cta=CtaAction(
-                        label="Details", selection={"action": "pick", "item_id": listing.item_id}
-                    ),
-                )
-                for listing in found
-            ],
-        ),
-        card_id=uuid4(),
-    )
-
-
-def comps_card(listing: Listing) -> MetadataContent | None:
-    """The eBay sales behind a proposal's price, with their photos."""
-    appraisal = listing.appraisal
-    if appraisal is None or not appraisal.matches:
-        return None
-    items = []
-    for n, match in enumerate(appraisal.matches[:6]):
-        comp = match.comp
-        badge = (
-            CarouselBadge(label="Same product", variant="success")
-            if match.same_product
-            else CarouselBadge(label="Similar", variant="info")
-        )
-        items.append(
-            CarouselItem(
-                id=f"{listing.item_id}-{n}",
-                image=comp.image_url,
-                title=comp.title[:80],
-                subtitle=f"{usd(comp.price_cents)}, sold {comp.sold_at}",
-                badges=[badge],
-                secondary_text=match.reason[:120] or None,
-                primary_cta=CtaAction(
-                    label="Why this sale?",
-                    selection={"action": "comp", "item_id": listing.item_id, "n": n},
-                ),
-            )
-        )
-    return create_card_content(
-        CarouselCardPayload(
-            title="The eBay sales behind this price",
-            subtitle=appraisal.basis[:120] or None,
-            items=items,
-        ),
-        card_id=uuid4(),
-    )
 
 
 def comps_text(listing: Listing) -> str:
@@ -667,56 +584,29 @@ def comps_text(listing: Listing) -> str:
     return f"Here are the {min(count, 6)} closest eBay sales behind that price."
 
 
-def rules_card(listing: Listing) -> MetadataContent:
-    """A form for the seller's own prices: asking and lowest."""
-    return create_card_content(
-        FormCardPayload(
-            title=f"Your prices for the {listing.title}",
-            fields=[
-                FormField(
-                    name="asking",
-                    kind="number",
-                    label="Asking price ($)",
-                    placeholder=f"{listing.asking_cents / 100:.2f}",
-                ),
-                FormField(
-                    name="lowest",
-                    kind="number",
-                    label="Lowest price you'll take ($). Buyers never see it.",
-                    placeholder=f"{listing.floor_cents / 100:.2f}",
-                ),
-            ],
-            submit_cta=CtaAction(
-                label="Save prices",
-                selection={"action": "rules", "item_id": listing.item_id},
-                primary=True,
-            ),
-        ),
-        card_id=uuid4(),
+def unpriced_reply(title: str, n: int | None, market: MarketView | None) -> Reply:
+    """A photo identified, but no sales were close enough: ask for the seller's price."""
+    if n is None:
+        text = (
+            f"This looks like {title}, but no recent eBay sales were close enough to suggest a "
+            'price. Tell me your price, like "ask $40" or "at least $30", and I\'ll set up the '
+            'listing for you to approve. Or say "cancel".' + unpriced_hint(market)
+        )
+    else:
+        text = (
+            f"#{n}: This looks like {title}, but no recent eBay sales were close enough to "
+            f'suggest a price. Tell me yours, like "ask {n} $40", or say "cancel {n}".'
+        )
+    hint = (
+        " ".join(
+            line
+            for line in advice.market_lines(_unpriced_listing(market))
+            if not line.startswith("-")
+        )
+        if market is not None and market.asking_median_cents is not None
+        else ""
     )
-
-
-def counter_card(listing: Listing, counter_cents: int, agreed: bool = False) -> MetadataContent:
-    price_label = "Agreed price" if agreed else "Counter-offer"
-    return create_card_content(
-        ReviewCardPayload(
-            title=f"Buy the {listing.title} for {usd(counter_cents)}?",
-            summary_rows=[
-                ReviewSummaryRow(label="Asking price", value=usd(listing.asking_cents)),
-                ReviewSummaryRow(label=price_label, value=usd(counter_cents)),
-                ReviewSummaryRow(label="Good for", value="24 hours"),
-            ],
-            approve_cta=CtaAction(
-                label=f"Accept {usd(counter_cents)}",
-                selection={"action": "accept", "item_id": listing.item_id, "cents": counter_cents},
-                primary=True,
-            ),
-            reject_cta=CtaAction(
-                label="No thanks", selection={"action": "decline", "item_id": listing.item_id}
-            ),
-        ),
-        card_id=uuid4(),
-    )
+    return Reply(text, cards.price_needed(n, title, hint))
 
 
 def profile_link(listing: Listing) -> str:
@@ -732,44 +622,27 @@ def agent_line(listing: Listing) -> str:
     return f"Its agent is live at {listing.address}"
 
 
+def listed_notes(listing: Listing, registered: bool, offline: bool) -> list[str]:
+    if listing.host == AGENTVERSE:
+        return []
+    if offline:
+        return [
+            "(Offline mode: this address was made on this server and isn't on the public Almanac.)"
+        ]
+    if not registered:
+        return ["(The Almanac hasn't confirmed it yet. The server retries every hour.)"]
+    return []
+
+
 def listed_text(listing: Listing, registered: bool, offline: bool) -> str:
     lines = [
-        f"Your {listing.title} is for sale at {usd(listing.asking_cents)}.",
-        "Its own agent now answers buyers for you: it haggles with reasons from the market and "
-        f"never goes below your {usd(listing.floor_cents)} minimum, which buyers never see.",
-        "Next: want it on Craigslist too? I'll write the post for you to paste, and buyers' "
-        'emails come straight to your agent. Reply "yes", or "not now". Say "my listings" any '
-        "time to check on it.",
+        f"Your {listing.title} is for sale at {usd(listing.asking_cents)}. Its own agent answers "
+        f"buyers and never goes below your {usd(listing.floor_cents)} minimum.",
         agent_line(listing),
+        'Want it on Craigslist too? Tap "Write my Craigslist post", or reply "yes" or "not now".',
+        *listed_notes(listing, registered, offline),
     ]
-    if listing.host == AGENTVERSE:
-        return "\n".join(lines)
-    if offline:
-        lines.append(
-            "(Offline mode: this address was made on this server and isn't on the public Almanac.)"
-        )
-    elif not registered:
-        lines.append("(The Almanac hasn't confirmed it yet. The server retries every hour.)")
     return "\n".join(lines)
-
-
-def craigslist_card(listing: Listing) -> MetadataContent:
-    """The offer, right after listing, to write the item's Craigslist post."""
-    choice: dict[str, Any] = {"item_id": listing.item_id}
-    return create_card_content(
-        ReviewCardPayload(
-            title=f"Post your {listing.title} on Craigslist?",
-            summary_rows=[
-                ReviewSummaryRow(label="Price", value=usd(listing.asking_cents)),
-                ReviewSummaryRow(label="Buyers' emails", value="answered by your agent"),
-            ],
-            approve_cta=CtaAction(
-                label="Write my post", selection={"action": "craigslist", **choice}, primary=True
-            ),
-            reject_cta=CtaAction(label="Not now", selection={"action": "no_craigslist", **choice}),
-        ),
-        card_id=uuid4(),
-    )
 
 
 def results_text(found: list[Listing], query: str, owner: str) -> str:
@@ -780,24 +653,18 @@ def results_text(found: list[Listing], query: str, owner: str) -> str:
         yours = " (yours)" if listing.owner == owner else ""
         lines.append(f"{n}. {listing.title}: {usd(listing.asking_cents)}{condition}{yours}")
     lines.append(
-        'Say "haggle" with your max (like "haggle $250") and my buyer agent will negotiate with '
-        'all of them at once. Or reply with a number for details, or offer yourself: "offer $X on '
-        '1".'
+        'Tap one for details, or say "haggle" with your max (like "haggle $250") and my buyer '
+        'agent negotiates with all of them at once. Or offer yourself: "offer $X on 1".'
     )
     return "\n".join(lines)
 
 
 def details_text(listing: Listing, mine: bool) -> str:
     lines = [f"{listing.title}: {usd(listing.asking_cents)}"]
-    if listing.item is not None:
-        lines.append(f"Condition: {listing.item.condition}")
-        if listing.item.details:
-            lines.append("Details: " + "; ".join(listing.item.details))
-    lines.append(
-        f"Its agent: [{listing.address}]({profile_link(listing)})"
-        if listing.host == AGENTVERSE
-        else f"Its agent: {listing.address}"
-    )
+    if listing.host == AGENTVERSE:
+        lines.append(f"Its agent: [{listing.address}]({profile_link(listing)})")
+    else:
+        lines.append(f"Its agent: {listing.address}")
     lines.append(
         "This is your own listing."
         if mine
@@ -807,38 +674,22 @@ def details_text(listing: Listing, mine: bool) -> str:
     return "\n".join(lines)
 
 
-def _round_text(offer_cents: int, reply_cents: int, agreed: bool) -> str:
-    return f"you {usd(offer_cents)} → " + ("agreed" if agreed else usd(reply_cents))
-
-
-STATUS_TEXT = {
-    "agreed": "agreed",
-    "counter": "their price is within your max",
-    "over_max": "wouldn't come down to your max",
-    "unavailable": "no longer for sale",
-    "no_answer": "its agent didn't answer",
-}
+STATUS_TEXT = cards.STATUS_TEXT
 
 
 def haggle_text(result: HaggleResult) -> str:
+    """The text above the haggle card: one line per seller, and what to say to buy."""
     lines = [
         f"My buyer agent haggled with {len(result.outcomes)} seller agent(s) at once. Your max "
         f"of {usd(result.max_cents)} stayed private, and so did their lowest prices."
     ]
     for n, outcome in enumerate(result.outcomes, 1):
-        rounds = ", ".join(
-            _round_text(r.offer_cents, r.reply_cents, r.agreed) for r in outcome.rounds
-        )
         if outcome.price_cents is not None:
-            end = f"Yours for {usd(outcome.price_cents)}."
+            end = f"Yours for {usd(outcome.price_cents)}"
         else:
-            end = STATUS_TEXT.get(outcome.status, outcome.status).capitalize()
-            end += f" ({outcome.note})." if outcome.note else "."
-        lines.append(
-            f"{n}. {outcome.title} (asking {usd(outcome.asking_cents)}): "
-            + (f"{rounds}. " if rounds else "")
-            + end
-        )
+            end = STATUS_TEXT.get(outcome.status, outcome.status)
+            end += f" ({outcome.note})" if outcome.note else ""
+        lines.append(f"{n}. {outcome.title} (asking {usd(outcome.asking_cents)}): {end}.")
     best = next((o for o in result.outcomes if o.item_id == result.best_item_id), None)
     if best is not None and best.price_cents is not None:
         number = result.outcomes.index(best) + 1
@@ -851,104 +702,11 @@ def haggle_text(result: HaggleResult) -> str:
         lines.append(
             f"Best deal: #{number}, the {best.title}, for {usd(best.price_cents)}"
             + (f" ({usd(saved)} under asking)" if saved > 0 else "")
-            + f'. Reply "accept" to buy it{others}. Prices hold for 24 hours.'
+            + f'. Tap Buy, or reply "accept" to buy it{others}. Prices hold for 24 hours.'
         )
     else:
         lines.append("None of them came down to your max. Try a higher max, or another search.")
     return "\n".join(lines)
-
-
-def _outcome_node(n: int, outcome: HaggleOutcome, best: bool) -> GroupNode:
-    children: list[Any] = [
-        HeadingNode(type="heading", value=f"{n}. {outcome.title}"[:90], level=3),
-        TextNode(type="text", value=f"Asking {usd(outcome.asking_cents)}", style="muted"),
-    ]
-    if outcome.rounds:
-        children.append(
-            ListNode(
-                type="list",
-                items=[
-                    CardListItem(
-                        children=[
-                            TextNode(
-                                type="text",
-                                value=f"Round {i}: "
-                                + _round_text(r.offer_cents, r.reply_cents, r.agreed),
-                            )
-                        ]
-                    )
-                    for i, r in enumerate(outcome.rounds, 1)
-                ],
-            )
-        )
-    if outcome.price_cents is not None:
-        label = "Agreed" if outcome.status == "agreed" else "Within your max"
-        children.append(
-            BadgeNode(type="badge", label=f"{label}: {usd(outcome.price_cents)}", variant="success")
-        )
-        children.append(
-            ButtonNode(
-                type="button",
-                label=f"Buy for {usd(outcome.price_cents)}",
-                primary=best,
-                action=ButtonAction(
-                    selection={
-                        "action": "accept",
-                        "item_id": outcome.item_id,
-                        "cents": outcome.price_cents,
-                    }
-                ),
-            )
-        )
-    else:
-        children.append(
-            BadgeNode(
-                type="badge",
-                label=STATUS_TEXT.get(outcome.status, outcome.status),
-                variant="warning",
-            )
-        )
-    return GroupNode(type="group", direction="column", gap=4, children=children)
-
-
-def haggle_card(result: HaggleResult) -> MetadataContent | None:
-    if not result.outcomes:
-        return None
-    children: list[Any] = []
-    for n, outcome in enumerate(result.outcomes, 1):
-        if children:
-            children.append(DividerNode(type="divider"))
-        children.append(_outcome_node(n, outcome, outcome.item_id == result.best_item_id))
-    return create_card_content(
-        CustomCardPayload(
-            root=SectionNode(
-                type="section",
-                title=f"Haggled with {len(result.outcomes)} sellers at once",
-                subtitle=f"Your max ({usd(result.max_cents)}) stayed private.",
-                children=children,
-            )
-        ),
-        card_id=uuid4(),
-    )
-
-
-def payment_card(deal: DealRecord, title: str, provider_label: str) -> MetadataContent:
-    return create_card_content(
-        ReviewCardPayload(
-            title=f"Pay {usd(deal.price_cents)} for the {title}",
-            summary_rows=[
-                ReviewSummaryRow(label="Order", value=deal.deal_id),
-                ReviewSummaryRow(label="Pay with", value=provider_label),
-                ReviewSummaryRow(label="Pay within", value="24 hours"),
-            ],
-            approve_cta=CtaAction(
-                label="I've paid",
-                selection={"action": "paid", "deal_id": deal.deal_id},
-                primary=True,
-            ),
-        ),
-        card_id=uuid4(),
-    )
 
 
 def deal_text(deal: DealRecord, title: str, provider_label: str | None) -> str:
@@ -981,6 +739,20 @@ def payment_status_text(deal: DealRecord, title: str) -> str:
     if deal.payment_status in (EXPIRED, REJECTED):
         return f"The payment for the {title} wasn't made in time, so order {deal.deal_id} lapsed."
     return f"Order {deal.deal_id} for the {title}: no payment is needed on this server."
+
+
+PAYMENT_STATUS = {
+    PAID: ("paid", "success"),
+    PENDING: ("waiting for payment", "warning"),
+    NOT_COLLECTED: ("agreed, no payment taken", "info"),
+}
+
+
+def payment_status_card(deal: DealRecord, title: str) -> MetadataContent:
+    status, _ = PAYMENT_STATUS.get(deal.payment_status, ("lapsed", "warning"))
+    return cards.payment_status(
+        title, deal.price_cents, deal.deal_id, status.capitalize(), deal.payment_status == PAID
+    )
 
 
 # --- Other sites -------------------------------------------------------------------------------
@@ -1049,49 +821,73 @@ def elsewhere_text(found: Found, sites: str) -> str:
     return "\n".join(lines)
 
 
-def elsewhere_card(found: Found) -> MetadataContent | None:
-    """The deals as a carousel, with their photos. The links are in the text."""
-    if not found.deals:
-        return None
-    items = []
+FLAG_LABELS = {
+    "far_under": "Check it's the whole item",
+    "parts": "Parts or repair",
+    "accessory": "Accessory",
+    "missing_words": "Partial match",
+}
+
+
+def deal_price(deal: ScoredDeal) -> str:
+    price = usd(deal.total_cents)
+    if deal.listing.shipping_cents:
+        price += " with shipping"
+    pct = deal.versus_market_pct
+    if pct is not None and pct >= deals.ABOUT_MARKET:
+        price += f", {pct}% under typical"
+    elif pct is not None and pct <= -deals.ABOUT_MARKET:
+        price += f", {-pct}% above typical"
+    return price
+
+
+def saved_deals(found: Found) -> list[dict[str, Any]]:
+    """The deals as the conversation keeps them, for their cards and "Get the link"."""
+    kept = []
     for deal in found.deals:
         listing = deal.listing
-        price = usd(deal.total_cents)
-        if listing.shipping_cents:
-            price += " with shipping"
-        pct = deal.versus_market_pct
-        if pct is not None and pct >= deals.ABOUT_MARKET:
-            price += f", {pct}% under typical"
-        elif pct is not None and pct <= -deals.ABOUT_MARKET:
-            price += f", {-pct}% above typical"
-        items.append(
-            CarouselItem(
-                id=f"{listing.source}-{listing.external_id}"[:80],
-                image=listing.image_url,
-                title=listing.title[:80],
-                subtitle=price,
-                badges=[CarouselBadge(label=site_name(listing.source), variant="info")],
-                secondary_text=listing.location or None,
-                primary_cta=CtaAction(label="Watch for more", selection={"action": "watch"}),
-            )
+        flag = next((FLAG_LABELS[f] for f in deal.flags if f in FLAG_LABELS), "")
+        kept.append(
+            {
+                "id": f"{listing.source}-{listing.external_id}"[:80],
+                "title": listing.title[:120],
+                "url": listing.url,
+                "price": deal_price(deal),
+                "site": site_name(listing.source),
+                "source": listing.source,
+                "why": deal.why,
+                "location": listing.location,
+                "condition": listing.condition,
+                "image": listing.image_url,
+                "flag": flag,
+            }
         )
-    return create_card_content(
-        CarouselCardPayload(
-            title="On other sites",
-            subtitle="Not Yardsale listings: open the links in the message to buy",
-            items=items,
-        ),
-        card_id=uuid4(),
-    )
+    return kept
+
+
+def deals_subtitle(found: Found) -> str:
+    if found.market is None:
+        return "Scored against each other: no recent eBay sales to compare with"
+    return f"Scored against the {market_note(found)}"[:160]
 
 
 def _form_price(value: SelectionValue | None) -> int | None:
-    """A price typed into the rules form: a number of dollars, or empty."""
+    """A price typed into a card's form: a number of dollars, or empty."""
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     if isinstance(value, bool):
         raise PriceError("That isn't a price I can use.")
     return parse_usd(str(value))
+
+
+def _number(value: SelectionValue | None) -> int | None:
+    """A whole number from a button's selection (JSON gives ints, prose may give strings)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(float(value))
+    except ValueError:
+        return None
 
 
 # --- The protocol --------------------------------------------------------------------------------
@@ -1147,6 +943,11 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         lines = [head, *(waiting_line(conv, n, listing) for n, listing in waiting)]
         return "\n".join([*lines, BATCH_PROMPT])
 
+    def waiting_reply(conv: Conversation, waiting: Waiting, head: str) -> Reply:
+        """The waiting list with its card: tap one to review it, or approve them all."""
+        entries = [(n, waiting_line(conv, n, listing), listing) for n, listing in waiting]
+        return Reply(waiting_list(conv, waiting, head), cards.waiting(entries, head))
+
     def not_waiting(conv: Conversation, n: int) -> str:
         if not 1 <= n <= len(conv.numbered):
             return f"Pick a number from 1 to {len(conv.numbered)}."
@@ -1198,11 +999,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             reply = proposal_reply(listing)
         except UnpricedError as ex:
             unpriced = ex
-            reply = Reply(
-                f"This looks like {ex.item.title}, but no recent eBay sales were close enough to "
-                'suggest a price. Tell me your price, like "ask $40" or "at least $30", and I\'ll '
-                'set up the listing for you to approve. Or say "cancel".' + unpriced_hint(ex.market)
-            )
+            reply = unpriced_reply(ex.item.title, None, ex.market)
         except (PhotoError, PipelineError, PriceError) as ex:
             # A PriceError's message can include the seller's floor, which stays out of logs.
             if isinstance(ex, PriceError):
@@ -1210,10 +1007,11 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             else:
                 detail = f"{ex} ({ex.__cause__})" if ex.__cause__ else str(ex)
             ctx.logger.warning(f"Chat photo for {key[:8]} failed: {detail}")
-            reply = Reply(f"I couldn't price this. {ex} Send the photo again to retry.")
+            failed = f"I couldn't price this. {ex} Send the photo again to retry."
+            reply = Reply(failed, cards.priced_photo_failed(failed))
         except Exception:
             ctx.logger.exception(f"Chat photo for {key[:8]} failed")
-            reply = Reply(SOMETHING_BROKE)
+            reply = Reply(SOMETHING_BROKE, cards.priced_photo_failed(SOMETHING_BROKE))
         if backend.ebay is not None and prepared is not None:
             # Kept for listing on eBay, which needs the photo itself.
             photo_key = listing.item_id if listing is not None else f"pending:{owner}"
@@ -1257,23 +1055,20 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                     media_type=media_type,
                 ),
             )
-            reply = Reply(numbered_proposal_text(listing, n), proposal_card(listing))
+            reply = Reply(numbered_proposal_text(listing, n), proposal_card(listing, n))
         except UnpricedError as ex:
             unpriced = ex
-            reply = Reply(
-                f"#{n}: This looks like {ex.item.title}, but no recent eBay sales were close "
-                f'enough to suggest a price. Tell me yours, like "ask {n} $40", or say "cancel '
-                f'{n}".'
-            )
+            reply = unpriced_reply(ex.item.title, n, None)
         except (PhotoError, PipelineError, PriceError) as ex:
             detail = f"{ex} ({ex.__cause__})" if ex.__cause__ else str(ex)
             if isinstance(ex, PriceError):
                 detail = "prices didn't work"
             ctx.logger.warning(f"Chat photo #{n} for {key[:8]} failed: {detail}")
-            reply = Reply(f"#{n}: I couldn't price this photo. {ex} Send it again to retry.")
+            failed = f"#{n}: I couldn't price this photo. {ex} Send it again to retry."
+            reply = Reply(failed, cards.priced_photo_failed(failed))
         except Exception:
             ctx.logger.exception(f"Chat photo #{n} for {key[:8]} failed")
-            reply = Reply(f"#{n}: {SOMETHING_BROKE}")
+            reply = Reply(f"#{n}: {SOMETHING_BROKE}", cards.priced_photo_failed(SOMETHING_BROKE))
         if backend.ebay is not None and prepared is not None:
             # Kept for listing on eBay, which needs the photo itself.
             if listing is not None:
@@ -1301,7 +1096,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             save(conv)
         return reply
 
-    def batch_summary(key: str, numbers: list[int]) -> str:
+    def batch_summary(key: str, numbers: list[int]) -> Reply:
         """Where each photo of a batch stands, once all of them are priced."""
         conv = load(key)
         lines = [f"All {len(numbers)} photos are done:"]
@@ -1324,9 +1119,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 lines.append(f'{n}. {title}: needs your price, like "ask {n} $40"')
             else:
                 lines.append(f"{n}. Couldn't be priced. Send that photo again to retry.")
+        card = cards.batch_done(lines, waiting)
         if waiting:
             lines.append(BATCH_PROMPT)
-        return "\n".join(lines)
+        return Reply("\n".join(lines), card)
 
     async def price_batch(
         ctx: Context,
@@ -1356,8 +1152,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if not rest:
             head = f"Here are suggested listings for your {count} photos, numbered in the order "
             head += "you sent them."
-            summary = ((batch_summary(key, numbers), None),)
-            return Reply(notice + head + notes, None, ready + summary)
+            summary = batch_summary(key, numbers)
+            return Reply(notice + head + notes, None, (*ready, (summary.text, summary.card)))
         assert deliver is not None
         if ready:
             head = (
@@ -1375,14 +1171,14 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             try:
                 for next_ready in asyncio.as_completed(rest):
                     await deliver(await next_ready)
-                await deliver(Reply(batch_summary(key, numbers)))
+                await deliver(batch_summary(key, numbers))
             except Exception:
                 ctx.logger.exception(f"Sending priced photos in {key[:8]} failed")
 
         follow_up = asyncio.ensure_future(send_rest())
         follow_ups.add(follow_up)
         follow_up.add_done_callback(follow_ups.discard)
-        return Reply(notice + head + notes, None, ready)
+        return Reply(notice + head + notes, cards.pricing(count), ready)
 
     async def change_prices(
         ctx: Context,
@@ -1417,6 +1213,35 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return await approve(ctx, conv, listing)
         return Reply(proposal_text(listing), proposal_card(listing))
 
+    def review(conv: Conversation, item_id: str) -> str | Reply:
+        """A seller's proposal again, by item: from the waiting list or a notice's button."""
+        listing = store.get(item_id) if item_id else None
+        if listing is None:
+            waiting = numbered_waiting(conv)
+            if len(waiting) > 1:
+                return waiting_reply(conv, waiting, "Waiting for your approval:")
+            pending = store.owned(conv.owner, PROPOSED)
+            if conv.unpriced is not None:
+                title = str(conv.unpriced["item"]["title"])
+                return unpriced_reply(title, None, saved_market(conv.unpriced))
+            if waiting and waiting[0][1] is None:
+                n = waiting[0][0]
+                return unpriced_reply(str(conv.needs_price[str(n)]["item"]["title"]), n, None)
+            if not pending:
+                return Reply(
+                    "There's nothing waiting for approval. Attach a photo of something to sell.",
+                    cards.sell(),
+                )
+            listing = pending[0]
+        if listing.owner != conv.owner or listing.status != PROPOSED:
+            return "That listing isn't waiting for approval anymore."
+        conv.awaiting = "proposal"
+        numbers = {item.item_id: n for n, item in numbered_waiting(conv) if item is not None}
+        number = numbers.get(listing.item_id) if len(numbers) > 1 else None
+        if number is not None:
+            return Reply(numbered_proposal_text(listing, number), proposal_card(listing, number))
+        return Reply(proposal_text(listing), proposal_card(listing))
+
     async def go_live(
         ctx: Context, conv: Conversation, proposal: Listing
     ) -> tuple[Listing, bool, str] | str:
@@ -1438,9 +1263,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         listing, registered, on_ebay = live
         conv.awaiting = "craigslist"  # a bare "yes" now means: write the Craigslist post
         text = listed_text(listing, registered, backend.offline) + on_ebay + waiting_too(conv)
-        return Reply(text, craigslist_card(listing))
+        notes = listed_notes(listing, registered, backend.offline)
+        if on_ebay:
+            notes.append("Also listed on your eBay; the link is in the message above.")
+        return Reply(text, cards.listed(listing, notes))
 
-    def craigslist_post(conv: Conversation, item_id: str | None) -> str:
+    def craigslist_post(conv: Conversation, item_id: str | None) -> str | Reply:
         """The ready-to-paste Craigslist post for one of the seller's live listings (the newest
         when no item is named)."""
         conv.awaiting = None
@@ -1454,7 +1282,11 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             settings = craigslist_mail.settings_from_env()
         except craigslist_mail.MailConfigError:
             settings = None
-        return craigslist_mail.post_text(listing, craigslist_mail.post(store, listing), settings)
+        title = craigslist_mail.post(store, listing)
+        return Reply(
+            craigslist_mail.post_text(listing, title, settings),
+            cards.craigslist_post(listing, title, settings.address if settings else None),
+        )
 
     # --- Several proposals, by number ------------------------------------------------------
 
@@ -1555,7 +1387,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         conv.awaiting = "proposal"
         if command.approve:
             return await approve(ctx, conv, listing)
-        return Reply(numbered_proposal_text(listing, n), proposal_card(listing))
+        return Reply(numbered_proposal_text(listing, n), proposal_card(listing, n))
 
     def rules_number(conv: Conversation, n: int, waiting: Waiting) -> str | Reply:
         entries = dict(waiting)
@@ -1567,7 +1399,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         return Reply(
             f'Set your prices for #{n}, the {proposal.title}, below, or type them, like "ask {n} '
             f'{usd(proposal.asking_cents)}, lowest {n} {usd(proposal.floor_cents)}".',
-            rules_card(proposal),
+            cards.prices_form(proposal),
         )
 
     async def numbered_command(
@@ -1606,7 +1438,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                     "rules": f'Which one? Say "rules {example}":',
                     "cancel": f'Which one? Say "cancel {example}", or "cancel all":',
                 }.get(kind, f'Which one? Say "approve {example}", or "approve all":')
-                return waiting_list(conv, waiting, head)
+                return waiting_reply(conv, waiting, head)
         if kind == "edit":
             return await edit_number(ctx, conv, numbers[0], command, waiting)
         if kind == "rules":
@@ -1725,10 +1557,13 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return "That listing isn't waiting for approval anymore."
         return f"OK, I canceled the {proposal.title}. Nothing was listed." + waiting_too(conv)
 
-    def my_listings(conv: Conversation) -> str:
+    def my_listings(conv: Conversation) -> str | Reply:
         listings = store.owned(conv.owner)
         if not listings:
-            return "You haven't listed anything yet. Attach a photo of something to sell."
+            return Reply(
+                "You haven't listed anything yet. Attach a photo of something to sell.",
+                cards.sell(),
+            )
         lines: list[str] = []
         active = [listing for listing in listings if listing.status == ACTIVE]
         if active:
@@ -1748,22 +1583,48 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             ]
         waiting = numbered_waiting(conv)
         numbers = {item.item_id: n for n, item in waiting if item is not None}
+        entries: list[tuple[Listing, str, str, cards.Action]] = [
+            (listing, "for sale", "success", ("Manage", {"action": "manage", "item_id": i}))
+            for listing in active
+            if (i := listing.item_id)
+        ]
         for listing in listings:
+            ids = {"item_id": listing.item_id}
             if listing.status == PROPOSED:
                 number = f" (#{numbers[listing.item_id]})" if len(waiting) > 1 else ""
                 lines.append(
                     f"Waiting for your approval{number}: {listing.title} at "
                     f"{usd(listing.asking_cents)}"
                 )
+                entries.append(
+                    (
+                        listing,
+                        "waiting for approval",
+                        "warning",
+                        ("Review", {"action": "review", **ids}),
+                    )
+                )
             elif listing.status == SOLD:
-                lines.append(sold_line(listing, store.deal_for(listing.item_id)))
+                deal = store.deal_for(listing.item_id)
+                lines.append(sold_line(listing, deal))
+                paid = deal is not None and deal.payment_status == PAID
+                entries.append(
+                    (
+                        listing,
+                        "sold, paid" if paid else "sold",
+                        "success" if paid else "info",
+                        ("Details", {"action": "manage", **ids}),
+                    )
+                )
         lines += craigslist_mail.seller_lines(store, listings)
         if active:
             lines.append(
-                'Say "unlist 1" to take one down, "craigslist 1" to post it on Craigslist'
-                + (', or "list 1 on ebay".' if backend.ebay is not None else ".")
+                'Tap one to manage it, or say "unlist 1" to take one down, "craigslist 1" to post '
+                "it on Craigslist" + (', or "list 1 on ebay".' if backend.ebay is not None else ".")
             )
-        return "\n".join(lines)
+        if not entries:
+            return "\n".join(lines) or "Nothing's for sale right now. Attach a photo to sell."
+        return Reply("\n".join(lines), cards.my_listings(entries))
 
     def ebay_line(listing: Listing) -> str:
         record = store.ebay_listing(listing.item_id)
@@ -1791,7 +1652,48 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return f"{line}, but the buyer didn't pay."
         return f"{line} (payment not collected)"
 
-    def unlist(conv: Conversation, pick: int | None) -> str:
+    def owned_listing(conv: Conversation, item_id: str) -> Listing | None:
+        listing = store.get(item_id) if item_id else None
+        return listing if listing is not None and listing.owner == conv.owner else None
+
+    def manage(conv: Conversation, item_id: str) -> str | Reply:
+        """One of the seller's listings, with what they can do with it."""
+        listing = owned_listing(conv, item_id)
+        if listing is None:
+            return "That listing isn't yours, or it's gone."
+        if listing.status == PROPOSED:
+            return review(conv, item_id)
+        ids = {"item_id": listing.item_id}
+        pairs: list[tuple[str, str]] = [
+            ("Asking price", usd(listing.asking_cents)),
+            ("Lowest price (only you see it)", usd(listing.floor_cents)),
+            ("Its agent", cards.agent_name(listing)),
+        ]
+        lines = [f"Your {listing.title}: {usd(listing.asking_cents)}."]
+        if listing.host == AGENTVERSE:
+            lines.append(f"Its agent on Agentverse: [{listing.address}]({profile_link(listing)})")
+        record = store.ebay_listing(listing.item_id)
+        if record is not None and record.status == "active":
+            pairs.append(("On eBay", "Yes; the link is in the message above"))
+            lines.append(f"On eBay: {record.url}")
+        actions: list[cards.Action] = []
+        if listing.status == ACTIVE:
+            pairs.insert(0, ("Status", "For sale"))
+            actions.append(("Craigslist post", {"action": "craigslist", **ids}))
+            if (
+                backend.ebay is not None
+                and backend.ebay.connected(conv.owner)
+                and not (record is not None and record.status == "active")
+            ):
+                actions.append(("List on eBay", {"action": "ebay_list", **ids}))
+            actions.append(("Take it down", {"action": "unlist", **ids}))
+        else:
+            deal = store.deal_for(listing.item_id)
+            status = sold_line(listing, deal) if listing.status == SOLD else listing.status
+            pairs.insert(0, ("Status", status))
+        return Reply("\n".join(lines), cards.manage(listing, pairs, actions))
+
+    def unlist(conv: Conversation, pick: int | None) -> str | Reply:
         active = store.owned(conv.owner, ACTIVE)
         if not active:
             return "You have nothing for sale right now."
@@ -1800,13 +1702,17 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         index = (pick or 1) - 1
         if not 0 <= index < len(active):
             return f"Pick a number from 1 to {len(active)}."
-        listing = active[index]
+        return take_down(conv, active[index])
+
+    def take_down(conv: Conversation, listing: Listing) -> str | Reply:
         if backend.cancel(listing.item_id, conv.owner) is None:
             return f"The {listing.title} isn't for sale anymore."
         gone = f"Your {listing.title} is no longer for sale."
         if listing.host == AGENTVERSE:
-            return f"{gone} Its agent on Agentverse is being deleted."
-        return f"{gone} Its agent turns down new offers."
+            text = f"{gone} Its agent on Agentverse is being deleted."
+        else:
+            text = f"{gone} Its agent turns down new offers."
+        return Reply(text, cards.notice(text, [cards.LISTINGS, cards.SELL], "Taken down"))
 
     # --- Buying ----------------------------------------------------------------------------
 
@@ -1833,11 +1739,13 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if not found:
             under = f" under {usd(budget_cents)}" if budget_cents else ""
             about = f' for "{query}"' if query else ""
-            return (
+            return Reply(
                 f"Nothing is for sale{about}{under} right now. Try other words, or ask "
-                '"what\'s for sale?"'
+                '"what\'s for sale?"',
+                cards.buy(query, budget_cents),
             )
-        reply = Reply(results_text(found, query, conv.owner), results_card(found))
+        card = cards.results(found, conv.owner, query)
+        reply = Reply(results_text(found, query, conv.owner), card)
         if finder.enabled and search_words(query):
             # Yardsale's listings first, then the best deals on other sites, every time: a
             # buyer should see the whole market, not only what's listed here.
@@ -1847,14 +1755,41 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return reply._replace(text=text, elsewhere=(words, budget_cents))
         return reply
 
-    def pick(conv: Conversation, number: int) -> str:
+    def pick(conv: Conversation, number: int) -> str | Reply:
         if not 1 <= number <= len(conv.results):
             return f"Pick a number from 1 to {len(conv.results)}."
         listing = store.get(conv.results[number - 1])
         if listing is None or listing.status != ACTIVE:
             return "Sorry, that one is no longer for sale."
         conv.selected = listing.item_id
-        return details_text(listing, mine=listing.owner == conv.owner)
+        mine = listing.owner == conv.owner
+        return Reply(details_text(listing, mine), cards.item_detail(listing, mine))
+
+    def shown(conv: Conversation, item_id: str) -> Listing | str:
+        """An item from this buyer's last results, for a tapped button: still for sale, and one
+        this conversation was shown (campus mode shows only classmates' items)."""
+        if item_id not in conv.results:
+            return "That list is out of date. Search again to see what's for sale."
+        listing = store.get(item_id)
+        if listing is None or listing.status != ACTIVE:
+            return "Sorry, that one is no longer for sale."
+        return listing
+
+    def results_again(conv: Conversation) -> str | Reply:
+        found = [
+            listing
+            for item_id in conv.results
+            if (listing := store.get(item_id)) is not None and listing.status == ACTIVE
+        ]
+        if not found:
+            return Reply(
+                "There are no results to go back to. What are you looking for?", cards.buy()
+            )
+        conv.results = [listing.item_id for listing in found]
+        return Reply(
+            results_text(found, conv.last_query, conv.owner),
+            cards.results(found, conv.owner, conv.last_query),
+        )
 
     def offer_target(conv: Conversation, number: int | None) -> str | None:
         if number is not None:
@@ -1893,12 +1828,22 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         where = meeting_line(conv)
         record = await backend.checkout.start(deal.deal_id) or store.deal(deal.deal_id)
         if record is None:
-            return f"Deal! The {listing.title} is yours for {usd(deal.price_cents)}.{where}"
+            text = f"Deal! The {listing.title} is yours for {usd(deal.price_cents)}.{where}"
+            return Reply(text, cards.notice(text, [cards.ORDERS, cards.BUY], "It's yours"))
         label = provider_label()
         text = deal_text(record, listing.title, label) + where
         if record.payment_status == PENDING and label is not None:
-            return Reply(text, payment_card(record, listing.title, label))
-        return text
+            meet = cards.plain(where).removeprefix("Meet at ").removesuffix(" to hand it over.")
+            card = cards.payment(
+                record.deal_id,
+                record.price_cents,
+                listing.title,
+                label,
+                cards.listing_picture(listing),
+                meet,
+            )
+            return Reply(text, card)
+        return Reply(text, cards.notice(text, [cards.ORDERS, cards.BUY], "It's yours"))
 
     async def answer(
         conv: Conversation, listing: Listing, reply: Counter | Deal | OfferRejected
@@ -1910,15 +1855,16 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if reply.agreed:
                 return Reply(
                     f"The seller's agent agreed to {usd(reply.counter_cents)} for the "
-                    f'{listing.title}. Reply "accept" to buy it at that price. The agreement is '
-                    "good for 24 hours.",
-                    counter_card(listing, reply.counter_cents, agreed=True),
+                    f'{listing.title}. Tap Accept, or reply "accept" to buy it at that price. The '
+                    "agreement is good for 24 hours.",
+                    cards.counter(listing, reply.counter_cents, reply.note, agreed=True),
                 )
             return Reply(
                 f"The seller's agent countered with {usd(reply.counter_cents)} for the "
-                f'{listing.title}. Reply "accept" to buy it at {usd(reply.counter_cents)}, or '
-                "make another offer. The counter-offer is good for 24 hours.",
-                counter_card(listing, reply.counter_cents),
+                f'{listing.title}. Tap Accept, or reply "accept" to buy it at '
+                f"{usd(reply.counter_cents)}, or make another offer. The counter-offer is good "
+                "for 24 hours.",
+                cards.counter(listing, reply.counter_cents, reply.note, agreed=False),
             )
         conv.counter = None
         conv.awaiting = None
@@ -1941,6 +1887,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if not conv.results:
                 return 'Tell me what you\'re looking for first, like "find me a road bike".'
             return f'Which one? Say "offer {usd(cents)} on 2", or pick a number first.'
+        return await offer_on(ctx, conv, cents, item_id)
+
+    async def offer_on(ctx: Context, conv: Conversation, cents: int, item_id: str) -> str | Reply:
         listing = store.get(item_id)
         if listing is None or listing.status != ACTIVE:
             return "Sorry, that one is no longer for sale."
@@ -2016,11 +1965,13 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
         if max_cents is None:
             if not conv.results:
-                return (
-                    'What are you looking for? Like "find me a road bike, haggle for me, max $300".'
+                return Reply(
+                    'What are you looking for? Like "find me a road bike, haggle for me, max '
+                    '$300".',
+                    cards.buy(query),
                 )
             conv.awaiting = "max"
-            return ASK_MAX
+            return Reply(ASK_MAX, cards.max_form(len(conv.results)))
         conv.budget = max_cents
         conv.last_query = search_words(query) or conv.last_query
         targets = haggle_targets(conv, query, max_cents)
@@ -2030,10 +1981,18 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             )
         if not targets:
             about = f' for "{query}"' if query else ""
-            return (
+            return Reply(
                 f"Nothing for sale{about} is close enough to {usd(max_cents)} to haggle over. "
-                "Try a higher max, or other words."
+                "Try a higher max, or other words.",
+                cards.buy(query, max_cents),
             )
+        return await haggle_with(ctx, conv, max_cents, targets)
+
+    async def haggle_with(
+        ctx: Context, conv: Conversation, max_cents: int, targets: list[Listing]
+    ) -> Reply:
+        """Send the buyer agent to haggle with these items at once."""
+        conv.budget = max_cents
         result = await backend.haggle(ctx, conv.key, max_cents, targets)
         conv.results = [outcome.item_id for outcome in result.outcomes]
         conv.quotes = {
@@ -2046,7 +2005,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if best is not None:
             conv.counter = {"item_id": result.best_item_id, "cents": best}
             conv.awaiting = "counter"
-        return Reply(haggle_text(result), haggle_card(result))
+        pictures = {listing.item_id: cards.listing_picture(listing) for listing in targets}
+        return Reply(haggle_text(result), cards.haggle(result, pictures))
 
     # --- Other sites ------------------------------------------------------------------------
 
@@ -2091,8 +2051,13 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
         finally:
             searching.pop(key, None)
+        kept = saved_deals(found)
+        async with locks[key]:
+            conv = load(key)
+            conv.deals = kept
+            save(conv)
         text = f"{reply.text}\n\n{elsewhere_text(found, finder.site_names())}"
-        card = elsewhere_card(found)
+        card = cards.deals(kept, deals_subtitle(found))
         if reply.card is not None and card is not None:
             # Yardsale's own results keep their card; the deals follow as a second message.
             return Reply(
@@ -2102,7 +2067,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             )
         return Reply(text, card or reply.card, reply.more)
 
-    def watch(conv: Conversation, command: commands.Command | None) -> str:
+    def watch(conv: Conversation, command: commands.Command | None) -> str | Reply:
         """A standing search over other sites (watches.py), from the message or the last search."""
         if not finder.enabled:
             return SITES_OFF
@@ -2118,21 +2083,24 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return str(ex)
         n = len(store.watches_for(conv.owner))
         hours = int(started.every_seconds // 3600)
-        return (
+        text = (
             f'OK. I\'ll check {finder.site_names()} for "{started.query}"{_under(budget)} every '
             f"{hours} hours for a week, and tell you about anything new next time you message me. "
             f'Say "my watches" to see what turned up, or "stop watching {n}".'
         )
+        return Reply(text, cards.notice(text, [cards.WATCHES, cards.BUY], "Watching for you"))
 
-    def my_watches(conv: Conversation) -> str:
+    def my_watches(conv: Conversation) -> Reply:
         """The buyer's watches, and anything new they found, which then counts as told."""
         running = store.watches_for(conv.owner)
         lines = ["You're watching:"] if running else ["You aren't watching anything now."]
+        entries: list[str] = []
         for n, standing in enumerate(running, 1):
             days = max(1, int(-(-(standing.expires_at - store.clock()) // 86400)))
-            lines.append(
-                f'{n}. "{standing.query}"{_under(standing.budget_cents)}, for {days} more day(s)'
-            )
+            entry = f'"{standing.query}"{_under(standing.budget_cents)}, for {days} more day(s)'
+            entries.append(entry)
+            lines.append(f"{n}. {entry}")
+        found = 0
         # Findings of watches that have since ended are shown too, once.
         news: list[str] = []
         for standing in store.watches_for(conv.owner, running_only=False):
@@ -2140,6 +2108,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             hits = store.untold_hits(standing.watch_id)
             fresh = sorted(hits, key=lambda x: (x.total_cents is None, x.total_cents or 0))[:10]
             if fresh:
+                found += len(fresh)
                 news.append(f'New for "{standing.query}":')
                 news += [listing_line(i, listing) for i, listing in enumerate(fresh, 1)]
             store.mark_told(standing.watch_id)
@@ -2154,16 +2123,18 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 'Say something like "watch for a road bike under $300" and I\'ll keep checking '
                 "other sites for a week."
             )
-        return "\n".join(lines)
+        sites = finder.site_names() if finder.enabled else "other sites"
+        return Reply("\n".join(lines), cards.watches(entries, found, sites))
 
-    def unwatch(conv: Conversation, pick: int | None) -> str:
+    def unwatch(conv: Conversation, pick: int | None) -> str | Reply:
         running = store.watches_for(conv.owner)
         if not running:
             return "You aren't watching anything."
         if pick is None and len(running) == 1:
             pick = 1
         if pick is None:
-            return my_watches(conv) + '\nWhich one? Like "stop watching 2".'
+            listed = my_watches(conv)
+            return listed._replace(text=listed.text + '\nWhich one? Like "stop watching 2".')
         if not 1 <= pick <= len(running):
             return f"Pick a number from 1 to {len(running)}."
         stopped = store.stop_watch(running[pick - 1].watch_id, conv.owner)
@@ -2183,45 +2154,110 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     # --- Paying -----------------------------------------------------------------------------
 
-    async def check_payments(conv: Conversation) -> str | Reply:
+    async def check_payments(conv: Conversation, deal_id: str = "") -> str | Reply:
         deals = store.deals(buyer=f"chat:{conv.key}")
         if not deals:
-            return "You haven't bought anything yet."
+            return Reply("You haven't bought anything yet.", cards.buy())
         deal = next((d for d in deals if d.payment_status in (NOT_COLLECTED, PENDING)), deals[0])
+        if deal_id:
+            named = next((d for d in deals if d.deal_id == deal_id), None)
+            if named is None:
+                return "That order isn't yours, or it's gone."
+            deal = named
         listing = store.get(deal.item_id)
         title = listing.title if listing else "item"
+        picture = cards.listing_picture(listing) if listing else None
         if deal.payment_status == NOT_COLLECTED and backend.checkout.enabled:
             started = await backend.checkout.start(deal.deal_id) or deal
             label = provider_label()
             text = deal_text(started, title, label)
             if started.payment_status == PENDING and label is not None:
-                return Reply(text, payment_card(started, title, label))
-            return text
+                card = cards.payment(started.deal_id, started.price_cents, title, label, picture)
+                return Reply(text, card)
+            return Reply(text, payment_status_card(started, title))
         if deal.payment_status == PENDING:
             try:
                 deal = await backend.checkout.refresh(deal.deal_id) or deal
             except PaymentError as ex:
                 return f"I couldn't check the payment just now ({ex}). Try again in a minute."
-        return payment_status_text(deal, title)
+        return Reply(payment_status_text(deal, title), payment_status_card(deal, title))
 
-    def my_orders(conv: Conversation) -> str:
+    def my_orders(conv: Conversation) -> str | Reply:
         deals = store.deals(buyer=f"chat:{conv.key}")
         by_email = craigslist_buyer.buyer_lines(store, conv.owner)
         if not deals:
-            return "\n".join(by_email) if by_email else "You haven't bought anything yet."
+            text = "\n".join(by_email) if by_email else "You haven't bought anything yet."
+            return Reply(text, cards.notice(text, [cards.BUY], "Your orders"))
         lines = ["Your orders:"]
+        entries: list[tuple[str, str, int, str, str, str | None]] = []
         for deal in deals:
             listing = store.get(deal.item_id)
             title = listing.title if listing else deal.item_id
-            status = {
-                PAID: "paid",
-                PENDING: "waiting for payment",
-                NOT_COLLECTED: "agreed, no payment taken",
-            }.get(deal.payment_status, "lapsed")
+            status, variant = PAYMENT_STATUS.get(deal.payment_status, ("lapsed", "warning"))
             lines.append(f"- {title}: {usd(deal.price_cents)}, {status} ({deal.deal_id})")
-        return "\n".join(lines + by_email)
+            picture = cards.listing_picture(listing) if listing else None
+            entries.append((deal.deal_id, title, deal.price_cents, status, variant, picture))
+        return Reply("\n".join(lines + by_email), cards.orders(entries))
 
     # --- Routing ---------------------------------------------------------------------------
+
+    def menu_card(conv: Conversation) -> MetadataContent:
+        """The home screen, with counts of what this conversation has going."""
+        bought = store.deals(buyer=f"chat:{conv.key}")
+        school = ""
+        if onboarding.campus_mode():
+            found = students.school_of(store, conv.owner)
+            school = schools.school_label(found) if found else ""
+        return cards.menu(
+            live=len(store.owned(conv.owner, ACTIVE)),
+            waiting=len(numbered_waiting(conv)) or (1 if conv.unpriced else 0),
+            to_pay=sum(deal.payment_status == PENDING for deal in bought),
+            orders=len(bought),
+            watching=len(store.watches_for(conv.owner)),
+            ebay=backend.ebay is not None,
+            school=school,
+        )
+
+    def menu_reply(conv: Conversation, text: str = HELP) -> Reply:
+        return Reply(text, menu_card(conv))
+
+    def next_steps(conv: Conversation) -> list[cards.Action]:
+        """The buttons under a short message: what this conversation can do next."""
+        actions: list[cards.Action] = []
+        if conv.counter is not None and conv.awaiting == "counter":
+            cents = int(conv.counter["cents"])
+            selection = {
+                "action": "accept",
+                "item_id": str(conv.counter["item_id"]),
+                "cents": cents,
+            }
+            actions.append((f"Accept {usd(cents)}", selection))
+        if store.owned(conv.owner, PROPOSED) or conv.unpriced or conv.needs_price:
+            actions.append(("Review my listing", {"action": "review"}))
+        if conv.results and len(actions) < 2:
+            actions.append(("Back to results", {"action": "results"}))
+        if len(actions) < 2 and store.owned(conv.owner, ACTIVE):
+            actions.append(cards.LISTINGS)
+        for action in (cards.SELL, cards.BUY):
+            if len(actions) < 3:
+                actions.append(action)
+        return actions
+
+    async def find_from_form(
+        ctx: Context, conv: Conversation, choice: dict[str, SelectionValue]
+    ) -> str | Reply:
+        query = " ".join(str(choice.get("query") or "").split())[:120]
+        budget = _form_price(choice.get("max"))
+        if not query:
+            return Reply("What are you looking for?", cards.buy(budget_cents=budget))
+        if str(choice.get("mode") or "") == "haggle":
+            if budget is None:
+                conv.last_query = search_words(query) or conv.last_query
+                found = search(for_sale(conv), query)
+                conv.results = [listing.item_id for listing in found] or conv.results
+                return Reply(ASK_MAX, cards.max_form(max(1, len(found))))
+            return await haggle(ctx, conv, budget, query)
+        return find(conv, query, budget)
 
     async def handle_choice(
         ctx: Context, conv: Conversation, choice: dict[str, SelectionValue]
@@ -2229,7 +2265,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         """A tapped card button. Checked exactly like the typed command it stands for."""
         action, item_id = str(choice.get("action", "")), str(choice.get("item_id", ""))
         if not choice:
-            return "OK."
+            return menu_reply(conv, "OK.")
         # Signing up. Nothing else can happen until a conversation has a school.
         if action == "student":
             return Reply(onboarding.ASK_FOR_EMAIL, onboarding.email_form())
@@ -2244,7 +2280,36 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 warming = asyncio.ensure_future(onboarding.warm(store, student.school))
                 follow_ups.add(warming)
                 warming.add_done_callback(follow_ups.discard)
-            return Reply(text, card)
+            return Reply(text, card or menu_card(conv))
+        # Getting around.
+        if action == "menu":
+            return menu_reply(conv)
+        if action == "sell":
+            return Reply(NEEDS_PHOTO, cards.sell(len(numbered_waiting(conv))))
+        if action == "buy":
+            return Reply(
+                "What are you looking for, and what's the most you'd pay?",
+                cards.buy(conv.last_query, conv.budget),
+            )
+        if action == "find":
+            return await find_from_form(ctx, conv, choice)
+        if action == "status":
+            if conv.pricing:
+                return Reply(ALREADY_WORKING, cards.pricing(len(conv.pricing)))
+            return review(conv, "")
+        if action == "listings":
+            return my_listings(conv)
+        if action == "orders":
+            return my_orders(conv)
+        if action == "watches":
+            return my_watches(conv)
+        if action == "negotiate_help":
+            return Reply(craigslist_buyer.HOW_TO, cards.negotiate_help())
+        if action == "negotiations":
+            return craigslist_buyer.negotiations_reply(store, conv.owner)
+        if action == "ebay_connect":
+            return await ebay_command(conv, commands.Command("ebay_connect"))
+        # Selling.
         if action in ("approve", "cancel"):
             listing = store.get(item_id)
             if listing is None or listing.owner != conv.owner or listing.status != PROPOSED:
@@ -2252,24 +2317,72 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if action == "approve":
                 return await approve(ctx, conv, listing)
             return cancel_proposal(conv, listing)
+        if action == "approve_all":
+            waiting = numbered_waiting(conv)
+            every = commands.Command("approve", every=True)
+            approved = await numbered_command(ctx, conv, every, waiting) if waiting else None
+            return approved or review(conv, "")
+        if action == "review":
+            return review(conv, item_id)
+        if action == "edit":
+            listing = owned_listing(conv, item_id)
+            if listing is None or listing.status != PROPOSED:
+                return "That listing isn't waiting for approval anymore."
+            return Reply(
+                f'Set your prices for the {listing.title}, or type them, like "ask '
+                f'{usd(listing.asking_cents)}, lowest {usd(listing.floor_cents)}".',
+                cards.prices_form(listing),
+            )
+        if action == "price_form":
+            n = _number(choice.get("n"))
+            if n is None or str(n) not in conv.needs_price:
+                return review(conv, "")
+            title = str(conv.needs_price[str(n)]["item"]["title"])
+            return unpriced_reply(title, n, None)
+        if action == "set_price":
+            try:
+                asking = _form_price(choice.get("asking"))
+                floor = _form_price(choice.get("lowest"))
+            except PriceError as ex:
+                return str(ex)
+            if asking is None and floor is None:
+                return 'Type your price instead, like "ask $40".'
+            n = _number(choice.get("n"))
+            edit = commands.Command("edit", asking_cents=asking, floor_cents=floor)
+            if n is not None:
+                return await edit_number(ctx, conv, n, edit, numbered_waiting(conv))
+            if conv.unpriced is None:
+                return review(conv, "")
+            return await change_prices(ctx, conv, None, asking, floor, False)
+        if action == "drop":
+            n = _number(choice.get("n"))
+            if n is not None:
+                return cancel_numbers(conv, [n], numbered_waiting(conv))
+            if conv.unpriced is not None:
+                conv.unpriced = None
+                return "OK, I dropped that photo. Nothing was listed."
+            return review(conv, "")
         if action == "craigslist":
             return craigslist_post(conv, item_id)
         if action == "no_craigslist":
             conv.awaiting = None
-            return CRAIGSLIST_NOT_NOW
-        if action == "accept":
-            cents = choice.get("cents")
-            counter = conv.counter
-            open_price = conv.quotes.get(item_id)
-            if counter is not None and counter["item_id"] == item_id:
-                open_price = int(counter["cents"])
-            if open_price is None or open_price != cents:
-                return "That price isn't open anymore. Make a new offer, or haggle again."
-            return await accept(ctx, conv, item_id, open_price)
-        if action == "paid":
-            return await check_payments(conv)
-        if action == "watch":
-            return watch(conv, None)
+            return Reply(
+                CRAIGSLIST_NOT_NOW,
+                cards.notice(CRAIGSLIST_NOT_NOW, [cards.LISTINGS, cards.SELL], "Listed"),
+            )
+        if action == "manage":
+            return manage(conv, item_id)
+        if action in ("unlist", "unlist_yes", "ebay_list"):
+            listing = owned_listing(conv, item_id)
+            if listing is None or listing.status != ACTIVE:
+                return "That isn't for sale anymore."
+            if action == "unlist":
+                return Reply(f"Take down your {listing.title}?", cards.confirm_unlist(listing))
+            if action == "unlist_yes":
+                return take_down(conv, listing)
+            if backend.ebay is None or not backend.ebay.connected(conv.owner):
+                return 'Connect your eBay account first: say "connect ebay".'
+            return await list_on_ebay(conv, listing)
         if action == "comp":
             return comp_details(conv, item_id, choice.get("n"))
         if action == "rules":
@@ -2284,6 +2397,16 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if asking is None and floor is None:
                 return 'Type your prices instead, like "ask $360, lowest $300".'
             return await change_prices(ctx, conv, listing, asking, floor, False)
+        # Buying.
+        if action == "accept":
+            cents = choice.get("cents")
+            counter = conv.counter
+            open_price = conv.quotes.get(item_id)
+            if counter is not None and counter["item_id"] == item_id:
+                open_price = int(counter["cents"])
+            if open_price is None or open_price != cents:
+                return "That price isn't open anymore. Make a new offer, or haggle again."
+            return await accept(ctx, conv, item_id, open_price)
         if action == "decline":
             conv.counter = None
             conv.awaiting = None
@@ -2292,7 +2415,77 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return pick(conv, conv.results.index(item_id) + 1)
         if action == "pick":
             return "That list is out of date. Search again to see what's for sale."
-        return HELP
+        if action == "results":
+            return results_again(conv)
+        if action in ("buy_now", "offer_form", "offer"):
+            listing_or_why = shown(conv, item_id)
+            if isinstance(listing_or_why, str):
+                return listing_or_why
+            listing = listing_or_why
+            if action == "offer_form":
+                if listing.owner == conv.owner:
+                    return "That's your own listing."
+                return Reply(
+                    f"What would you offer for the {listing.title}? It's asking "
+                    f'{usd(listing.asking_cents)}. Or type it, like "offer $X".',
+                    cards.offer_form(listing),
+                )
+            if action == "buy_now":
+                return await offer_on(ctx, conv, listing.asking_cents, item_id)
+            amount = _form_price(choice.get("amount"))
+            if amount is None:
+                return Reply("How much would you offer?", cards.offer_form(listing))
+            return await offer_on(ctx, conv, amount, item_id)
+        if action == "haggle_form":
+            if item_id:
+                listing_or_why = shown(conv, item_id)
+                if isinstance(listing_or_why, str):
+                    return listing_or_why
+                return Reply(ASK_MAX, cards.max_form(1, item_id, conv.budget))
+            if not conv.results:
+                return Reply("What are you looking for?", cards.buy(conv.last_query, conv.budget))
+            conv.awaiting = "max"
+            return Reply(ASK_MAX, cards.max_form(len(conv.results), "", conv.budget))
+        if action == "haggle_max":
+            limit = _form_price(choice.get("max"))
+            if limit is None:
+                return Reply(ASK_MAX, cards.max_form(max(1, len(conv.results)), item_id))
+            if not item_id:
+                return await haggle(ctx, conv, limit, "")
+            listing_or_why = shown(conv, item_id)
+            if isinstance(listing_or_why, str):
+                return listing_or_why
+            if listing_or_why.owner == conv.owner:
+                return "That's your own listing."
+            return await haggle_with(ctx, conv, limit, [listing_or_why])
+        if action == "paid":
+            return await check_payments(conv, str(choice.get("deal_id") or ""))
+        # Other sites.
+        if action == "watch":
+            return watch(conv, None)
+        if action == "unwatch":
+            return unwatch(conv, _number(choice.get("n")))
+        if action == "deal":
+            n = _number(choice.get("n"))
+            if n is None or not 0 <= n < len(conv.deals):
+                return "That list is out of date. Search again."
+            deal = conv.deals[n]
+            text = (
+                f"{_link(str(deal['title']), str(deal['url']))}: {deal['price']} on {deal['site']}."
+            )
+            if deal.get("why"):
+                text += f" {str(deal['why']).capitalize()}."
+            return Reply(text, cards.deal_detail(deal))
+        if action == "deals":
+            card = cards.deals(conv.deals, f'Your last search: "{conv.last_query}"')
+            if card is None:
+                return Reply("What are you looking for?", cards.buy(conv.last_query, conv.budget))
+            lines = ["Your last deals on other sites:"] + [
+                f"{n}. {_link(str(d['title']), str(d['url']))}: {d['price']} on {d['site']}"
+                for n, d in enumerate(conv.deals, 1)
+            ]
+            return Reply("\n".join(lines), card)
+        return menu_reply(conv)
 
     def comp_details(conv: Conversation, item_id: str, n: SelectionValue | None) -> str:
         listing = store.get(item_id)
@@ -2411,12 +2604,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return Reply(
                 f'Set your prices for the {proposal.title} below, or type them, like "ask '
                 f'{usd(proposal.asking_cents)}, lowest {usd(proposal.floor_cents)}".',
-                rules_card(proposal),
+                cards.prices_form(proposal),
             )
         if command is not None and kind == "select" and conv.results and command.pick:
             return pick(conv, command.pick)
-        if kind == "help":
-            return HELP
+        if kind == "help" or _MENU.match(text.strip().lower()):
+            return menu_reply(conv)
         if command is not None and kind == "amount" and command.amount_cents is not None:
             amount = usd(command.amount_cents)
             if conv.awaiting == "max" and conv.results:
@@ -2450,18 +2643,18 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 if by_number is not None:
                     return by_number
                 return await change_prices(ctx, conv, proposal, asking, floor, False)
-            return PHOTO_MISSING if _MENTIONS_PHOTO.search(text) else NEEDS_PHOTO
+            missing = PHOTO_MISSING if _MENTIONS_PHOTO.search(text) else NEEDS_PHOTO
+            return Reply(missing, cards.sell(len(waiting)))
         # Neither buying nor selling, as far as the reader can tell. If the words match
         # something for sale ("espresso machine?"), show it anyway.
         if text and search(for_sale(conv), text):
             return find(conv, text, None)
         if len(waiting) > 1:
-            return waiting_list(conv, waiting, "Waiting for your approval:")
+            return waiting_reply(conv, waiting, "Waiting for your approval:")
         if proposal is not None:
-            return f"Your {proposal.title} is waiting at {usd(proposal.asking_cents)}. " + (
-                APPROVE_PROMPT
-            )
-        return HELP
+            text = f"Your {proposal.title} is waiting at {usd(proposal.asking_cents)}. "
+            return Reply(text + APPROVE_PROMPT, proposal_card(proposal))
+        return menu_reply(conv)
 
     async def handle(
         ctx: Context,
@@ -2494,7 +2687,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             # only repeats a photo still being priced is about that photo.
             if not photos and choice is None and any(p.url in conv.pricing for p in attached):
                 save(conv)
-                return Reply(notice + ALREADY_WORKING)
+                return Reply(notice + ALREADY_WORKING, cards.pricing(len(conv.pricing)))
             if not photos:
                 try:
                     if choice is not None:
@@ -2505,6 +2698,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                     reply = Reply(str(ex))
                 except PipelineError as ex:
                     reply = Reply(f"Sorry, that didn't go through. {ex}")
+                if reply.card is None and reply.elsewhere is None:
+                    # Every reply is a card: a short message gets what to do next.
+                    reply = reply._replace(card=cards.notice(reply.text, next_steps(conv)))
                 save(conv)
                 news = "" if reply.elsewhere else untold_note(conv)
                 return reply._replace(text=notice + reply.text + news)
@@ -2545,11 +2741,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     async def send_reply(
         ctx: Context, sender: str, reply: Reply, offer_uploads: bool = False
     ) -> None:
-        await ctx.send(
-            sender, text_message(reply.text, offer_uploads=offer_uploads, card=reply.card)
-        )
-        for text, card in reply.more:
-            await ctx.send(sender, text_message(text, card=card))
+        # Anything that got here without a card gets a plain one, so every reply is a card.
+        card = reply.card or cards.notice(reply.text, [cards.SELL, cards.BUY])
+        await ctx.send(sender, text_message(reply.text, offer_uploads=offer_uploads, card=card))
+        for text, more_card in reply.more:
+            more_card = more_card or cards.notice(text, [cards.SELL, cards.BUY])
+            await ctx.send(sender, text_message(text, card=more_card))
 
     @proto.on_message(ChatMessage)
     async def on_chat(ctx: Context, sender: str, msg: ChatMessage) -> None:
@@ -2614,7 +2811,14 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if done:
             reply = job.result()
         else:
-            reply = Reply(STILL_WORKING if photos_in(msg) else searching.get(key, WORKING))
+            count = len(photos_in(msg))
+            if count:
+                reply = Reply(STILL_WORKING, cards.pricing(min(count, MAX_PHOTOS)))
+            elif key in searching:
+                sites = finder.site_names() if finder.enabled else "other sites"
+                reply = Reply(searching[key], cards.searching(sites))
+            else:
+                reply = Reply(WORKING, cards.working())
 
             async def send_when_done() -> None:
                 result = await job

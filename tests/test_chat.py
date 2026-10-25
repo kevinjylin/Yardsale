@@ -21,7 +21,6 @@ from uagents_core.contrib.protocols.chat import (
 from uagents_core.contrib.protocols.chat.cards import (
     Card,
     CarouselCardPayload,
-    ReviewCardPayload,
     extract_card,
 )
 
@@ -56,12 +55,12 @@ async def test_photo_becomes_a_proposal_not_a_listing(market: sim.Market, store:
     seller = market.user("seller")
     await seller.send(sim.chat_message("Sell this, at least $300", BIKE))
     reply = await seller.next_reply()
-    text = reply.text()
+    text = sim.shown(reply)
     assert "Here's my suggested listing for your Trek FX 2 Disc hybrid bike" in text
     assert "Asking price: $340 (from recent eBay sales)" in text
     assert "Lowest price you'll take: $300 (your price; buyers never see it)" in text
     assert "Based on 6 eBay sales of the same product" in text
-    assert 'Reply "approve"' in text
+    assert 'reply "approve"' in text and sim.button(reply, "approve")
     assert seller.acks == 1
     # The first reply in a conversation tells ASI:One that uploads are welcome.
     assert any(isinstance(c, MetadataContent) for c in reply.content)
@@ -188,7 +187,9 @@ async def test_no_close_sales_then_the_sellers_price(market: sim.Market, store: 
     ],
 )
 async def test_messages_without_a_photo(market: sim.Market, text: str, expected: str) -> None:
-    assert await market.user("someone").say(text) == expected
+    reply = await market.user("someone").exchange(sim.chat_message(text))
+    assert reply.text() == expected
+    assert sim.card_of(reply) is not None  # every reply is a card
 
 
 async def test_photo_problems_are_explained(market: sim.Market) -> None:
@@ -349,13 +350,12 @@ def card_in(msg: ChatMessage) -> Card | None:
 async def test_proposals_come_with_an_approve_card(market: sim.Market, store: Store) -> None:
     seller = market.user("seller")
     reply = await seller.exchange(sim.chat_message("sell this, at least $300", BIKE))
-    card = card_in(reply)
-    assert card is not None and isinstance(card.payload, ReviewCardPayload)
     (proposal,) = store.owned(proposal_owner(store))
-    approve = card.payload.approve_cta.selection
+    approve = sim.button(reply, "approve")
     assert approve == {"action": "approve", "item_id": proposal.item_id}
-    rows = {row.label: row.value for row in card.payload.summary_rows}
-    assert rows["Asking price"] == "$340"
+    assert "Asking price: $340" in sim.shown(reply)
+    assert {"action": "edit", "item_id": proposal.item_id} == sim.button(reply, "edit")
+    assert sim.button(reply, "menu") == {"action": "menu"}
 
     # Another conversation tapping the same button gets nowhere.
     assert "isn't waiting" in await market.user("mallory").tap(approve)
@@ -371,14 +371,13 @@ async def test_search_and_counter_cards(market: sim.Market, store: Store) -> Non
     results = await buyer.exchange(sim.chat_message("find me a bike"))
     carousel = card_in(results)
     assert carousel is not None and isinstance(carousel.payload, CarouselCardPayload)
-    (item,) = carousel.payload.items
-    assert "$300" not in item.model_dump_json()  # no floor in cards either
+    item, *others = carousel.payload.items
+    assert [other.id for other in others] == ["haggle", "main-menu"]
+    assert "$300" not in carousel.payload.model_dump_json()  # no floor in cards either
     assert "Its agent:" in await buyer.tap(item.primary_cta.selection)
 
     countered = await buyer.exchange(sim.chat_message("offer $250"))
-    counter = card_in(countered)
-    assert counter is not None and isinstance(counter.payload, ReviewCardPayload)
-    accept = counter.payload.approve_cta.selection
+    accept = sim.button(countered, "accept")
     assert accept["cents"] == countered_at(countered.text())
     assert "isn't open anymore" in await buyer.tap({**accept, "cents": 30000})  # tampered
     assert "isn't open anymore" in await market.user("mallory").tap(accept)
@@ -390,7 +389,7 @@ async def test_search_and_counter_cards(market: sim.Market, store: Store) -> Non
 async def test_dismissed_cards_and_json_taps(market: sim.Market, store: Store) -> None:
     seller = market.user("seller")
     await seller.say("sell this", BIKE)
-    assert await seller.tap(None) == "OK."
+    assert (await seller.tap(None)).startswith("OK.")
     (proposal,) = store.owned(proposal_owner(store))
     # Some clients send the selection as JSON text instead (cards README).
     tapped = f'{{"action": "cancel", "item_id": "{proposal.item_id}"}}'
@@ -543,10 +542,8 @@ async def test_listing_offers_to_write_the_craigslist_post(
     seller = market.user("seller")
     await seller.say("sell this, at least $300", BIKE)
     reply = await seller.exchange(sim.chat_message("approve"))
-    assert "want it on Craigslist too?" in reply.text()
-    card = card_in(reply)
-    assert card is not None and isinstance(card.payload, ReviewCardPayload)
-    write = card.payload.approve_cta.selection
+    assert "Want it on Craigslist too?" in reply.text()
+    write = sim.button(reply, "craigslist")
     (listing,) = store.active()
     assert write == {"action": "craigslist", "item_id": listing.item_id}
     post = await seller.say("yes")

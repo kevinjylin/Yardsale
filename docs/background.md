@@ -100,6 +100,35 @@ Seller flow: ASI:One chat (photo + text) → Market → Identifier → (Research
 at once) → Appraiser → Market → proposal in the chat → seller approves → new item agent → address in the chat. The next
 sections cover it.
 
+## Every reply is a card
+
+Code: [yardsale/cards.py](../yardsale/cards.py) (layout) and [yardsale/chat.py](../yardsale/chat.py)
+(what each card says). Since October 25, every Market reply in the ASI:One chat is one line of
+text plus an Interactive Card, the way ResourcePilot does it:
+
+- **A home menu.** "menu", "help", a first hello, or the Main menu button shows tiles: Sell
+  something, Find a deal, My listings, My orders, Watches, Haggle on Craigslist (and Your eBay
+  when eBay selling is on), with badges such as "2 for sale" or "1 to pay".
+- **No dead ends.** Every card except the menu has a Main menu button, and most have the next
+  step as buttons: Approve & list, Change prices, Write my Craigslist post, View, Make an offer,
+  Haggle for me, Buy at $X, I've paid, Get the link, Watch for more, Stop.
+- **Forms instead of typing.** Finding a deal (what, max, find or haggle), changing prices,
+  making an offer, and setting a haggle max are form cards.
+- **Pictures.** Each screen has a drawing from [assets/cards](../assets/cards) (made by
+  [scripts/make_card_art.py](../scripts/make_card_art.py); prompts in
+  [assets/PROMPTS.md](../assets/PROMPTS.md)), served from the repository's public raw GitHub
+  URL. A listing shows the closest same-product eBay sale's photo, labeled as such on buyer
+  cards. `YARDSALE_CARD_ART` sets the base URL; set it empty to send cards without pictures.
+  New drawings only show once they're pushed to `main`.
+- **Text still works.** Links stay in the text line, since card text can't be clicked, and the
+  text names the typed command for every button ("Tap Approve, or reply "approve""), because
+  ASI:One's planner relays taps as prose and some clients show no cards. A tap does exactly
+  what the typed command does, with the same checks. Floors appear only on the seller's own
+  cards, never a buyer's.
+
+Not yet seen in the real ASI:One app: everything but the Approve card. Restart the server to
+pick it up.
+
 ## Selling in the ASI:One chat
 
 Code: [yardsale/chat.py](../yardsale/chat.py) and [yardsale/asione.py](../yardsale/asione.py).
@@ -579,12 +608,12 @@ per agent, because agent addresses come from the master seed and don't change.
   chose; Yardsale never sends to an address it found itself.
 - **Telling sellers about a sale.** The seller sees a sale under "my listings"; Yardsale doesn't
   message them when it happens.
-- **Interactive Cards in the real app.** Proposals, the eBay sales behind a price (a carousel),
-  the seller's prices form, search results, counter-offers, the haggling result, and payment
-  carry cards built with the installed `uagents_core.contrib.protocols.chat.cards` module
+- **Interactive Cards in the real app.** Every reply carries a card (see "Every reply is a
+  card"), built with the installed `uagents_core.contrib.protocols.chat.cards` module
   (metadata only, no protocol digest change). Only the Approve card has been seen in ASI:One's
-  web app; ASI:One's planner API received the haggling card as a card for the buyer to act on.
-  Every reply also works as plain text, and typed commands do the same things.
+  web app, before the October 25 redesign; ASI:One's planner API received the haggling card as
+  a card for the buyer to act on. Every reply also works as plain text, and typed commands do
+  the same things.
 - **Payments.** Built for test mode. On October 24, a hosted test bike was haggled to $295 from a chat, and the Stripe test checkout was paid with Stripe's test card. Within a minute the server's Stripe check marked the deal paid, recorded a $14.75 commission and a $280.25 payout, and marked the listing sold. Visa hasn't been run (no sandbox keys):
   its "paid" check searches transactions for the deal ID, and whether Pay By Link payments are
   filed under it is unverified. Payouts to sellers aren't automated.

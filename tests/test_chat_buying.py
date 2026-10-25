@@ -13,8 +13,6 @@ from uagents_core.contrib.protocols.chat.cards import (
     Card,
     CarouselCardPayload,
     CustomCardPayload,
-    FormCardPayload,
-    ReviewCardPayload,
     extract_card,
 )
 
@@ -100,7 +98,7 @@ async def test_a_relayed_acceptance_with_nothing_on_offer_buys_nothing(
 async def test_haggle_asks_for_a_max_first(market: sim.Market) -> None:
     await list_bike(market, "ann", 360, 300)
     buyer = market.user("buyer")
-    assert await buyer.say("find me a hybrid bike and haggle for me") == chat.ASK_MAX
+    assert (await buyer.say("find me a hybrid bike and haggle for me")).startswith(chat.ASK_MAX)
     reply = await buyer.say("$330")
     assert "haggled with 1 seller agent(s)" in reply and "Yours for" in reply
 
@@ -150,10 +148,9 @@ async def test_a_deal_gets_a_payment_link_and_is_paid(
     reply = await buyer.exchange(sim.chat_message("accept"))
     (deal_id,) = payments.links
     assert f"[Pay $360](https://pay.example.test/{deal_id})" in reply.text()
-    card = card_in(reply)
-    assert card is not None and isinstance(card.payload, ReviewCardPayload)
-    paid_button = card.payload.approve_cta.selection
+    paid_button = sim.button(reply, "paid")
     assert paid_button == {"action": "paid", "deal_id": deal_id}
+    assert "Test mode" in sim.shown(reply)
     deal = store.deal(deal_id)
     assert deal is not None and deal.payment_status == PENDING
 
@@ -215,9 +212,7 @@ async def test_the_prices_form(market: sim.Market, store: Store) -> None:
     seller = market.user("seller")
     await seller.say("sell this", BIKE)
     reply = await seller.exchange(sim.chat_message("rules"))
-    card = card_in(reply)
-    assert card is not None and isinstance(card.payload, FormCardPayload)
-    submit = dict(card.payload.submit_cta.selection)
+    submit = sim.button(reply, "rules")
     assert "isn't waiting" in await market.user("mallory").tap({**submit, "asking": "380"})
     assert "$380" in await seller.tap({**submit, "asking": "380", "lowest": "320"})
     row = store._db.execute("SELECT item_id FROM listings").fetchone()

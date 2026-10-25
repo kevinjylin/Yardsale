@@ -12,12 +12,10 @@ from uuid import uuid4
 import pytest
 from uagents_core.contrib.protocols.chat import (
     ChatMessage,
-    MetadataContent,
     Resource,
     ResourceContent,
     TextContent,
 )
-from uagents_core.contrib.protocols.chat.cards import ReviewCardPayload, extract_card
 
 from tests import fakes, sim
 from yardsale import chat
@@ -51,11 +49,10 @@ def owned(store: Store, *statuses: str) -> list[Any]:
 
 
 def approve_card(msg: ChatMessage) -> dict[str, Any] | None:
-    for block in msg.content:
-        if isinstance(block, MetadataContent) and (card := extract_card(block)) is not None:
-            if isinstance(card.payload, ReviewCardPayload):
-                return dict(card.payload.approve_cta.selection)
-    return None
+    try:
+        return sim.button(msg, "approve")
+    except AssertionError:
+        return None
 
 
 async def test_several_photos_become_numbered_proposals(market: sim.Market, store: Store) -> None:
@@ -67,7 +64,7 @@ async def test_several_photos_become_numbered_proposals(market: sim.Market, stor
     texts = [reply.text() for reply in replies]
     assert texts[0].startswith("Here are suggested listings for your 3 photos")
     assert texts[1].startswith("#1: Here's my suggested listing for your Trek FX 2 Disc")
-    assert 'Reply "approve 1"' in texts[1] and approve_card(replies[1]) is not None
+    assert 'reply "approve 1"' in texts[1] and approve_card(replies[1]) is not None
     assert texts[2].startswith("#2: Here's my suggested listing for your Breville Bambino")
     assert texts[3].startswith("#3: This looks like Handmade speckled ceramic mug")
     assert '"ask 3 $40"' in texts[3]

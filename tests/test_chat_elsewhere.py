@@ -104,7 +104,8 @@ async def test_nothing_on_yardsale_shows_the_best_deals_elsewhere(
     assert 'Say "watch for it"' in text
     card = card_in(reply)
     assert card is not None and isinstance(card.payload, CarouselCardPayload)
-    assert card.payload.title == "On other sites" and len(card.payload.items) == 3
+    deals = [item for item in card.payload.items if item.primary_cta.selection["action"] == "deal"]
+    assert card.payload.title == "On other sites" and len(deals) == 3
     assert ebay.calls == ["road bike"]
 
 
@@ -127,7 +128,9 @@ async def test_deals_are_scored_against_what_the_item_sells_for(
     assert "helmet" not in text and not lines[first + 2].startswith("3. ")
     card = card_in(reply)
     assert card is not None and isinstance(card.payload, CarouselCardPayload)
-    assert len(card.payload.items) == 2
+    *deals, watch, menu = card.payload.items
+    assert len(deals) == 2 and watch.primary_cta.selection == {"action": "watch"}
+    assert menu.primary_cta.selection == {"action": "menu"}
     assert card.payload.items[0].subtitle == "$180, 42% under typical"
     assert card.payload.items[1].subtitle == "$240 with shipping, 23% under typical"
     assert ebay.calls == ["road bike"]

@@ -20,6 +20,7 @@ from uagents.dispatch import dispatcher
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
     ChatMessage,
+    MetadataContent,
     Resource,
     ResourceContent,
     StartSessionContent,
@@ -27,8 +28,10 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 from uagents_core.contrib.protocols.chat.cards import (
+    Card,
     SelectionValue,
     create_card_response_content,
+    extract_card,
 )
 
 from tests import fakes
@@ -47,6 +50,90 @@ from yardsale.sources import Source
 from yardsale.store import Store
 
 REPLY_TIMEOUT = 10.0
+
+
+def card_of(msg: ChatMessage) -> Card | None:
+    """The Interactive Card a reply carries, if any."""
+    for block in msg.content:
+        if isinstance(block, MetadataContent) and (card := extract_card(block)) is not None:
+            return card
+    return None
+
+
+def card_text(card: Card) -> str:
+    """Everything a card shows, one piece per line: titles, text, "label: value" rows, badges,
+    carousel items, and button labels. What a person reading the card would see."""
+    lines: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for child in node:
+                walk(child)
+            return
+        if not isinstance(node, dict):
+            return
+        for key in ("title", "subtitle", "value", "label", "secondary_text", "placeholder"):
+            if isinstance(node.get(key), str) and node.get("type") != "image":
+                if key == "value" and "label" in node and node.get("type") is None:
+                    continue
+                lines.append(node[key])
+        if "label" in node and isinstance(node.get("value"), str) and node.get("type") is None:
+            lines.pop() if lines and lines[-1] == node["label"] else None
+            lines.append(f"{node['label']}: {node['value']}")
+        for key in ("primary_cta", "submit_cta", "approve_cta", "reject_cta", "badges"):
+            walk(node.get(key))
+        for key in ("root", "children", "items", "summary_rows", "ctas", "fields"):
+            walk(node.get(key))
+
+    walk(card.payload.model_dump(exclude_none=True))
+    return "\n".join(lines)
+
+
+def card_buttons(card: Card) -> list[tuple[str, dict[str, Any]]]:
+    """Every (label, selection) a person can tap on a card, in order."""
+    found: list[tuple[str, dict[str, Any]]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for child in node:
+                walk(child)
+            return
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "button":
+            found.append((node["label"], dict(node["action"]["selection"])))
+        if isinstance(node.get("action"), dict) and node.get("type") is None:
+            found.append(("", dict(node["action"]["selection"])))
+        for key in ("primary_cta", "submit_cta", "approve_cta", "reject_cta"):
+            if isinstance(node.get(key), dict):
+                found.append((node[key]["label"], dict(node[key]["selection"])))
+        for cta in node.get("ctas") or []:
+            found.append((cta["label"], dict(cta["selection"])))
+        for key in ("root", "children", "items"):
+            walk(node.get(key))
+
+    walk(card.payload.model_dump(exclude_none=True))
+    return found
+
+
+def button(msg: ChatMessage, action: str, **match: Any) -> dict[str, Any]:
+    """The selection of the first button on a reply's card with this action (and fields)."""
+    card = card_of(msg)
+    assert card is not None, msg.text()
+    for _, selection in card_buttons(card):
+        if selection.get("action") == action and all(
+            selection.get(k) == v for k, v in match.items()
+        ):
+            return selection
+    raise AssertionError(f"no {action} button in {card_buttons(card)}")
+
+
+def shown(msg: ChatMessage) -> str:
+    """A reply as a person sees it: the text, then what its card shows."""
+    card = card_of(msg)
+    return msg.text() + ("\n" + card_text(card) if card is not None else "")
+
+
 # Messages the Market sends right after an answer, which ChatUser.exchange sets aside.
 FOLLOW_UPS = ("closest eBay sales behind that price",)
 
@@ -198,13 +285,13 @@ class ChatUser:
 
     async def say(self, text: str = "", photo: str | None = None) -> str:
         """Send a message and return the Market's answer, skipping "still working" replies."""
-        return (await self.exchange(chat_message(text, photo))).text()
+        return shown(await self.exchange(chat_message(text, photo)))
 
     async def tap(self, selection: dict[str, SelectionValue] | None) -> str:
         """Tap a card button with this selection (None dismisses the card)."""
         response = create_card_response_content(selection=selection, cancelled=selection is None)
         msg = ChatMessage(timestamp=datetime.now(UTC), msg_id=uuid4(), content=[response])
-        return (await self.exchange(msg)).text()
+        return shown(await self.exchange(msg))
 
     async def exchange(self, msg: ChatMessage) -> ChatMessage:
         """Send a message and return the Market's answer, skipping "still working" replies."""
