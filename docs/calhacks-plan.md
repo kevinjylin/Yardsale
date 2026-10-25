@@ -54,7 +54,7 @@ links a [submission document](https://docs.google.com/document/d/1UDW-X1C24hxZvi
 
 | Requirement | Yardsale today |
 | --- | --- |
-| At least one agent registered on Agentverse | Yes: the Market, Identifier, Researcher, and Appraiser are active mailbox agents on Agentverse (checked October 23). The Shopper (buyer agent) joins them on the next live start, and item agents can be hosted there. |
+| At least one agent registered on Agentverse | Yes: the Market, Identifier, Researcher, Appraiser, Shopper, Market Scout, and Deal Finder are mailbox agents on Agentverse (seven, as of October 24), and item agents can be hosted there. |
 | Implements the Agent Chat Protocol | Yes, the Market. |
 | Discoverable and directly usable through ASI:One | Buying: yes, without an @mention (ASI:One's planner picked the Market on October 24). Selling: by @mention; the planner tried to price items itself. |
 | Meaningful tool use or multi-agent orchestration | Yes: three pricing agents, Apify, Claude, an agent per item, and a buyer agent haggling with several item agents at once. |
