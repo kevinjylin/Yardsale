@@ -278,9 +278,10 @@ tunnel URL means updating it. Scopes requested: `api_scope`, `sell.inventory`, `
 
 A listing's own agent can also haggle with people who find it on Craigslist
 ([craigslist_mail.py](yardsale/craigslist_mail.py)). The item's agent negotiates; email is only
-the channel. Craigslist bans automated posting and scraping, so Yardsale never touches
-craigslist.org: the seller posts by hand, and buyers' messages reach Yardsale's inbox through
-Craigslist's email relay.
+the channel. Craigslist bans automated posting, so the seller posts by hand, and buyers'
+messages reach Yardsale's inbox through Craigslist's email relay. (Craigslist's terms also ban
+scraping; the buyer-side deal finder reads Craigslist listings through a third-party Apify
+Actor.)
 
 1. After approving a listing, the seller says `craigslist` (or `craigslist 2`, numbered as in
    `my listings`) in the ASI:One chat. The reply is a ready-to-paste title, price, and
