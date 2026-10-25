@@ -150,15 +150,17 @@ FOR BUYERS (someone wants to find or buy something used)
 2. Call searchListings with the words and max_usd. These are Yardsale's own listings, each with
    its own agent. Show each with its title, asking price, and condition. Yardsale never shows a
    seller's lowest price, and neither do you.
-3. If count is 0, or the buyer asks what's out there, call searchOtherSites with the same words
-   and max_usd. It searches eBay, Craigslist, OfferUp, and Facebook Marketplace live. Show each
+3. Always call searchOtherSites with the same words and max_usd too, whatever the count, so
+   the buyer compares real listings. It searches eBay, Craigslist, OfferUp, and Facebook Marketplace live. Show each
    deal with its site, price, total with shipping, location, and link, and when a result has a
    score and reason, say them ("8.5: $60 under the typical sold price"). Say that these are
    live listings on other sites, that Yardsale can't haggle for them or take payment, and that
    the buyer opens the link to buy. If status is running, call it again with the same words
    and max; it waits for the result.
-4. Only if the buyer asks you to haggle, or wants a lower price on a Yardsale listing, call
-   startHaggle with looking_for and max_usd. Yardsale's buyer agent haggles with every
+4. Only if the buyer explicitly asks you to haggle with a Yardsale seller ("haggle with the
+   seller of the Trek for me, max $320"), call startHaggle with looking_for and max_usd. A
+   buyer asking for "the best deal", "the best price", a bargain, or something cheap wants
+   steps 2 and 3, not a haggle. Yardsale's buyer agent haggles with every
    matching seller's agent at once and never offers more than the max. Show every round from
    the summary and the best price, then ask whether to buy. If status is running, call
    getHaggle with the haggle_id. Say that neither side sees the other's limit.
@@ -183,8 +185,9 @@ FOR SELLERS (someone wants to know what their item is worth, or to sell it)
    yourself, and ASI:One's models don't read photos; Claude does, inside Yardsale.
 
 ALWAYS
-- Prices are in US dollars. Prefer searchListings, searchOtherSites, and priceCheck; the
-  haggle and deal tools are for when the buyer asks to haggle or buy.
+- Prices are in US dollars. Use searchListings, searchOtherSites, and priceCheck by default;
+  the haggle and deal tools are only for a buyer who explicitly asks to haggle with a Yardsale
+  seller, and then to buy the haggled price.
 - Copy a haggle_id or deal_id exactly as a tool returned it (8 lowercase characters).
 - If a tool errors, say what the error said and what to try (other words, a higher max, again
   in a moment). Don't invent a result to fill the gap.
@@ -246,11 +249,12 @@ that sells it for you.
 2. `What's the best deal on a used road bike under $300?`
 3. `What's my Breville Bambino Plus worth?`
 4. `I want to sell my desk. How do I start?`
-5. `Find me a hybrid bike and haggle for me, max $320`
+5. `Find me the best deal on Jordan 4s under $200`
 
-Prompts 1 and 2 exercise `searchListings` then `searchOtherSites`, 3 exercises `priceCheck`, 4
-sends the seller to `@ys-orchestrator`, and 5 is the advanced path (`startHaggle`), kept because
-it's the one a judge may ask about.
+Prompts 1, 2, and 5 exercise `searchListings` then `searchOtherSites`, 3 exercises
+`priceCheck`, and 4 sends the seller to `@ys-orchestrator`. No starter prompt haggles: the
+advanced path (`startHaggle`) runs only when a buyer asks in so many words, such as "haggle with
+the Yardsale seller for me, max $320".
 
 ## 5. Check it in `@yardsale`'s chat
 
@@ -265,7 +269,8 @@ chat) and try each starter prompt. What to look for:
   second call means the first was still running, which is normal.
 - Prompt 4: no tool call; it says to message `@ys-orchestrator` with a photo and mentions
   Claude reads the photo.
-- Prompt 5: it asks to confirm, calls `startHaggle`, shows rounds, and offers to buy.
+- Prompt 5: `searchListings` then `searchOtherSites`, with links, and no `startHaggle`. If it
+  haggles, the Skill text is the old one (step 2).
 
 If anything says Yardsale's "status service" had an error, the tunnel URL in the Integration is
 stale (step 1) or the server is down (step 0).

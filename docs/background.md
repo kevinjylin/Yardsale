@@ -189,8 +189,11 @@ Code: [chat.py](../yardsale/chat.py), [shopper.py](../yardsale/shopper.py),
 1. The buyer asks for something ("find me a cheap road bike under $300"). The Market searches
    active listings by word ([search.py](../yardsale/search.py)), with no paid service. A budget
    filters on the asking price only, so results never hint at a floor.
-2. With a max and "haggle" ("haggle for me, max $320"), the Market sends up to five matching
-   items asking at most about 1.4 times the max to the Shopper. The Shopper haggles with all of
+2. Only on an explicit request after a search ("haggle with the seller on 1, max $320", or
+   "haggle with the sellers"), the Market sends that item, or the results asking at most about
+   1.4 times the max, to the Shopper. Shopping words ("best deal", "best price", "get me a good
+   deal") and the planner's prose are searches (Yardsale and other sites), never a haggle, and
+   `asi1-mini` doesn't read a haggle request. The Shopper haggles with all of
    them at once, up to 6 rounds each, and the reply lists every round for every item with the
    best price, plus a card with a Buy button for each. Without a max, the Market asks for one.
 3. Or the buyer haggles by hand: picks a result by number and offers (`offer $250 on 2`).

@@ -74,8 +74,8 @@ sold or taken down. The chat gives each one's address when the seller approves.
 **Try it in ASI:One:** open [asi1.ai](https://asi1.ai), start a chat with the Yardsale
 Orchestrator (from its Agentverse profile, or by mentioning `@ys-orchestrator` or its address),
 attach a photo, and type something like "sell this, at least $40". To buy, ask for something
-like "find me a road bike, haggle for me, max $300". The agents answer only while the server is
-running.
+like "find me the best deal on a road bike under $300". The agents answer only while the server
+is running.
 
 **To run it yourself** you need these accounts and keys (put them in `.env`; see
 [.env.example](.env.example)):
@@ -184,13 +184,17 @@ Market acknowledges every message at once and replies within 40 seconds: with th
 
 ## How buying works
 
-1. The buyer says what they want ("find me a cheap road bike under $300"). The Market searches
-   active listings by word, cheapest first among equal matches. No paid service is involved.
-2. **Haggle for me.** With a max ("haggle for me, max $320", or `haggle $320` after a search), the
-   Market sends the buyer agent (the Shopper) the matching items asking up to about 1.4 times the
-   max, five at most. The Shopper haggles with all of them at once and the reply, with a card,
-   shows every round for every item and the best price. `accept` buys the best one, `accept 2`
-   another, or tap Buy on the card.
+1. The buyer says what they want ("find me a cheap road bike under $300", "best price on a
+   hydro flask"). The Market searches active listings by word, cheapest first among equal
+   matches, and the other sites (step 6) every time. Shopping words ("best deal", "get me a good
+   deal") and the planner's prose ("The buyer wants Jordans under $200") are searches, and a
+   bare "$300" or "max $300" after a search runs it again under that budget.
+2. **Haggle, only on request.** After a search, an explicit request aimed at a Yardsale seller
+   ("haggle with the seller on 1, max $320", "haggle with the sellers, max $320", or `haggle
+   $320`) sends the buyer agent (the Shopper) that item, or every result asking up to about 1.4
+   times the max. The Shopper haggles with them at once and the reply, with a card, shows every
+   round for every item and the best price. `accept` buys the best one, `accept 2` another, or
+   tap Buy on the card. Nothing else starts a haggle.
 3. **Or haggle yourself.** Pick a result by number for details, then offer (`offer $250 on 2`).
    Each offer gets an answer from the item agent: agreed, or a counter.
 4. `accept` (or `yes`) buys at the latest counter or agreed price, exactly, within 24 hours.

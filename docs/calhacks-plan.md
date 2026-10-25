@@ -58,7 +58,7 @@ links a [submission document](https://docs.google.com/document/d/1UDW-X1C24hxZvi
 | Implements the Agent Chat Protocol | Yes, the Market. |
 | Discoverable and directly usable through ASI:One | Buying: yes, without an @mention (ASI:One's planner picked the Market on October 24). Selling: by @mention; the planner tried to price items itself. |
 | Meaningful tool use or multi-agent orchestration | Yes: three pricing agents, Apify, Claude, an agent per item, and a buyer agent haggling with several item agents at once. |
-| The main workflow happens entirely inside an ASI:One conversation, with no custom frontend | Selling, haggling, and buying happen in the chat; payment is a link from the chat. |
+| The main workflow happens entirely inside an ASI:One conversation, with no custom frontend | Selling, searching for deals, and buying happen in the chat; payment is a link from the chat. |
 | Public GitHub repo with instructions to run or test it | The repo is public and the README has run instructions. |
 
 **Bonus points:**
@@ -190,7 +190,10 @@ Apify, Claude, and ASI:One answers and hasn't been run live yet):
   item agent at once over the published `YardsaleHaggle` protocol, with a card showing every
   round; `accept` buys; the buyer gets a payment link and an agent buyer a Payment Protocol
   request. Live October 24 from the ASI:One app, through ASI:One's planner with no @mention,
-  and through `@yardsale` (`startHaggle`, `acceptDeal`). Dropped from the pitch, not the code.
+  and through `@yardsale` (`startHaggle`, `acceptDeal`). Dropped from the pitch, not the code,
+  and out of the default flow: "best deal", "best price", and planner prose are searches, and
+  the Shopper runs only on an explicit request after a search ("haggle with the seller on 1,
+  max $300").
 - **Payment links and the 5% commission**: Stripe test checkout went through end to end
   October 24. Still used for Craigslist buyers who pay through the link. Visa Pay By Link is
   built for Visa's sandbox and never run (no keys).
@@ -401,7 +404,7 @@ ASI:One; the Craigslist email is a second channel the same item agent answers.
 | 5. Post | Seller | `craigslist` gives the post text. The friend has already pasted it on Craigslist with Yardsale's inbox as the email; show the live post. | | Yes; posted by hand. Not yet tried on real Craigslist. |
 | 6. Email | Buyer | From the presenter's phone, reply to the Craigslist post with a low offer. | | Yes; relay unverified |
 | 7. Haggle back | Buyer | The item agent answers in the email thread with a counter and a reason, never showing the floor. The presenter replies "deal", gets a payment link, and pays with Stripe's test card. The friend's `my listings` shows the item sold and the payout after 5%. | Fetch (uAgents), Stripe (test mode) | Yes; tested with a fake inbox only. Counters cite the market line ("Similar ones sold for about $X on eBay recently"), tested offline. |
-| 8. Ask | Buyer | Ask `@yardsale`: "find me a mini fridge, max $60". Yardsale's listings come first (none match); then the other sites. | Fetch Business | Yes: `searchListings`, then `searchOtherSites` |
+| 8. Ask | Buyer | Ask `@yardsale`: "find me the best deal on a mini fridge, max $60". It searches Yardsale's listings (none match) and the other sites, and haggles with no one. | Fetch Business | Yes: `searchListings`, then `searchOtherSites`; no `startHaggle` |
 | 9. Find | Buyer | The Deal Finder lists the best eBay, Craigslist, OfferUp, and Facebook Marketplace results under $60, each with a score against what mini fridges sell for and a line on why it's a deal. | Apify | Built: the Deal Finder agent scores against sold comps with a reason each. One live probe: all four sources parsed, OfferUp ignored the result cap, bike parts ranked too high (fixes in progress). Not yet run from `@yardsale`. |
 | 10. Negotiate | Buyer | The presenter picks a Craigslist post, taps Reply on it, and pastes the relay address into the chat. The agent emails the seller an offer and negotiates within the max. | | Built; tested through a fake relay. Needs `@ys-orchestrator` today; `@yardsale` has no tool for it. |
 
