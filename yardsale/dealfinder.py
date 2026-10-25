@@ -1,15 +1,21 @@
 """The Deal Finder agent ("yardsale-dealfinder"): the best deals on other sites, scored.
 
-The Market sends it a FindDeals (what the buyer wants, their max, and a ZIP code) and gets a
+An agent sends it a FindDeals (what the buyer wants, their max, and a ZIP code) and gets a
 DealsFound back: the top listings across eBay, Craigslist, OfferUp, and Facebook Marketplace,
 each with a score and a one-line reason, plus the market price they were judged against. The
 work is elsewhere.DealFinder (the searches, the eBay sold comps, the cache) and deals.py (the
-scoring); this module is the agent around it and the Market's client for it.
+scoring); this module is the agent around it.
 
-The Market talks to it the way it talks to the Identifier, Researcher, and Appraiser: a request
-with a request_id, a reply with the same ID, or a ServiceError. `DealsClient` keeps the
-DealFinder interface the chat and @yardsale's API already use (`enabled`, `site_names`, `start`,
-`find`), so they don't know whether the search runs in this process or on another machine.
+Other agents talk to it the way the Market talks to the Identifier, Researcher, and Appraiser: a
+request with a request_id, a reply with the same ID, or a ServiceError. The reply waits for
+every site (each gives up after elsewhere.SOURCE_LIMIT seconds).
+
+The chat and @yardsale's API don't go through this agent. Messages between agents in one Bureau
+are delivered in-process (uAgents' dispatcher, live or offline), so the hop cost under a
+millisecond, but its one reply can only come once every site has answered: a buyer would wait
+for the slowest site, with a 240-second timeout as the only limit. They use the Market's
+DealFinder directly instead, which answers by its deadline and sends slower sites' deals later.
+This agent shares that DealFinder, so its searches and cache are the same ones.
 
 The buyer's max and search words are never logged, here or in the finder.
 """
@@ -17,32 +23,22 @@ The buyer's max and search words are never logged, here or in the finder.
 from __future__ import annotations
 
 import logging
-import time
-from collections.abc import Awaitable, Callable
-from uuid import uuid4
 
 from uagents import Agent, Context, Protocol
 
 from yardsale.agentverse import service_agent
-from yardsale.common import PipelineError
 from yardsale.deals import MarketPrice, ScoredDeal
-from yardsale.elsewhere import CACHE_FOR, DealFinder, Found
+from yardsale.elsewhere import DealFinder, Found
 from yardsale.models import DealsFound, FindDeals, FoundDeal, ServiceError
-from yardsale.sources import ExternalListing, Source, SourceError
+from yardsale.sources import ExternalListing, SourceError
 
 log = logging.getLogger("yardsale.dealfinder")
-
-DEALS_TIMEOUT = 240.0  # seconds the Market waits: every source's actor can take a minute or two
 
 DESCRIPTION = (
     "Finds the best-priced, best-quality secondhand deals for a search across eBay, Craigslist, "
     "OfferUp, and Facebook Marketplace, under a buyer's max. Prices each against what the item "
     "actually sold for on eBay in the last 90 days and explains why it's a good deal."
 )
-
-# Market -> Deal Finder -> Market, with the Market's context; bureau_server wires it.
-Ask = Callable[[FindDeals], Awaitable[DealsFound]]
-
 
 # --- Between the finder's result and the message ------------------------------------------------
 
@@ -160,31 +156,3 @@ def build_dealfinder(finder: DealFinder, offline: bool) -> Agent:
 
     agent.include(proto, publish_manifest=not offline)
     return agent
-
-
-# --- The Market's side -------------------------------------------------------------------------
-
-
-class DealsClient(DealFinder):
-    """The Market's deal finder: the same interface, with the search done by the Deal Finder
-    agent. Keeps its own short cache, so one chat asking twice sends one request. A request
-    the agent refuses or doesn't answer is a SourceError, like a source that's off."""
-
-    def __init__(
-        self,
-        sources: dict[str, Source],
-        ask: Ask,
-        cache_for: float = CACHE_FOR,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        super().__init__(sources, cache_for=cache_for, clock=clock)
-        self.ask = ask
-
-    async def _search(self, query: str, budget_cents: int | None, zip_code: str) -> Found:
-        request = FindDeals(
-            request_id=uuid4().hex, query=query, max_cents=budget_cents, zip=zip_code
-        )
-        try:
-            return found_from(await self.ask(request))
-        except PipelineError as ex:
-            raise SourceError(str(ex)) from ex

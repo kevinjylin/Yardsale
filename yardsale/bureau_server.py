@@ -77,7 +77,7 @@ from yardsale.craigslist import search_craigslist
 from yardsale.craigslist_mail import POLL_EVERY as MAIL_POLL_EVERY
 from yardsale.craigslist_mail import CraigslistMail, Mailbox, MailConfigError, MailSettings
 from yardsale.craigslist_mail import settings_from_env as mail_settings_from_env
-from yardsale.dealfinder import DEALS_TIMEOUT, DealsClient, build_dealfinder
+from yardsale.dealfinder import build_dealfinder
 from yardsale.ebay import search_ebay
 from yardsale.ebay_seller import CHECK_EVERY as EBAY_CHECK_EVERY
 from yardsale.ebay_seller import EbaySeller
@@ -1098,12 +1098,10 @@ def build(
         "market", "Yardsale Orchestrator", "ys-orchestrator", MARKET_DESCRIPTION, offline
     )
 
-    async def ask_deal_finder(request: FindDeals) -> DealsFound:
-        ctx = market._build_context()
-        return await call_service(ctx, rt.services.dealfinder, request, DealsFound, DEALS_TIMEOUT)
-
-    # The chat and @yardsale's API search other sites through the Deal Finder agent.
-    rt.finder = DealsClient(sources or {}, ask_deal_finder)
+    # The chat and @yardsale's API search other sites in this process, with the same finder
+    # (and cache) as the Deal Finder agent: the agent's one reply would wait for the slowest
+    # site, and the finder answers by its deadline and sends slower sites' deals later.
+    rt.finder = deal_finder
 
     market.include(market_proto)
     market.include(market_buyer)

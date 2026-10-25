@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -115,6 +117,27 @@ async def test_a_slow_search_answers_running_then_done(store: Store, ebay: Site)
             client_wait += 1
         assert later["status"] == "done" and later["count"] == 1
         assert ebay.calls == ["road bike"]  # the second call joined the first search
+
+
+async def test_a_slow_site_is_pending_not_running(store: Store, ebay: Site) -> None:
+    """With per-site deadlines the API answers done with what's in, naming the slow sites,
+    and the next call picks up what came in since without searching again."""
+    craigslist = Site([deal("Trek road bike 54cm", 18000)], delay=1.0)
+    async for client in api_over(store, {"ebay": ebay, "craigslist": craigslist}, 5.0):
+        bureau_server.runtime().finder.within = 0.2
+        started = time.monotonic()
+        status, first = await client.call("GET", "/other-sites", q="road bike", max_usd=300)
+        assert time.monotonic() - started < 0.8
+        assert status == 200 and first["status"] == "done"
+        assert first["searched"] == ["eBay"] and first["pending"] == ["Craigslist"]
+        assert [x["title"] for x in first["listings"]] == ["Giant road bike"]
+        assert "Craigslist still searching" in first["summary"]
+        assert "call searchOtherSites again" in first["next_step"]
+        await asyncio.sleep(1.0)
+        status, later = await client.call("GET", "/other-sites", q="road bike", max_usd=300)
+        assert later["pending"] == [] and later["searched"] == ["eBay", "Craigslist"]
+        assert later["listings"][0]["title"] == "Trek road bike 54cm"
+    assert ebay.calls == ["road bike"] and craigslist.calls == ["road bike"]
 
 
 async def test_off_without_sources(store: Store, caplog: pytest.LogCaptureFixture) -> None:

@@ -1,5 +1,6 @@
-"""The Deal Finder agent: the Market's FindDeals -> DealsFound round trip, the message
-conversions, and the Market-side client. Sources and comps are fakes; nothing is paid."""
+"""The Deal Finder agent: an agent's FindDeals -> DealsFound round trip, the message
+conversions, and the finder the agent shares with the chat and the API. Sources and comps are
+fakes; nothing is paid."""
 
 from __future__ import annotations
 
@@ -10,13 +11,11 @@ import pytest
 from tests import fakes, sim
 from tests.helpers import Peer
 from tests.test_chat_elsewhere import Site, deal, down
-from yardsale import bureau_server, dealfinder
-from yardsale.common import PipelineError
-from yardsale.dealfinder import DealsClient, deals_found, found_from
+from yardsale import bureau_server
+from yardsale.dealfinder import deals_found, found_from
 from yardsale.deals import MarketPrice, ScoredDeal
 from yardsale.elsewhere import DealFinder, Found
 from yardsale.models import DealsFound, FindDeals, ServiceError
-from yardsale.sources import SourceError
 from yardsale.store import Store
 
 
@@ -103,34 +102,20 @@ def test_messages_carry_everything_the_finder_found() -> None:
     assert without.market is None and without.deals == ()
 
 
-async def test_the_client_asks_the_agent_once_per_search_and_reports_failures() -> None:
-    asked: list[FindDeals] = []
-
-    async def ask(request: FindDeals) -> DealsFound:
-        asked.append(request)
-        if request.query == "zebra bike":
-            raise PipelineError("A Yardsale agent didn't answer within 240s.")
-        return DealsFound(
-            request_id=request.request_id,
-            query=request.query,
-            max_cents=request.max_cents,
-            deals=[],
-            searched=["ebay"],
-            failed=[],
-            considered=0,
-        )
-
-    client = DealsClient({"ebay": down}, ask)
-    assert isinstance(client, DealFinder) and client.enabled
-    found = await client.find("find me a road bike", 30000, "94103")
-    again = await client.find("road bike please", 30000, "94103")
-    assert found is again and len(asked) == 1
-    assert asked[0].query == "road bike" and asked[0].max_cents == 30000 and asked[0].zip == "94103"
-    assert found.searched == ("ebay",)
-
-    with pytest.raises(SourceError, match="didn't answer"):
-        await client.find("zebra bike", None)
-    with pytest.raises(SourceError):  # not cached: tried again next time
-        await client.find("zebra bike", None)
-    assert len(asked) == 3
-    assert dealfinder.DEALS_TIMEOUT >= 180  # Apify actors can take minutes
+async def test_the_market_searches_in_process_with_the_agents_finder(
+    store: Store, sources: dict[str, Site]
+) -> None:
+    """The chat and the API don't wait on the agent's one reply; they share its finder, so a
+    search the agent ran is a cache hit for the chat, and the other way round."""
+    async with sim.running_market(store, sources=sources):
+        rt = bureau_server.runtime()
+        assert isinstance(rt.finder, DealFinder)
+        buyer = Peer("buyer", DealsFound, ServiceError)
+        try:
+            request = FindDeals(request_id="r4", query="road bike", max_cents=30000)
+            await buyer.ask(rt.services.dealfinder, request, DealsFound)
+        finally:
+            await sim.stop([buyer.agent])
+        found = await rt.finder.find("bike road", 30000)  # the same words, in another order
+    assert found.searched == ("ebay", "craigslist")
+    assert sources["ebay"].calls == ["road bike"]  # one paid search for both

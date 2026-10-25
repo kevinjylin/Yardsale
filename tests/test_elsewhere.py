@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import pytest
 
 from tests import fakes
-from yardsale.elsewhere import DealFinder, best, search_words
+from yardsale.elsewhere import COMPS_LATE, FAILED_CACHE_FOR, DealFinder, best, search_words
 from yardsale.models import Comp
 from yardsale.researcher import ResearchError
 from yardsale.sources import ExternalListing, Source, SourceError
@@ -163,17 +164,23 @@ async def test_a_running_search_is_joined_not_repeated() -> None:
     assert len(site.calls) == 1
 
 
-async def test_a_failing_site_is_reported_and_retried_next_time() -> None:
+async def test_a_failing_site_is_reported_and_retried_after_a_minute() -> None:
     good = FakeSite([listing("road bike", 20000)])
     down = FakeSite([], fail=True)
     finder = DealFinder({"ebay": good, "offerup": down})
     found = await finder.find("road bike", None)
     assert found.failed == ("offerup",) and len(found.listings) == 1
+    assert (await finder.find("road bike", None)) is found  # failed once, not asked again
+    assert len(down.calls) == 1
 
-    alone = DealFinder({"offerup": down})
+    clock = Clock()
+    alone = DealFinder({"offerup": down}, clock=clock)
     assert (await alone.find("road bike", None)).searched == ()
-    await alone.find("road bike", None)  # nothing answered, so it isn't cached
-    assert len(down.calls) == 3  # once with the good site, twice alone
+    await alone.find("road bike", None)  # asked again at once: the same failed search
+    assert len(down.calls) == 2
+    clock.now += FAILED_CACHE_FOR + 1  # nothing answered, so it's tried again a minute later
+    await alone.find("road bike", None)
+    assert len(down.calls) == 3
 
 
 async def test_off_without_sources_and_needs_words() -> None:
@@ -238,13 +245,107 @@ async def test_without_comps_or_when_they_fail_the_search_still_answers() -> Non
     assert [x.title for x in plain.listings] == ["Trek road bike", "Giant road bike"]
 
     down = FakeComps([], fail=True)
-    finder = DealFinder({"craigslist": site}, comps=down)
+    clock = Clock()
+    finder = DealFinder({"craigslist": site}, comps=down, clock=clock)
     failed = await finder.find("road bike", None)
     assert failed.market is None and failed.comps_note == "the eBay sold-listings search failed"
     assert len(failed.deals) == 2
-    await finder.find("road bike", 25000)  # a failed comps search is tried again
+    await finder.find("road bike", 25000)  # another search at once: not a second paid try
+    assert len(down.calls) == 1
+    clock.now += FAILED_CACHE_FOR + 1  # a failed comps search is tried again a minute later
+    await finder.find("road bike", 20000)
     assert len(down.calls) == 2
 
     nothing = FakeComps([])
     none = await DealFinder({"craigslist": site}, comps=nothing).find("road bike", None)
     assert none.market is None and none.comps_note == "no recent eBay sales matched the search"
+
+
+# --- Deadlines: slow sites never hold up the answer ---------------------------------------------
+
+
+class SlowSite(FakeSite):
+    """A source that takes `seconds` to answer, as a live Apify run does."""
+
+    def __init__(self, listings: list[ExternalListing], seconds: float) -> None:
+        super().__init__(listings)
+        self.seconds = seconds
+
+    async def __call__(self, query: str, where: str, limit: int) -> list[ExternalListing]:
+        self.calls.append((query, where, limit))
+        await asyncio.sleep(self.seconds)
+        return self.listings
+
+
+async def test_a_fast_site_answers_by_the_deadline_and_a_slow_one_is_pending() -> None:
+    fast = SlowSite([listing("road bike on offerup", 15000, "offerup")], 2.0)
+    slow = SlowSite([listing("road bike on facebook", 12000, "facebook")], 30.0)
+    finder = DealFinder({"offerup": fast, "facebook": slow}, within=2.5, limit=4.0)
+    started = time.monotonic()
+    running = finder.search("road bike", 30000)
+    early = await running.early()
+    took = time.monotonic() - started
+    assert 2.0 <= took < 3.0  # the 2 s site's results, not the 30 s site's
+    assert [x.title for x in early.listings] == ["road bike on offerup"]
+    assert early.searched == ("offerup",) and early.pending == ("facebook",)
+    assert early.failed == () and not running.done()
+    assert (await running.early()) is early  # asking again: the same answer, at once
+
+    final = await running.complete()  # the slow site gives up at the 4 s limit
+    assert final.pending == () and final.failed == ("facebook",)
+    assert time.monotonic() - started < 5.0
+    assert len(slow.calls) == 1
+
+
+async def test_everything_in_before_the_deadline_answers_at_once() -> None:
+    fast = SlowSite([listing("road bike", 15000)], 0.05)
+    finder = DealFinder({"craigslist": fast, "ebay": FakeSite([])}, within=5.0)
+    started = time.monotonic()
+    running = finder.search("road bike", None)
+    early = await running.early()
+    assert time.monotonic() - started < 1.0  # no waiting for the deadline
+    assert early is await running.complete() and early.pending == ()
+
+
+async def test_late_comps_score_without_them_then_with_them() -> None:
+    async def slow_comps(query: str, condition: str, max_results: int) -> list[Comp]:
+        await asyncio.sleep(0.5)
+        return fakes.road_bike_comps()
+
+    site = FakeSite([listing("Trek road bike", 18000)])
+    finder = DealFinder({"craigslist": site}, comps=slow_comps, within=0.1)
+    running = finder.search("road bike", 30000)
+    early = await running.early()
+    assert early.market is None and early.comps_late and early.comps_note == COMPS_LATE
+    assert early.pending == () and len(early.deals) == 1
+    assert early.deals[0].versus_market_pct is None  # not compared with recent sales
+    final = await running.complete()
+    assert final.market is not None and not final.comps_late
+    assert final.deals[0].versus_market_pct == 42
+
+
+async def test_a_failed_site_is_asked_once_per_search_even_while_others_run() -> None:
+    down = FakeSite([], fail=True)
+    slow = SlowSite([listing("road bike", 15000)], 0.3)
+    finder = DealFinder({"offerup": down, "ebay": slow}, within=0.05)
+    running = finder.search("road bike", None)
+    early = await running.early()
+    assert early.failed == ("offerup",) and early.pending == ("ebay",)
+    again = finder.search("bike road", None)  # the same words: joined, not started again
+    assert again is running
+    final = await again.complete()
+    assert final.failed == ("offerup",) and final.searched == ("ebay",)
+    assert len(down.calls) == 1 and len(slow.calls) == 1
+
+
+async def test_a_cache_hit_skips_every_source_and_answers_at_once() -> None:
+    site = SlowSite([listing("road bike", 15000)], 0.2)
+    comps = FakeComps(fakes.road_bike_comps())
+    finder = DealFinder({"craigslist": site}, comps=comps)
+    first = await finder.find("find me a Road Bikes", 30000)
+    started = time.monotonic()
+    again = finder.search("bike road", 30000)  # normalized: case, plurals, order, filler
+    assert again.ready()
+    assert (await again.early()) is first
+    assert time.monotonic() - started < 0.05
+    assert len(site.calls) == 1 and len(comps.calls) == 1
