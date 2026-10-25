@@ -73,7 +73,6 @@ async def test_typed_prices_and_notes_are_read(asi_one: tuple[list[Any], list[An
         "note",
         "query",
         "budget_usd",
-        "haggle",
     }
 
 

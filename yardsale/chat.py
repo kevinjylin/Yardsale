@@ -13,7 +13,10 @@ means; the seller names items by number instead: "lowest 2 $40", "ask 3 $60", "a
 "approve all", "cancel 2". With several proposals waiting, a plain "approve" asks which.
 
 Buying: the buyer says what they want ("find me a cheap road bike"). They can say their max and
-"haggle", and Yardsale's buyer agent (shopper.py) haggles with every matching item agent at once;
+The chat searches Yardsale's listings and other sites (elsewhere.py) and shows prices and links.
+Shopping words ("best deal", "best price", "get me a good deal") are a search, never a haggle.
+Haggling is opt-in: after a search, "haggle with the seller on 1, max $300" has Yardsale's buyer
+agent (shopper.py) haggle with that item's agent (or every result's, "haggle with the sellers");
 the reply shows every round and the best price. Or they pick a result by number and make offers
 themselves ("offer $250"). Item agents agree to an offer or counter it. "accept" (or "accept 2")
 buys at that price. Buyers never see a floor price, and sellers never see a buyer's max.
@@ -231,9 +234,14 @@ HELP = (
     'sales, and suggest a listing for you to approve. You can add your own price, like "at '
     f'least $40". Moving out? Attach up to {MAX_PHOTOS} photos at once, one item each. Say '
     '"connect ebay" to also list on your own eBay account.\n'
-    "To buy: tell me what you're looking for and your max, like \"find me a road bike, haggle "
-    "for me, max $250\". My buyer agent haggles with every matching seller's agent at once and "
-    "shows you the best price. You can also make your own offers."
+    "To buy: tell me what you're looking for and your max, like \"find me Jordan 4s under "
+    "$200\". I'll search Yardsale and other marketplaces and send the best listings with "
+    'their prices and links. (To have my agent haggle with a Yardsale seller, say "haggle with '
+    'the seller on 1" after a search.)'
+)
+HAGGLE_FIRST = (
+    'Haggling is only for Yardsale listings, so search first, like "find me a road bike under '
+    '$300". Then say "haggle with the seller on 1" and my agent will negotiate for you.'
 )
 NEEDS_PHOTO = "Attach a photo of the item and I'll price it from recent eBay sales."
 PHOTO_MISSING = (
@@ -780,9 +788,9 @@ def results_text(found: list[Listing], query: str, owner: str) -> str:
         yours = " (yours)" if listing.owner == owner else ""
         lines.append(f"{n}. {listing.title}: {usd(listing.asking_cents)}{condition}{yours}")
     lines.append(
-        'Say "haggle" with your max (like "haggle $250") and my buyer agent will negotiate with '
-        'all of them at once. Or reply with a number for details, or offer yourself: "offer $X on '
-        '1".'
+        'Reply with a number for details, or buy one at its price with "offer $X on 1". (To '
+        'have my agent haggle with a Yardsale seller instead, say "haggle with the seller on '
+        '1, max $X".)'
     )
     return "\n".join(lines)
 
@@ -801,8 +809,8 @@ def details_text(listing: Listing, mine: bool) -> str:
     lines.append(
         "This is your own listing."
         if mine
-        else 'Make an offer like "offer $X", say "haggle" with your max, or buy it now with '
-        f'"offer {usd(listing.asking_cents)}".'
+        else f'Buy it at its price with "offer {usd(listing.asking_cents)}", or make a lower '
+        'offer. (To have my agent haggle with the seller, say "haggle with the seller, max $X".)'
     )
     return "\n".join(lines)
 
@@ -1824,6 +1832,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     def find(conv: Conversation, query: str, budget_cents: int | None) -> str | Reply:
         found = search(for_sale(conv), query, budget_cents)
+        if conv.awaiting in ("max", "counter"):
+            # A new search ends the haggle: a bare "$300" is now this search's budget, and
+            # prose like "proceed with the purchase" can't take an old price.
+            conv.awaiting = None
         conv.budget = budget_cents or conv.budget
         conv.results = [listing.item_id for listing in found]
         conv.selected = found[0].item_id if len(found) == 1 else None
@@ -1975,7 +1987,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 return (
                     f"Pick a number from 1 to {len(conv.results)}."
                     if conv.results
-                    else ('There\'s nothing to accept yet. Make an offer, or say "haggle".')
+                    else (
+                        "There's nothing to accept yet. Tell me what you're looking for, like "
+                        '"find me a road bike under $300".'
+                    )
                 )
             item_id = conv.results[pick - 1]
             if item_id not in conv.quotes:
@@ -1986,16 +2001,18 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     # --- Haggling for the buyer -------------------------------------------------------------
 
-    def haggle_targets(conv: Conversation, query: str, max_cents: int) -> list[Listing]:
+    # Opt-in only: handle_text calls these for an explicit "haggle with the seller on 1" after a
+    # search, never for shopping words like "best deal".
+
+    def haggle_targets(conv: Conversation, max_cents: int, every: bool) -> list[Listing]:
+        """The item the buyer named or picked, or every result of the last search."""
         reach = max_cents * LOWEST_SHARE_REACH[0] // LOWEST_SHARE_REACH[1]
-        if query:
-            found = search(for_sale(conv), query, reach)
-        else:
-            found = [
-                listing
-                for item_id in conv.results
-                if (listing := store.get(item_id)) is not None and listing.status == ACTIVE
-            ]
+        item_ids = [conv.selected] if conv.selected and not every else conv.results
+        found = [
+            listing
+            for item_id in item_ids
+            if (listing := store.get(item_id)) is not None and listing.status == ACTIVE
+        ]
         return [
             listing
             for listing in found
@@ -2003,36 +2020,29 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         ]
 
     async def haggle(
-        ctx: Context, conv: Conversation, max_cents: int | None, query: str
+        ctx: Context,
+        conv: Conversation,
+        max_cents: int | None,
+        pick: int | None = None,
+        every: bool = False,
     ) -> str | Reply:
+        if not conv.results:
+            return HAGGLE_FIRST
+        if pick is not None:
+            if not 1 <= pick <= len(conv.results):
+                return f"Pick a number from 1 to {len(conv.results)}."
+            conv.selected = conv.results[pick - 1]
         if max_cents is None:
             max_cents = conv.budget
-        if query:
-            found = [listing.item_id for listing in search(for_sale(conv), query)]
-            if found or not conv.results:
-                conv.results = found
-            else:
-                query = ""  # the words matched nothing new: haggle over the last results
-
         if max_cents is None:
-            if not conv.results:
-                return (
-                    'What are you looking for? Like "find me a road bike, haggle for me, max $300".'
-                )
             conv.awaiting = "max"
             return ASK_MAX
         conv.budget = max_cents
-        conv.last_query = search_words(query) or conv.last_query
-        targets = haggle_targets(conv, query, max_cents)
-        if not targets and finder.enabled and search_words(query):
-            return look_elsewhere(
-                conv, query, max_cents, "Nothing on Yardsale is close enough to haggle over"
-            )
+        targets = haggle_targets(conv, max_cents, every)
         if not targets:
-            about = f' for "{query}"' if query else ""
             return (
-                f"Nothing for sale{about} is close enough to {usd(max_cents)} to haggle over. "
-                "Try a higher max, or other words."
+                f"Nothing here is close enough to {usd(max_cents)} to haggle over. Try a higher "
+                "max, or search for something else."
             )
         result = await backend.haggle(ctx, conv.key, max_cents, targets)
         conv.results = [outcome.item_id for outcome in result.outcomes]
@@ -2329,6 +2339,18 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         proposal = pending[0] if pending else None
         waiting = numbered_waiting(conv)
         selling = proposal is not None or conv.unpriced is not None or bool(waiting)
+        if (
+            command is not None
+            and kind in ("approve", "accept", "cancel")
+            and command.pick is None
+            and not command.picks
+            and not command.every
+            and not selling
+            and commands.shopping(text)
+        ):
+            # "sure, find me Jordans under $200" or "ok, the best price on a bike" is a search,
+            # not a yes to a price on offer.
+            command, kind = None, None
 
         if command is not None and kind in (
             "ebay_connect",
@@ -2359,11 +2381,22 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if command is not None and kind == "offer" and command.amount_cents is not None:
             if selling and not conv.results:
                 return f'Did you mean "ask {usd(command.amount_cents)}" for your listing?'
+            if not conv.results:
+                # "I'd pay $200 for Jordans" with nothing found yet: a search, with that budget.
+                wanted = await read(text, False)
+                if wanted.intent == "buy" and wanted.query:
+                    budget = to_cents(wanted.budget_usd) or command.amount_cents
+                    return find(conv, wanted.query, budget)
             return await make_offer(ctx, conv, command.amount_cents, command.pick)
-        if command is not None and kind == "haggle" and not (selling and not conv.results):
-            wanted = await read(command.text or text, False)
-            limit = command.amount_cents or to_cents(wanted.budget_usd)
-            return await haggle(ctx, conv, limit, wanted.query)
+        # Haggling only on an explicit request ("haggle with the seller on 1"), and only over
+        # Yardsale results this conversation already has.
+        if command is not None and kind == "haggle" and conv.results:
+            return await haggle(ctx, conv, command.amount_cents, command.pick, command.every)
+        if command is not None and kind == "haggle" and not selling:
+            wanted = await read(text, False)
+            if wanted.intent == "buy" and wanted.query:
+                return find(conv, wanted.query, to_cents(wanted.budget_usd))
+            return HAGGLE_FIRST
         if command is not None and kind == "accept" and command.pick is not None:
             return await accept_typed(ctx, conv, command.pick)
         if kind == "accept" or (kind == "approve" and conv.awaiting == "counter"):
@@ -2371,7 +2404,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 return await accept_typed(ctx, conv, None)
             if proposal is not None:
                 return await approve(ctx, conv, proposal)
-            return "There's no counter-offer to accept. Make an offer first."
+            return (
+                "There's no counter-offer to accept. Tell me what you're looking for, like "
+                '"find me a road bike under $300".'
+            )
         if kind == "approve":
             if proposal is not None:
                 return await approve(ctx, conv, proposal)
@@ -2379,8 +2415,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 return craigslist_post(conv, None)  # "yes" to the Craigslist offer
             if conv.unpriced is not None:
                 return 'Tell me your price first, like "ask $40".'
-            if conv.counter is not None:
-                return await accept_typed(ctx, conv, None)
+            # A "yes" buys only right after a price was offered (awaiting "counter", above); a
+            # stale counter-offer from before a new search isn't taken by an "ok".
             return "There's nothing waiting for approval. Attach a photo of something to sell."
         not_now = _NOT_NOW.match(text.strip().lower()) is not None
         if (kind == "cancel" or not_now) and proposal is None and conv.awaiting == "craigslist":
@@ -2417,13 +2453,22 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return pick(conv, command.pick)
         if kind == "help":
             return HELP
-        if command is not None and kind == "amount" and command.amount_cents is not None:
+        if (
+            command is not None
+            and kind in ("amount", "budget")
+            and command.amount_cents is not None
+        ):
             amount = usd(command.amount_cents)
-            if conv.awaiting == "max" and conv.results:
-                return await haggle(ctx, conv, command.amount_cents, "")
-            if selling:
+            if conv.awaiting == "max" and conv.results:  # the max an explicit haggle asked for
+                return await haggle(ctx, conv, command.amount_cents)
+            if selling and kind == "amount":
                 return f'Did you mean "ask {amount}" or "lowest {amount}"?'
-            if conv.results:
+            if conv.awaiting == "counter" and kind == "amount":
+                return f'Did you mean "offer {amount}"?'
+            if conv.last_query and not selling:
+                # "$300" or "max $300" after a search: that search again, under this budget.
+                return find(conv, conv.last_query, command.amount_cents)
+            if conv.results and kind == "amount":
                 return f'Did you mean "offer {amount}"?'
 
         # ASI:One's planner relays "accept" as prose. Take it only while a price is waiting, and
@@ -2438,9 +2483,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
         # Not a command, or not one that fits this conversation: ASI:One reads it.
         wanted = await read(text, False)
-        if wanted.intent == "buy" and wanted.haggle:
-            return await haggle(ctx, conv, to_cents(wanted.budget_usd), wanted.query)
-        if wanted.intent == "buy":
+        if wanted.intent == "buy":  # always a search; haggling is only ever an explicit command
             return find(conv, wanted.query, to_cents(wanted.budget_usd))
         if wanted.intent == "sell":
             asking, floor = to_cents(wanted.asking_usd), to_cents(wanted.floor_usd)

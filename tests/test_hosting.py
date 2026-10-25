@@ -369,7 +369,9 @@ async def test_approved_items_are_hosted_and_sold_through_the_chat(store: Store)
             assert {listing.host for listing in store.active()} == {AGENTVERSE, BUREAU}
 
             # The buyer agent haggles with both, the hosted one included.
-            haggled = await market.user("haggler").say("haggle for a hybrid bike, max $340")
+            haggler = market.user("haggler")
+            await haggler.say("find me a hybrid bike")
+            haggled = await haggler.say("haggle with the sellers, max $340")
             assert "haggled with 2 seller agent(s)" in haggled
             assert "didn't answer" not in haggled
 
