@@ -182,6 +182,7 @@ class ListPhoto(Model):
     note: str = ""  # optional seller hint, e.g. "size M, barely used"
     asking_cents: int | None = None  # seller overrides; None means use the appraisal
     floor_cents: int | None = None
+    zip_code: str = ""  # where the seller is, for local asking prices; "" means the server's
 
 
 class Proposed(Model):
@@ -315,6 +316,72 @@ class Appraisal(Model):
 class ServiceError(Model):
     request_id: str
     reason: str
+
+
+# --- The Market Scout: what similar items are listed for right now ----------------------------
+# The Researcher finds what sold; the Scout finds what competitors are asking today on Craigslist,
+# OfferUp, Facebook Marketplace, and eBay (through Apify actors, sources.py). Asking prices only:
+# nothing here is a sale, so they never set the price on their own (pricing.market_view).
+
+
+class ScoutRequest(Model):
+    """Market -> Scout: look up live asking prices for this product."""
+
+    request_id: str
+    query: str
+    zip_code: str = ""  # scopes the local sites; "" means each source's default
+    max_results: int = 20  # asked of each source
+
+
+class ScoutListing(Model):
+    """One live listing, as the seller sees it: the price and a link, nothing private."""
+
+    source: str  # craigslist | offerup | facebook | ebay
+    title: str
+    price_cents: int
+    url: str
+    location: str = ""
+
+
+class SourcePrices(Model):
+    """Asking prices on one site for listings that look like the same kind of item."""
+
+    source: str
+    count: int
+    low_cents: int  # lower quartile (the lowest listing with fewer than 4)
+    median_cents: int
+    high_cents: int  # upper quartile (the highest listing with fewer than 4)
+    closest: list[ScoutListing]  # up to 3, nearest the median
+    prices_cents: list[int]  # every kept listing's price, so the Market can pool sites
+
+
+class ScoutReport(Model):
+    """Scout -> Market. A site that couldn't be searched is named in `failed`; a report with no
+    sources at all is still a report, so a Scout failure never blocks a proposal."""
+
+    request_id: str
+    query: str
+    sources: list[SourcePrices]
+    failed: list[str]
+
+
+class MarketView(Model):
+    """What the item is worth, from both sides: what it sold for (the Researcher's eBay sales, as
+    the Appraiser matched them) and what competitors are asking right now (the Scout). Worked out
+    in code (pricing.market_view). Nothing here is a floor, so all of it can be shown to buyers."""
+
+    sold_count: int
+    sold_median_cents: int | None  # the appraisal's asking suggestion (rounded median)
+    sold_low_cents: int | None  # the sales' quartiles
+    sold_high_cents: int | None
+    asking_count: int  # live listings across every site the Scout searched
+    asking_median_cents: int | None
+    asking_low_cents: int | None  # quartiles of the live asking prices
+    asking_high_cents: int | None
+    range_low_cents: int | None  # the suggested asking range
+    range_high_cents: int | None
+    sources: list[SourcePrices]
+    line: str = ""  # one sentence of market evidence for haggling and listings; never a floor
 
 
 class Appraised(Model):

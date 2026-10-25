@@ -89,6 +89,10 @@ SERVICE_PROMPTS = {
         "A friendly robot carrying a shopping bag, shaking hands over a blank price tag, as if "
         "it just haggled a good deal."
     ),
+    "scout": (
+        "A friendly robot with binoculars looking out over a row of neighborhood yard sale "
+        "tables, each with a blank price tag, as if comparing their prices."
+    ),
     "yardsale": (
         "A brand mark for a secondhand marketplace: a paper price tag shaped like a little "
         "house, with a string loop at the top and a small heart in its window."
@@ -102,6 +106,7 @@ SERVICE_NAMES = {
     "researcher": "yardsale-researcher",
     "appraiser": "yardsale-appraiser",
     "shopper": "yardsale-shopper",
+    "scout": "yardsale-scout",
 }
 
 # prompt -> the picture's bytes, as ASI:One returns them
