@@ -6,8 +6,8 @@
 
 The Market takes listings three ways:
 
-- ChatMessage: a seller in the ASI:One chat attaches a photo (see chat.py). Buyers search and
-  haggle in the same chat.
+- ChatMessage: a seller in the ASI:One chat attaches a photo (see chat.py). Buyers search
+  Yardsale and other sites in the same chat, and haggle only when they ask to.
 - ListPhoto: a photo from another agent, such as the sell command. The Market answers with
   Proposed. ApproveListing makes it live; CancelListing drops it.
 - ListItem: a title and the seller's own prices. Nothing is suggested, so it goes live at once.
@@ -1021,9 +1021,10 @@ async def handle_accept(ctx: Context, sender: str, msg: AcceptCounter) -> None:
 
 
 MARKET_DESCRIPTION = (  # Agentverse shows up to 300 characters
-    "Sell your used stuff from a photo, or buy secondhand for less. Send a picture: Yardsale "
-    "prices it from real eBay sales and gives it its own agent that haggles for you. Shopping? "
-    "Say what you want and your max; an agent haggles with every seller at once. Pay by link."
+    "Find the best deals on used stuff, or sell yours from a photo. Shopping? Say what you want "
+    "and your max: Yardsale compares real listings on Yardsale, eBay, Craigslist, OfferUp and "
+    "Facebook and sends prices and links. Selling? Send a picture; it's priced from real eBay "
+    "sales."
 )
 
 
