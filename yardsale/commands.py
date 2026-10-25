@@ -48,6 +48,7 @@ Kind = Literal[
     "watch",
     "watches",
     "unwatch",
+    "meetup",
 ]
 
 # $1,250.50 or 1250 or 40.5, not part of a longer number such as 40.999
@@ -260,6 +261,19 @@ _UNWATCH = re.compile(
     r"(?:watch(?:es)?|alerts?|saved\s+search(?:es)?))|unwatch)\b(?:\s+(?:for\s+)?(?:the\s+)?"
     + _PICK
     + r"\b)?"
+)
+# Where to hand an item over on campus: "where should we meet", "meetup spot", "where do I pick
+# it up". Not "meet me halfway" or "meet my price", which are haggling.
+_MEETUP = re.compile(
+    r"\b(?:where\s+(?:should|do|can|could|will|would)\s+(?:we|i|you|they)\s+meet|"
+    r"where\s+(?:to|do\s+we|should\s+we|can\s+we)\s+(?:meet|pick\s+(?:it|this|that)\s+up|"
+    r"hand\s+(?:it|this|that)\s+over|do\s+the\s+hand\s*off)|"
+    r"where\s+(?:do|can|should|could)\s+i\s+(?:pick|get|grab|collect)\s+(?:it|this|that)(?:\s+up)?|"
+    r"meet(?:ing)?[\s-]*(?:up|spot|place|point|location|area)s?|meetups?|"
+    r"(?:pick\s*up|hand\s*off|handover|exchange)\s+(?:spot|place|point|location)s?|"
+    r"(?:a\s+)?(?:spot|place|somewhere|location)\s+(?:to\s+meet|on\s+campus\s+to\s+meet|"
+    r"for\s+(?:the\s+)?(?:pick\s*up|hand\s*off|handover|exchange|meet(?:ing|up)?))|"
+    r"where\s+on\s+campus)\b"
 )
 _NOT_ACCEPTING = re.compile(
     r"\b(?:not|don'?t|doesn'?t|won'?t|never|decline[sd]?|reject(?:s|ed)?|cancel(?:s|led)?|"
@@ -517,6 +531,8 @@ def parse(text: str) -> Command | None:
     if ebay is not None:
         pick = next((g for g in ebay.groups() if g), None)
         return Command("ebay_list", pick=int(pick) if pick else None)
+    if _MEETUP.search(lowered):
+        return Command("meetup")
     other_sites = _other_sites(text, lowered)
     if other_sites is not None:
         return other_sites

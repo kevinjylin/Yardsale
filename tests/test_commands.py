@@ -192,3 +192,27 @@ def test_a_budget_alone_is_not_an_offer() -> None:
 )
 def test_shopping_prose_never_accepts(text: str) -> None:
     assert not accepts_deal(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "where should we meet?",
+        "Where do we meet",
+        "where can I pick it up",
+        "meetup spot",
+        "meeting place?",
+        "location for meetup on campus",
+        "is there a spot to meet on campus",
+        "where on campus",
+        "pickup location",
+    ],
+)
+def test_asking_where_to_meet_is_a_command(text: str) -> None:
+    assert parse(text) == Command("meetup")
+
+
+@pytest.mark.parametrize("text", ["meet me halfway", "can you meet my price", "offer $250"])
+def test_haggling_talk_is_not_a_meetup(text: str) -> None:
+    found = parse(text)
+    assert found is None or found.kind != "meetup"
