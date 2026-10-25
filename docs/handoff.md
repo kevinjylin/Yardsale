@@ -86,7 +86,8 @@ If the server starts with **different** addresses, the master seed is wrong (see
    Optional: `YARDSALE_HOST_ITEMS=2` (item agents get their own Agentverse profile page; creates and
    deletes real agents), `YARDSALE_FACEBOOK=1` (Facebook Marketplace in the deal finder; costs the most
    per search), `YARDSALE_ZIP` (local asking prices). Leave `YARDSALE_CAMPUS` unset: it turns on
-   Rahul's student-only flow, which blocks unverified users from listing or searching.
+   the student-only flow, which blocks anyone who hasn't given a school email from listing
+   or searching.
 
 3. **The master seed.** It isn't in `.env` on the machine that created it; it's the file
    `.agent-data/yardsale-bureau/master_seed`. Put its contents in `.env` as `YARDSALE_MASTER_SEED=...`.

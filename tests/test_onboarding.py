@@ -165,3 +165,49 @@ def test_a_map_link_works_without_a_google_key(db: Store) -> None:
     assert not maps.located(SPROUL)
     link = maps.map_url(SPROUL, "Berkeley")
     assert link.startswith("https://") and "Sproul" in link.replace("%20", " ").replace("+", " ")
+
+
+# --- The same-school gate, through the chat's own seam ---------------------------------------
+
+
+def listing_at(owner: str, item_id: str) -> object:
+    from yardsale.store import PROPOSED, Listing
+
+    return Listing(
+        item_id=item_id,
+        owner=owner,
+        seller_id="payout",
+        listing_ref=item_id,
+        status=PROPOSED,
+        title="Mini fridge",
+        asking_cents=6000,
+        floor_cents=4000,
+    )
+
+
+def test_the_gate_filters_search_to_one_school(db: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every search path in chat.py goes through one helper, so this is what they all see."""
+    from yardsale import students
+
+    monkeypatch.setenv("YARDSALE_CAMPUS", "1")
+    onboarding.join(db, "asi1:bear", "sam@berkeley.edu")
+    onboarding.join(db, "asi1:tree", "kim@stanford.edu")
+    onboarding.join(db, "asi1:other", "max@cs.berkeley.edu")
+    everything = [listing_at("asi1:bear", "b"), listing_at("asi1:tree", "t")]
+
+    # a classmate sees the Berkeley item and not the Stanford one
+    seen = students.listings_for(db, everything, "asi1:other")  # type: ignore[arg-type]
+    assert [x.item_id for x in seen] == ["b"]
+    # the Stanford student sees only their own
+    seen = students.listings_for(db, everything, "asi1:tree")  # type: ignore[arg-type]
+    assert [x.item_id for x in seen] == ["t"]
+    # somebody who never gave an email sees nothing
+    assert students.listings_for(db, everything, "asi1:nobody") == []  # type: ignore[arg-type]
+
+
+def test_with_campus_mode_off_nothing_is_filtered(
+    db: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag is the whole difference: off, Yardsale behaves as it always did."""
+    monkeypatch.delenv("YARDSALE_CAMPUS", raising=False)
+    assert not onboarding.campus_mode()

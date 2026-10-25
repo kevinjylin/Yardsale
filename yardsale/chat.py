@@ -1764,8 +1764,20 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     # --- Buying ----------------------------------------------------------------------------
 
+    def for_sale(conv: Conversation) -> list[Listing]:
+        """The listings this conversation may see.
+
+        Everything, normally. In campus mode, only items from classmates at the same school:
+        that's the whole promise, so every search path goes through here rather than each
+        remembering to filter. Someone who hasn't given a school email sees nothing.
+        """
+        listings = backend.available()
+        if not onboarding.campus_mode():
+            return listings
+        return students.listings_for(store, listings, conv.owner)
+
     def find(conv: Conversation, query: str, budget_cents: int | None) -> str | Reply:
-        found = search(backend.available(), query, budget_cents)
+        found = search(for_sale(conv), query, budget_cents)
         conv.budget = budget_cents or conv.budget
         conv.results = [listing.item_id for listing in found]
         conv.selected = found[0].item_id if len(found) == 1 else None
@@ -1923,7 +1935,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     def haggle_targets(conv: Conversation, query: str, max_cents: int) -> list[Listing]:
         reach = max_cents * LOWEST_SHARE_REACH[0] // LOWEST_SHARE_REACH[1]
         if query:
-            found = search(backend.available(), query, reach)
+            found = search(for_sale(conv), query, reach)
         else:
             found = [
                 listing
@@ -1942,7 +1954,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if max_cents is None:
             max_cents = conv.budget
         if query:
-            found = [listing.item_id for listing in search(backend.available(), query)]
+            found = [listing.item_id for listing in search(for_sale(conv), query)]
             if found or not conv.results:
                 conv.results = found
             else:
@@ -2156,7 +2168,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         action, item_id = str(choice.get("action", "")), str(choice.get("item_id", ""))
         if not choice:
             return "OK."
-        # Signing up. Nothing else can happen until a conversation has a verified school.
+        # Signing up. Nothing else can happen until a conversation has a school.
         if action == "student":
             return Reply(onboarding.ASK_FOR_EMAIL, onboarding.email_form())
         if action == "not_student":
@@ -2368,7 +2380,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return PHOTO_MISSING if _MENTIONS_PHOTO.search(text) else NEEDS_PHOTO
         # Neither buying nor selling, as far as the reader can tell. If the words match
         # something for sale ("espresso machine?"), show it anyway.
-        if text and search(backend.available(), text):
+        if text and search(for_sale(conv), text):
             return find(conv, text, None)
         if len(waiting) > 1:
             return waiting_list(conv, waiting, "Waiting for your approval:")

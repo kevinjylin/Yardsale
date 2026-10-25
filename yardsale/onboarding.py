@@ -49,7 +49,7 @@ def campus_mode() -> bool:
     starts by settling which school it is.
 
     Off by default, deliberately. Switching it on changes what every seller and buyer sees, and
-    an unverified conversation can neither list nor search. The flag keeps that a decision
+    a conversation with no school email can neither list nor search. The flag keeps that a decision
     somebody makes rather than a side effect of this code existing.
     """
     return os.getenv("YARDSALE_CAMPUS", "").strip().lower() in ("1", "true", "yes", "on")
