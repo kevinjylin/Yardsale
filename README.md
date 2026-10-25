@@ -183,6 +183,22 @@ Market acknowledges every message at once and replies within 40 seconds: with th
 5. **Pay.** The reply has a payment link (Visa Pay By Link or Stripe, test mode) and a card with
    "I've paid". `paid` checks with the provider; `my orders` lists purchases. The server also
    checks pending payments every minute. Without payment keys, the deal is an agreed price only.
+6. **Nothing on Yardsale?** When a search or haggle finds nothing, the Market searches eBay,
+   Craigslist, and OfferUp once through Apify ([elsewhere.py](yardsale/elsewhere.py)) and lists
+   the best five within the max (price plus shipping): closest match first, parts and
+   accessories last, then cheapest. They're links, marked as not Yardsale listings: no agent
+   haggles for them. `search other sites` (or `check ebay and craigslist`) does the same on
+   request. A slow search gets "searching" first and the deals as a second message. Each search
+   is cached for 10 minutes, so asking again costs nothing.
+7. **Watch for it.** `watch for it` (or `watch for a road bike under $300`) keeps checking those
+   sites every 6 hours for a week ([watches.py](yardsale/watches.py)). New finds are told the
+   next time the buyer says anything; `my watches` shows them, `stop watching 1` stops one.
+
+Each search of other sites runs one Apify actor per site, about $0.03 to $0.05 for 20 results
+each: Craigslist (`logiover/craigslist-scraper`), eBay (`charitable_trousseau/ebay-search-scraper`),
+and OfferUp (`igolaizola/offerup-scraper`, near `YARDSALE_OFFERUP_ZIP`). Facebook Marketplace
+(Apify's own `apify/facebook-marketplace-scraper`, about $0.05 to $0.12 a search) joins with
+`YARDSALE_FACEBOOK=1`. Demo mode searches no other sites.
 
 **The haggling rules** ([haggle.py](yardsale/haggle.py)), the same wherever an item agent runs:
 
@@ -348,6 +364,7 @@ to reach Claude.
 | `GET /haggles/{haggle_id}` | `getHaggle` | The result; waits up to 25 s while it's running |
 | `POST /haggles/{haggle_id}/accept` `{"item_id"?}` | `acceptDeal` | Buys the best price (or the named item's) and returns the payment link |
 | `GET /deals/{deal_id}` | `getDeal` | Whether it's paid |
+| `GET /other-sites?q=&max_usd=` | `searchOtherSites` | When Yardsale has nothing: the best deals on eBay, Craigslist, and OfferUp, as links. Answers within 25 s, or `status: "running"`; the same call again picks up the same search |
 | `GET /openapi.json` | | The OpenAPI 3.0 description Fetch reads; no key needed |
 
 Every call except `/openapi.json` needs the key in `X-Yardsale-Key` (or
@@ -532,6 +549,11 @@ agent can't accept a chat buyer's counter-offer.
   sellers and haggling within the buyer's max.
 - [business_api.py](yardsale/business_api.py): the HTTP API and OpenAPI description that
   `@yardsale` on Fetch Business calls.
+- [sources.py](yardsale/sources.py), [ebay.py](yardsale/ebay.py),
+  [craigslist.py](yardsale/craigslist.py), [offerup.py](yardsale/offerup.py),
+  [facebook.py](yardsale/facebook.py): listings on other sites, through Apify actors.
+  [elsewhere.py](yardsale/elsewhere.py) searches them once for a buyer;
+  [watches.py](yardsale/watches.py) keeps searching them.
 - [config.py](yardsale/config.py): settings, the public endpoint, and the readiness check.
 - [agentverse.py](yardsale/agentverse.py): Agentverse profiles and mailbox connection.
 - [offline.py](yardsale/offline.py): offline mode's local stand-in for the Almanac, and the switch

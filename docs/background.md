@@ -198,6 +198,41 @@ Code: [chat.py](../yardsale/chat.py), [shopper.py](../yardsale/shopper.py),
    provider; the server also checks every minute. Paid deals record the commission and the
    seller's payout, which the seller sees under `my listings`.
 
+## When Yardsale has nothing: other sites
+
+Code: [elsewhere.py](../yardsale/elsewhere.py), on Rahul's [sources.py](../yardsale/sources.py)
+and [watches.py](../yardsale/watches.py). Added October 24; **not yet run with real Apify keys**
+(every test uses fake sources).
+
+Yardsale will rarely have the exact thing a buyer wants, so the buyer product is: Yardsale's own
+listings first (their agents haggle), then the best deals on other sites within the max.
+
+- A chat search or haggle that finds nothing on Yardsale searches every source once, at the
+  same time: eBay, Craigslist, OfferUp, and Facebook Marketplace with `YARDSALE_FACEBOOK=1`.
+  `search other sites`, `check ebay and craigslist`, or `search ebay for a road bike under
+  $300` asks for it directly (always every source, whichever site is named).
+- The reply lists the five best, with links: listings priced at least $1, at or under the max
+  with shipping, sharing at least half the search words; then fewest missing words, titles that
+  look like parts or accessories ("helmet", "for parts") last, then cheapest total. A carousel
+  card shows their photos. The reply says they aren't Yardsale listings, so no agent haggles for
+  them; Craigslist sellers take offers by email.
+- The search runs after the conversation's lock is released. If it takes longer than
+  `REPLY_WITHIN`, the first reply says it's searching and the deals follow as a second message.
+- Each run costs about $0.03 to $0.05 per site, so results are cached 10 minutes per (search
+  words, budget), and a search still running is joined, not started again. A search where no
+  site answered isn't cached. The log has counts only, never the words or the max.
+- `watch for it` turns the last search (or `watch for a road bike under $300`) into a standing
+  search that polls every 6 hours for a week. The Market can't message a chat later, so any
+  reply mentions new finds, and `my watches` shows them (then they count as told). `stop
+  watching 1` stops one. The carousel's "Watch for more" button does the same.
+- `@yardsale` gets the same through `GET /other-sites` (`searchOtherSites`).
+
+OfferUp uses `igolaizola/offerup-scraper` (most used of the OfferUp actors: about 190 users, 5.0
+rating; about $1.40 per 1,000 results), searched around `YARDSALE_OFFERUP_ZIP` (94103 by
+default). Facebook uses Apify's own `apify/facebook-marketplace-scraper` (about 11,700 users;
+$2.60 to $6.20 per 1,000 depending on the plan), which takes a Marketplace search URL; it drops
+the seller's name. Both parse the actors' documented sample output and haven't been run live.
+
 ## Buying through `@yardsale` (Fetch Business)
 
 Code: [business_api.py](../yardsale/business_api.py).
@@ -214,6 +249,10 @@ uses the same Market backend as the chat:
 - `POST /haggles/{haggle_id}/accept` buys the best price (or a named item's) and returns the
   payment link.
 - `GET /deals/{deal_id}` says whether it's paid.
+- `GET /other-sites?q=&max_usd=` returns the best deals on other sites, for when Yardsale has
+  none. It answers within 25 seconds, or with `status: "running"`; the same call again joins
+  the same search. `GET /listings` points to it when nothing matches. Its tool needs adding to
+  `@yardsale`'s Business Tool (re-import the description) and skill.
 - `GET /openapi.json` is the description Fetch reads. It needs no key; everything else needs
   the key in `X-Yardsale-Key` (or `Authorization: Bearer`).
 

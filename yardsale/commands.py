@@ -37,6 +37,10 @@ Kind = Literal[
     "ebay_list",
     "ebay_end",
     "craigslist_end",
+    "elsewhere",
+    "watch",
+    "watches",
+    "unwatch",
 ]
 
 # $1,250.50 or 1250 or 40.5, not part of a longer number such as 40.999
@@ -183,6 +187,36 @@ _LEADING_PICK = re.compile(
 _TRAILING_PICK = re.compile(
     r"\s+(?:on|for)\s+(?:the\s+)?(?:#|item\s*|number\s*|no\.?\s*|photo\s*)?(\d{1,2})$"
 )
+# Other sites: search them once now (elsewhere.py), or keep watching them (watches.py).
+_SITES = r"(?:ebay|craigslist|offer\s?up|facebook(?:\s+marketplace)?|fb\s+marketplace)"
+_OTHER_SITES = re.compile(
+    r"\b(?:other|more|different)\s+(?:sites?|websites?|places|marketplaces?|apps?)\b|"
+    r"\belsewhere\b|\banywhere\s+else\b"
+)
+_SEARCH_SITES = re.compile(
+    r"\b(?:search|check|look|try|browse|scan|find|shop)\b.{0,60}?\b" + _SITES + r"\b"
+)
+# "list it on other sites" and "check my ebay listings" are about selling, not searching.
+_NOT_SEARCHING = re.compile(
+    r"\b(?:list|listings?|post|sell|selling|put|unlist|delist|remove|end|connect)\b|"
+    r"\bmy\s+" + _SITES
+)
+_WATCH = re.compile(
+    r"^(?:please\s+)?(?:(?:can\s+you\s+|could\s+you\s+)?(?:watch|look)\s+out\s+for|"
+    r"(?:can\s+you\s+|could\s+you\s+)?watch\s+for|"
+    r"keep\s+(?:looking|watching|checking|searching|an\s+eye\s+out)|"
+    r"set\s+up\s+a\s+(?:watch|alert|saved\s+search))\b|^watch(?:\s+(?:it|that|this|them))?$"
+)
+_WATCHES = re.compile(
+    r"\b(?:my\s+(?:watch(?:es|list)?|alerts|saved\s+searches|standing\s+searches)|"
+    r"what\s+am\s+i\s+watching)\b"
+)
+_UNWATCH = re.compile(
+    r"^(?:please\s+)?(?:(?:stop|cancel|end|delete|remove)\s+(?:watching|(?:the\s+|my\s+)?"
+    r"(?:watch(?:es)?|alerts?|saved\s+search(?:es)?))|unwatch)\b(?:\s+(?:for\s+)?(?:the\s+)?"
+    + _PICK
+    + r"\b)?"
+)
 _NOT_ACCEPTING = re.compile(
     r"\b(?:not|don'?t|doesn'?t|won'?t|never|decline[sd]?|reject(?:s|ed)?|cancel(?:s|led)?|"
     r"find|search|look(?:ing)?\s+for|show\s+me|another|instead|other)\b|n't\b"
@@ -278,6 +312,27 @@ def _some(found: re.Match[str], kind: Kind) -> Command:
     return Command(kind, picks=numbers)
 
 
+def _other_sites(text: str, lowered: str) -> Command | None:
+    """Searching or watching other sites, and the watches themselves. The search words are read
+    from the message later (elsewhere.search_words); the budget is read here."""
+    unwatch = _UNWATCH.search(lowered)
+    if unwatch is not None:
+        return Command("unwatch", pick=int(unwatch.group(1)) if unwatch.group(1) else None)
+    if _WATCHES.search(lowered):
+        return Command("watches")
+    kind: Kind | None = None
+    if _WATCH.search(lowered):
+        kind = "watch"
+    elif (_OTHER_SITES.search(lowered) or _SEARCH_SITES.search(lowered)) and not (
+        _NOT_SEARCHING.search(lowered)
+    ):
+        kind = "elsewhere"
+    if kind is None:
+        return None
+    limit, error = budget(lowered)
+    return Command(kind, amount_cents=limit, error=error, text=text)
+
+
 def parse(text: str) -> Command | None:
     """The command in a chat message, or None for anything else (ASI:One reads that)."""
     lowered = " ".join(text.lower().split()).rstrip(".!?")
@@ -301,6 +356,9 @@ def parse(text: str) -> Command | None:
     if ebay is not None:
         pick = next((g for g in ebay.groups() if g), None)
         return Command("ebay_list", pick=int(pick) if pick else None)
+    other_sites = _other_sites(text, lowered)
+    if other_sites is not None:
+        return other_sites
     offer = _OFFER.search(lowered)
     if offer is not None:
         amount, error = _cents(offer)
