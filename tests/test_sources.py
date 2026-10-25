@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from yardsale import sources
 from yardsale.craigslist import parse_listing, parse_listings, search_craigslist
 from yardsale.sources import (
     ExternalListing,
@@ -13,6 +16,7 @@ from yardsale.sources import (
     deduplicated,
     first_web_link,
     iso_date,
+    photo_count,
     run_actor,
 )
 
@@ -111,6 +115,16 @@ def test_parses_a_real_actor_result() -> None:
     assert listing.latitude == 37.7441 and listing.longitude == -122.4863
     assert listing.posted_at == "2026-10-24"
     assert listing.image_url == REAL["images"][0]  # type: ignore[index]
+    assert listing.photo_count == 3  # imageCount, not the trimmed images list
+    assert listing.condition == ""  # only on the detail page, which costs a request each
+
+
+def test_photo_count_falls_back_to_the_images_list() -> None:
+    trimmed = {k: v for k, v in REAL.items() if k != "imageCount"}
+    listing = parse_listing(trimmed)
+    assert listing is not None and listing.photo_count == 2
+    assert photo_count(None) is None and photo_count(True) is None and photo_count("8") == 8
+    assert photo_count(-1) is None and photo_count({"url": "https://x.test/a.jpg"}) == 1
 
 
 def test_a_listing_with_no_link_is_still_kept() -> None:
@@ -219,6 +233,50 @@ def test_cents_and_links_reject_junk() -> None:
     assert cents_or_none(None) is None
     assert first_web_link("https://x.test/a.jpg") == "https://x.test/a.jpg"
     assert first_web_link("ftp://x.test/a.jpg") is None
+
+
+async def test_run_actor_caps_both_the_charge_and_the_items_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apify's maxItems only caps billing; limit caps the dataset read. Both go on the request,
+    because an actor can ignore its own max-results input."""
+    seen: dict[str, Any] = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> FakeResponse:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def json(self) -> list[Any]:
+            return []
+
+        async def text(self) -> str:
+            return ""
+
+    class FakeSession:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            seen.update(url=url, **kwargs)
+            return FakeResponse()
+
+    monkeypatch.setenv("APIFY_TOKEN", "test-token")
+    monkeypatch.setattr(sources.aiohttp, "ClientSession", FakeSession)
+    assert await run_actor("some~actor", {"q": 1}, 10, "0.25") == []
+    assert seen["params"]["maxItems"] == "10" and seen["params"]["limit"] == "10"
+    assert seen["params"]["maxTotalChargeUsd"] == "0.25" and seen["json"] == {"q": 1}
+    assert "test-token" in seen["headers"]["Authorization"]
 
 
 async def test_no_apify_token_is_a_readable_error() -> None:

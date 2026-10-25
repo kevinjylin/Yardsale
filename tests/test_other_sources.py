@@ -134,6 +134,18 @@ async def test_offerup_search_asks_around_a_zip(monkeypatch: pytest.MonkeyPatch)
     assert calls[1][1]["zipCode"] == offerup.DEFAULT_ZIP
 
 
+async def test_offerup_results_are_cut_to_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actor returned 85 results for maxItems 10 on October 24, so the cap is applied here
+    too, after repeats are dropped."""
+    many = [
+        {**OFFERUP_SAMPLE, "listingId": f"{n:08x}-a479-3a3b-bd0b-6dbcea95ea9d", "url": None}
+        for n in range(85)
+    ]
+    recording_actor(monkeypatch, offerup, many + many[:5])
+    found = await offerup.search_offerup("road bike", "94103", 10)
+    assert len(found) == 10 and len({x.external_id for x in found}) == 10
+
+
 async def test_offerup_needs_words() -> None:
     with pytest.raises(SourceError):
         await offerup.search_offerup("  ", "", 20)
@@ -153,6 +165,8 @@ def test_facebook_result_is_parsed_without_the_seller() -> None:
     assert listing.url == FACEBOOK_SAMPLE["listingUrl"]
     assert listing.image_url == "https://scontent.xx.fbcdn.net/v/t45/abc.jpg"
     assert "A Person" not in repr(listing)  # the seller's name isn't kept
+    # Search results carry one primary photo and no condition or date: unknown, not zero.
+    assert listing.photo_count is None and listing.condition == "" and listing.posted_at == ""
 
 
 def test_facebook_price_falls_back_to_the_shown_price() -> None:

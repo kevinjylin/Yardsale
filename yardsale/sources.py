@@ -174,7 +174,11 @@ async def run_actor(
         raise SourceError("APIFY_TOKEN is not set on the server (see .env.example)")
     params = {
         "timeout": "120",
+        # maxItems caps what a pay-per-result actor may charge for; limit caps what the dataset
+        # returns. An actor can ignore its own max-results input (OfferUp's returned 85 for 10
+        # on October 24), so both are set.
         "maxItems": str(max_results),
+        "limit": str(max_results),
         "maxTotalChargeUsd": max_charge_usd,
     }
     headers = {"Authorization": f"Bearer {token}"}
