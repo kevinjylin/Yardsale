@@ -5,17 +5,28 @@ A buyer says what they want and the most they'll pay. `DealFinder.find` asks eve
 (the Researcher's eBay sold-listings search, `comps`), scores every listing against that market
 price and its own quality signals (deals.py), and returns the best few within the budget, each
 with a one-line reason. `watches.py` does the same search on a schedule; this is the one-off
-version. The Deal Finder agent (dealfinder.py) runs one of these; the chat and @yardsale's API
-reach it through the Market.
+version. The chat and @yardsale's API use the Market's finder in this process; the Deal Finder
+agent (dealfinder.py) runs the same one for other agents.
+
+Sites answer at very different speeds (live on October 24: OfferUp 3 s, eBay 7 s, Craigslist
+16 s, Facebook 20 s, the comps 5 s), so a buyer never waits for the slowest. Every source and
+the comps start at once (`Search`). `Search.early()` answers once all of them are in, or
+SOURCE_WITHIN seconds after the search started, whichever comes first: sites still searching
+are `pending`, and listings are scored without the comps if those are late. `Search.complete()`
+answers once every site has answered, failed, or run past SOURCE_LIMIT. Nothing is cancelled at
+the deadline, since a cancelled request doesn't stop a paid Apify run.
 
 Every source call is a paid Apify run (about $0.03 to $0.05 for 20 results), and the comps
 search is another (about $0.08 for 20 sales), so:
 
-- Results are cached per (search words, budget, ZIP) for CACHE_FOR seconds, and comps per
-  search words for COMPS_CACHE_FOR. The same buyer asking twice, or the chat and the API asking
-  the same thing, costs one run of each.
+- Results are cached per (search words in any order, budget, ZIP) for CACHE_FOR seconds, and
+  comps per search words for COMPS_CACHE_FOR. The same buyer asking twice, or the chat and the
+  API asking the same thing, costs one run of each.
 - A search already running is joined, not started again. That also lets the API answer within
   its 25 seconds and pick up the same search on the next call.
+- Each source is asked once per search; a site that fails stays failed for that search. A
+  search where no site answered, and a comps search that failed, are kept for FAILED_CACHE_FOR
+  seconds, so a caller asking again right away doesn't start the same paid runs again.
 - Each source is asked for at most PER_SOURCE results, and the answer keeps the best LIMIT.
 - With no sources (demo mode, tests), the finder is off and nothing is searched.
 
@@ -47,6 +58,10 @@ log = logging.getLogger("yardsale.elsewhere")
 
 CACHE_FOR = 600.0  # seconds a search's results are reused
 COMPS_CACHE_FOR = 600.0  # seconds a search's eBay sold comps are reused
+FAILED_CACHE_FOR = 60.0  # seconds a search nothing answered, or failed comps, are reused
+SOURCE_WITHIN = 20.0  # seconds after a search starts that its first answer goes out
+SOURCE_LIMIT = 150.0  # seconds after which a site still searching counts as failed
+COMPS_LATE = "not compared with recent sales"  # comps_note when the comps missed the deadline
 MAX_CACHED = 64  # searches kept at once
 PER_SOURCE = 20  # results asked of each source, which is what each search costs
 COMPS = 20  # eBay sold listings asked for per search, about $0.004 each
@@ -101,6 +116,11 @@ class Found:
     considered: int = 0  # listings the sources returned before filtering
     market: MarketPrice | None = None  # None when no recent eBay sales matched
     comps_note: str = ""  # why there's no market price, when there isn't
+    pending: tuple[str, ...] = ()  # sources still searching when this answer went out
+
+    @property
+    def comps_late(self) -> bool:
+        return self.comps_note == COMPS_LATE
 
     @property
     def listings(self) -> tuple[ExternalListing, ...]:
@@ -122,9 +142,132 @@ def best(
     return [d.listing for d in deals.fitting(listings, query, budget_cents, market, limit=limit)]
 
 
+class Search:
+    """One search of every source and the comps, all started at once. `early()` is the answer by
+    the deadline, `complete()` the answer once every site is in. Both can be awaited by any
+    number of callers; a caller that stops waiting never stops the search."""
+
+    def __init__(
+        self,
+        finder: DealFinder,
+        query: str,
+        budget_cents: int | None,
+        zip_code: str,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        self.query = query
+        self.budget_cents = budget_cents
+        self.started = loop.time()
+        self.deadline = self.started + finder.within
+        self.names = list(finder.sources)
+        self._sources = {
+            name: asyncio.ensure_future(finder._one(name, finder.sources[name], query, zip_code))
+            for name in self.names
+        }
+        self._market = asyncio.ensure_future(finder._market_or_none(query))
+        self._done = asyncio.ensure_future(self._finish())
+        self._partial: tuple[tuple[bool, ...], Found] | None = None
+        self._told_early = False
+
+    def done(self) -> bool:
+        """Every site has answered, failed, or given up, and the comps are in."""
+        return self._done.done()
+
+    def ready(self) -> bool:
+        """An answer is ready now: the search is done or past its deadline."""
+        return self.done() or asyncio.get_running_loop().time() >= self.deadline
+
+    def nothing_answered(self) -> bool:
+        """Done, and no site could be searched (or the search itself broke)."""
+        if not self._done.done():
+            return False
+        if self._done.cancelled() or self._done.exception() is not None:
+            return True
+        return not self._done.result().searched
+
+    def broke(self) -> bool:
+        return self._done.done() and (self._done.cancelled() or self._done.exception() is not None)
+
+    async def early(self) -> Found:
+        """What's in by the deadline: everything if every site answered sooner. Sites still
+        searching are `pending`; without the comps, listings are scored against each other."""
+        left = self.deadline - asyncio.get_running_loop().time()
+        if left > 0 and not self._done.done():
+            await asyncio.wait([self._done], timeout=left)  # wait() never cancels the search
+        if self._done.done():
+            return self._done.result()
+        found = self.so_far()
+        if not self._told_early:
+            self._told_early = True
+            log.info(
+                f"other sites: first answer from {len(found.searched)} of {len(self.names)} "
+                f"source(s), {len(found.pending)} still searching, "
+                f"{'without' if found.comps_late else 'with'} the comps, "
+                f"in {asyncio.get_running_loop().time() - self.started:.1f}s"
+            )
+        return found
+
+    async def complete(self) -> Found:
+        """The answer once every site is in (each gives up after SOURCE_LIMIT seconds)."""
+        return await asyncio.shield(self._done)
+
+    def so_far(self) -> Found:
+        """Scored from what's in right now. The same object until something else comes in."""
+        state = (*(task.done() for task in self._sources.values()), self._market.done())
+        if self._partial is None or self._partial[0] != state:
+            self._partial = (state, self._found())
+        return self._partial[1]
+
+    def _found(self) -> Found:
+        answers = {
+            name: task.result()
+            for name, task in self._sources.items()
+            if task.done() and not task.cancelled()
+        }
+        searched = tuple(name for name in self.names if answers.get(name) is not None)
+        failed = tuple(name for name in self.names if name in answers and answers[name] is None)
+        pending = tuple(name for name in self.names if name not in answers)
+        listings = [listing for name in searched for listing in answers[name] or []]
+        if self._market.done() and not self._market.cancelled():
+            market, note = self._market.result()
+        else:
+            market, note = None, COMPS_LATE
+        chosen = deals.rank(listings, self.query, self.budget_cents, market)
+        return Found(
+            self.query,
+            self.budget_cents,
+            tuple(chosen),
+            searched,
+            failed,
+            len(listings),
+            market,
+            note,
+            pending,
+        )
+
+    async def _finish(self) -> Found:
+        await asyncio.gather(*self._sources.values(), self._market)
+        found = self.so_far()
+        log.info(
+            f"other sites: {len(found.deals)} of {found.considered} listing(s) kept from "
+            f"{len(found.searched)} source(s), {len(found.failed)} failed, "
+            f"{'with' if found.market else 'without'} a market price, "
+            f"in {asyncio.get_running_loop().time() - self.started:.1f}s"
+        )
+        return found
+
+    def cancel(self) -> None:
+        """Stop every site still searching (shutting down; tests)."""
+        for task in (*self._sources.values(), self._market, self._done):
+            task.cancel()
+
+
+SearchKey = tuple[str, int | None, str]
+
+
 class DealFinder:
     """Searches every source at once, prices the market from eBay comps, and scores the result,
-    with a short cache. The Deal Finder agent runs one; tests use it directly."""
+    with a short cache. The Market and the Deal Finder agent share one; tests use it directly."""
 
     def __init__(
         self,
@@ -133,13 +276,17 @@ class DealFinder:
         comps: Comps | None = None,
         cache_for: float = CACHE_FOR,
         clock: Callable[[], float] = time.monotonic,
+        within: float = SOURCE_WITHIN,
+        limit: float = SOURCE_LIMIT,
     ) -> None:
         self.sources = dict(sources)
         self.where = where or {}  # a source's scope (a city, a ZIP code); "" means its default
         self.comps = comps  # None: no market prices, listings are judged against each other
         self.cache_for = cache_for
         self.clock = clock
-        self._searches: dict[tuple[str, int | None, str], tuple[float, asyncio.Task[Found]]] = {}
+        self.within = within  # seconds until a search's first answer
+        self.limit = limit  # seconds until a site still searching counts as failed
+        self._searches: dict[SearchKey, tuple[float, Search]] = {}
         self._comps: dict[str, tuple[float, asyncio.Task[MarketPrice | None]]] = {}
 
     @property
@@ -148,25 +295,21 @@ class DealFinder:
 
     def site_names(self) -> str:
         """ "eBay, Craigslist, and OfferUp", for telling the buyer where we looked."""
-        names = [site_name(name) for name in self.sources]
-        if len(names) <= 2:
-            return " and ".join(names)
-        return ", ".join(names[:-1]) + ", and " + names[-1]
+        return names_of(list(self.sources))
 
-    def _key(
-        self, query: str, budget_cents: int | None, zip_code: str
-    ) -> tuple[str, int | None, str]:
-        return search_words(query), budget_cents, zip_code.strip()
+    def _key(self, query: str, budget_cents: int | None, zip_code: str) -> SearchKey:
+        """The same words in any order, the same budget, and the same ZIP are the same search."""
+        return " ".join(sorted(set(search_words(query).split()))), budget_cents, zip_code.strip()
 
     def _forget_old(self) -> None:
         now = self.clock()
-        for key, (started, task) in list(self._searches.items()):
-            stale = now - started > self.cache_for
-            # A search that failed, or where no site answered, is tried again next time.
-            failed = task.done() and (
-                task.cancelled() or task.exception() is not None or not task.result().searched
-            )
-            if (stale and task.done()) or failed:
+        for key, (started, running) in list(self._searches.items()):
+            if not running.done():
+                continue
+            # A search nothing answered is kept briefly, so asking again at once (an API caller
+            # polling, a buyer repeating themselves) doesn't start the same paid runs again.
+            keep = FAILED_CACHE_FOR if running.nothing_answered() else self.cache_for
+            if running.broke() or now - started > keep:
                 del self._searches[key]
         while len(self._searches) > MAX_CACHED:
             oldest = min(self._searches, key=lambda k: self._searches[k][0])
@@ -174,36 +317,35 @@ class DealFinder:
                 break
             del self._searches[oldest]
         for query, (started, comps_task) in list(self._comps.items()):
-            stale = now - started > COMPS_CACHE_FOR
-            # A comps search that failed is tried again next time; no sales is a real answer.
-            failed = comps_task.done() and (
-                comps_task.cancelled() or comps_task.exception() is not None
-            )
-            if (stale and comps_task.done()) or failed:
+            if not comps_task.done():
+                continue
+            # No sales is a real answer; a failed comps search is tried again after a minute.
+            failed = comps_task.cancelled() or comps_task.exception() is not None
+            if now - started > (FAILED_CACHE_FOR if failed else COMPS_CACHE_FOR):
                 del self._comps[query]
 
-    def start(
-        self, query: str, budget_cents: int | None, zip_code: str = ""
-    ) -> asyncio.Task[Found]:
-        """The search for these words, budget, and ZIP: a cached or running one, or a new one."""
+    def search(self, query: str, budget_cents: int | None, zip_code: str = "") -> Search:
+        """The search for these words, budget, and ZIP: a cached or running one, or a new one.
+        Raises SourceError if there's nothing to search for or no source is set up."""
+        if not self.enabled:
+            raise SourceError("searching other sites is off on this Yardsale server")
+        words = search_words(query)
+        if not words:
+            raise SourceError('tell me what to look for, like "a road bike"')
         self._forget_old()
         key = self._key(query, budget_cents, zip_code)
         cached = self._searches.get(key)
         if cached is not None:
             return cached[1]
-        task = asyncio.ensure_future(self._search(key[0], budget_cents, key[2]))
-        self._searches[key] = (self.clock(), task)
-        return task
+        running = Search(self, words, budget_cents, key[2])
+        self._searches[key] = (self.clock(), running)
+        return running
 
     async def find(self, query: str, budget_cents: int | None, zip_code: str = "") -> Found:
-        """Search other sites for these words and budget. Raises SourceError if there's nothing
-        to search for or no source is set up; a source that fails is reported in `failed`."""
-        if not self.enabled:
-            raise SourceError("searching other sites is off on this Yardsale server")
-        if not search_words(query):
-            raise SourceError('tell me what to look for, like "a road bike"')
-        # Shielded, so a caller that stops waiting (a timeout) doesn't cancel the shared search.
-        return await asyncio.shield(self.start(query, budget_cents, zip_code))
+        """Search other sites for these words and budget, and wait for every site. Raises
+        SourceError if there's nothing to search for or no source is set up; a source that fails
+        is reported in `failed`."""
+        return await self.search(query, budget_cents, zip_code).complete()
 
     def market_for(self, query: str) -> asyncio.Task[MarketPrice | None]:
         """The market price for these search words: cached, running, or started now."""
@@ -231,16 +373,24 @@ class DealFinder:
     async def _one(
         self, name: str, source: Source, query: str, zip_code: str
     ) -> list[ExternalListing] | None:
+        """One site's listings, or None when it failed or ran past the limit. Asked once."""
         where = self.where.get(name, "")
         if zip_code and name in ZIP_SOURCES:
             where = zip_code
+        started = time.monotonic()
         try:
-            return await source(query, where, PER_SOURCE)
+            listings = await asyncio.wait_for(source(query, where, PER_SOURCE), self.limit)
         except SourceError as ex:
             log.warning(f"other sites: {name} couldn't be searched ({ex})")
+            return None
+        except TimeoutError:
+            log.warning(f"other sites: {name} didn't answer within {self.limit:.0f}s")
+            return None
         except Exception:
             log.exception(f"other sites: {name} failed")
-        return None
+            return None
+        log.info(f"other sites: {name} answered in {time.monotonic() - started:.1f}s")
+        return listings
 
     async def _market_or_none(self, query: str) -> tuple[MarketPrice | None, str]:
         """The market price, or None and why. A comps failure never fails the search."""
@@ -255,28 +405,13 @@ class DealFinder:
             return None, "no recent eBay sales matched the search"
         return market, ""
 
-    async def _search(self, query: str, budget_cents: int | None, zip_code: str) -> Found:
-        started = time.monotonic()
-        names = list(self.sources)
-        answers, (market, note) = await asyncio.gather(
-            asyncio.gather(
-                *(self._one(name, self.sources[name], query, zip_code) for name in names)
-            ),
-            self._market_or_none(query),
-        )
-        found = [listing for answer in answers if answer for listing in answer]
-        searched = tuple(
-            name for name, answer in zip(names, answers, strict=True) if answer is not None
-        )
-        failed = tuple(name for name, answer in zip(names, answers, strict=True) if answer is None)
-        chosen = deals.rank(found, query, budget_cents, market)
-        log.info(
-            f"other sites: {len(chosen)} of {len(found)} listing(s) kept from "
-            f"{len(searched)} source(s), {len(failed)} failed, "
-            f"{'with' if market else 'without'} a market price, "
-            f"in {time.monotonic() - started:.1f}s"
-        )
-        return Found(query, budget_cents, tuple(chosen), searched, failed, len(found), market, note)
+
+def names_of(sources: list[str] | tuple[str, ...]) -> str:
+    """ "eBay, Craigslist, and OfferUp": sites by name, for a sentence."""
+    names = [site_name(name) for name in sources]
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + ", and " + names[-1]
 
 
 # --- Probe: one small live run per source, by hand ----------------------------------------------

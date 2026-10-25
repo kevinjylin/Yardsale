@@ -223,6 +223,7 @@ def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
     failed = [site_name(name) for name in found.failed]
     # Read defensively: Found gains fields as the deal finder grows.
     budget = getattr(found, "budget_cents", None)
+    pending = [site_name(name) for name in found.pending]
     if found.deals:
         next_step = (
             "Start your answer with headline, word for word, keeping its link. Then show each "
@@ -236,8 +237,19 @@ def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
     else:
         next_step = "Nothing fits on other sites either. Try other words or a higher max."
     unsearched = f" ({', '.join(failed)} couldn't be searched)" if failed else ""
+    if pending:
+        unsearched += f" ({', '.join(pending)} still searching)"
+        next_step += (
+            f" {', '.join(pending)} hadn't answered yet: call searchOtherSites again with the "
+            "same q and max_usd in about a minute to include them."
+        )
     market = found.market
-    if market is not None:
+    if found.comps_late:
+        against = (
+            "Not compared with recent sales yet: the eBay sold-listings search was still "
+            "running, so prices are compared with each other."
+        )
+    elif market is not None:
         against = (
             f"Each is priced against the typical sold price on eBay, {usd(market.typical_cents)} "
             f"from {market.basis}."
@@ -251,6 +263,7 @@ def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
         "listings": [_deal_json(deal, budget) for deal in found.deals],
         "searched": [site_name(name) for name in found.searched],
         "failed": failed,
+        "pending": pending,
         "typical_sold_usd": dollars(market.typical_cents) if market else None,
         "comps_used": market.sales if market else 0,
         "summary": (
@@ -512,8 +525,10 @@ class BusinessApi:
     # --- Other sites ------------------------------------------------------------------------
 
     async def other_sites(self, request: web.Request) -> web.Response:
-        """The best deals on other sites, waiting up to answer_within seconds. A search still
-        running keeps going, and the same q and max_usd pick it up (elsewhere.DealFinder)."""
+        """The best deals on other sites: what's in by the finder's deadline (about 20 seconds),
+        with slower sites in `pending`, waiting at most answer_within seconds. A search still
+        running keeps going, and the same q and max_usd pick it up with whatever has come in
+        since (elsewhere.Search)."""
         finder = self.backend.finder
         if not finder.enabled:
             return _error(503, "Searching other sites is off on this server.", "sources_off")
@@ -525,9 +540,9 @@ class BusinessApi:
             budget = _amount(request.query["max_usd"])
             if budget is None:
                 return _error(400, "max_usd must be a dollar amount, like 300.", "bad_amount")
-        task = finder.start(query, budget)
+        running = finder.search(query, budget)
         try:
-            found = await asyncio.wait_for(asyncio.shield(task), self.answer_within)
+            found = await asyncio.wait_for(running.early(), self.answer_within)
         except TimeoutError:
             return web.json_response(
                 {
@@ -1211,9 +1226,10 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                         "reason; show the buyer each url as a link with its reason, and never "
                         "claim a saving the numbers don't show. "
                         "These are NOT Yardsale listings: no haggling or payment through "
-                        "Yardsale. Answers within about "
-                        "25 seconds; if status is running, call it again with the same q and "
-                        "max_usd."
+                        "Yardsale. Answers within about 20 seconds with the sites that answered "
+                        "by then; slower sites are listed in pending. If status is running, or "
+                        "pending isn't empty and the buyer wants more, call it again with the "
+                        "same q and max_usd."
                     ),
                     "parameters": [
                         {
@@ -1250,6 +1266,15 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                                     "listings": {"type": "array", "items": _EXTERNAL},
                                     "searched": {"type": "array", "items": {"type": "string"}},
                                     "failed": {"type": "array", "items": {"type": "string"}},
+                                    "pending": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": (
+                                            "Sites still searching when this answer went out; "
+                                            "call again with the same q and max_usd in about a "
+                                            "minute to include them"
+                                        ),
+                                    },
                                     "typical_sold_usd": {
                                         "type": "number",
                                         "nullable": True,

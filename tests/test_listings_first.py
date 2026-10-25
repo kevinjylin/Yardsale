@@ -69,6 +69,15 @@ async def shop(store: Store, ebay: Site) -> AsyncIterator[sim.Market]:
         yield running
 
 
+async def ask(buyer: sim.ChatUser, text: str) -> tuple[str, str]:
+    """(first reply, deals): a search answers at once, then sends other sites' deals as the next
+    message. A search that's already answered (cached) puts both in one reply."""
+    before = len(buyer.interim)
+    deals = await buyer.say(text)
+    first = buyer.interim[-1] if len(buyer.interim) > before else deals
+    return first, deals
+
+
 async def list_bike(market: sim.Market, asking: int = 360, lowest: int = 300) -> None:
     seller = market.user("seller")
     await seller.say("sell this", BIKE)
@@ -88,12 +97,13 @@ async def list_bike(market: sim.Market, asking: int = 360, lowest: int = 300) ->
 async def test_shopping_words_search_other_sites(
     shop: sim.Market, ebay: Site, haggles: list[int], text: str, query: str
 ) -> None:
-    reply = await shop.user("buyer").say(text)
-    assert reply.startswith("Found it:") and "Nothing on Yardsale matches" in reply
-    assert "Best deals on other sites" in reply
+    first, reply = await ask(shop.user("buyer"), text)
+    assert "Nothing on Yardsale matches" in first
+    assert reply.startswith("Found it:") and "Best deals on other sites" in reply
     assert f"https://ebay.example.test/{query.replace(' ', '-')}" in reply  # a direct link
     assert ebay.calls == [query]
-    assert "haggle" not in reply.lower().replace("can't haggle", "")
+    for said in (first, reply):
+        assert "haggle" not in said.lower().replace("can't haggle", "")
     assert haggles == []
 
 
@@ -102,12 +112,11 @@ async def test_a_good_deal_on_something_listed_shows_it_and_other_sites(
 ) -> None:
     await list_bike(shop)
     buyer = shop.user("buyer")
-    reply = await buyer.say("get me a good deal on a bike")
-    assert reply.startswith("Here's what's for sale for \"bike\"")
-    assert "Trek FX 2 Disc hybrid bike" in reply and "$360" in reply
-    assert "also checking" in reply
-    deals = await buyer.next_reply()
-    assert "Best deals on other sites" in deals.text()
+    first, deals = await ask(buyer, "get me a good deal on a bike")
+    assert first.startswith("Here's what's for sale for \"bike\"")
+    assert "Trek FX 2 Disc hybrid bike" in first and "$360" in first
+    assert "also checking" in first
+    assert "Best deals on other sites" in deals
     assert ebay.calls == ["bike"]
     assert haggles == []
     assert store.deals() == []
@@ -118,8 +127,8 @@ async def test_haggling_is_opt_in_after_results(
 ) -> None:
     await list_bike(shop)
     buyer = shop.user("buyer")
-    assert "haggle with the seller on 1" in await buyer.say("find me a hybrid bike")
-    await buyer.next_reply()  # the other sites' deals
+    first, _ = await ask(buyer, "find me a hybrid bike")
+    assert "haggle with the seller on 1" in first
     assert haggles == []
     reply = await buyer.say("haggle with the seller on 1, max $340")
     assert "haggled with 1 seller agent(s)" in reply
@@ -139,13 +148,12 @@ async def test_a_budget_after_a_search_searches_again(
 ) -> None:
     await list_bike(shop)
     buyer = shop.user("buyer")
-    await buyer.say("find me a hybrid bike")
-    await buyer.next_reply()
+    await ask(buyer, "find me a hybrid bike")
     for budget in ("max $300", "$300"):
-        reply = await buyer.say(budget)
+        first, reply = await ask(buyer, budget)
         # The $360 bike is over the budget, so it's other sites; no offer is made.
-        assert 'Nothing on Yardsale matches "hybrid bike" under $300' in reply
-        assert "offer" not in reply.lower()
+        assert 'Nothing on Yardsale matches "hybrid bike" under $300' in first
+        assert "offer" not in (first + reply).lower()
     assert set(ebay.calls) == {"hybrid bike"}
     assert haggles == [] and store.deals() == []
 
@@ -155,14 +163,16 @@ async def test_shopping_prose_never_takes_a_price_on_offer(
 ) -> None:
     await list_bike(shop)
     buyer = shop.user("buyer")
-    await buyer.say("find me a hybrid bike")
-    await buyer.next_reply()
+    await ask(buyer, "find me a hybrid bike")
     assert "Yours for" in await buyer.say("haggle with the seller, max $340")
     # The planner relays a new shopping request while that price is open: a search, not a buy.
-    reply = await buyer.say("The buyer wants Jordans under $200. Please proceed with the purchase.")
-    assert 'Nothing on Yardsale matches "jordan" under $200' in reply
-    assert "Deal!" not in reply
-    assert "Deal!" not in await buyer.say("sure, find me a hydro flask under $40")
+    first, reply = await ask(
+        buyer, "The buyer wants Jordans under $200. Please proceed with the purchase."
+    )
+    assert 'Nothing on Yardsale matches "jordan" under $200' in first
+    assert "Deal!" not in first + reply
+    first, reply = await ask(buyer, "sure, find me a hydro flask under $40")
+    assert "Deal!" not in first + reply
     assert "Deal!" not in await buyer.say("ok")  # the search ended the haggle
     assert store.deals() == []
     assert haggles == [1]

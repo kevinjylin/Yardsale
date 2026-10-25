@@ -120,7 +120,15 @@ from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
 from yardsale.deals import ScoredDeal
 from yardsale.ebay_seller import EbayError, EbaySeller
-from yardsale.elsewhere import DealFinder, Found, search_words, site_name
+from yardsale.elsewhere import (
+    COMPS_LATE,
+    DealFinder,
+    Found,
+    Search,
+    names_of,
+    search_words,
+    site_name,
+)
 from yardsale.models import (
     AcceptCounter,
     Appraisal,
@@ -1038,6 +1046,8 @@ def deals_headline(found: Found) -> str:
 
 def market_note(found: Found) -> str:
     """What the deals were judged against: "typical sold price on eBay: $185, from 7 sales"."""
+    if found.comps_late:
+        return COMPS_LATE
     if found.market is None:
         return "no recent eBay sales to compare prices with"
     sales = f"{found.market.sales} sale{'s' if found.market.sales != 1 else ''}"
@@ -1071,8 +1081,26 @@ def elsewhere_text(found: Found, sites: str, headline: bool = True) -> str:
     if found.failed:
         names = " and ".join(site_name(name) for name in found.failed)
         lines.append(f"({names} couldn't be searched just now.)")
+    if found.pending:
+        lines.append(f"(Still searching {names_of(found.pending)}; I'll send anything better.)")
     lines.append(watch_offer(sites))
     return "\n".join(lines)
+
+
+def later_text(early: Found, final: Found, sites: str) -> str | None:
+    """The follow-up once slower sites (or the eBay sold comps) are in, after `early` went out:
+    the whole list again when it changed, a line when it didn't, nothing when only the comps
+    were late and changed nothing."""
+    late = names_of(early.pending)
+    if final.deals != early.deals:
+        lead = f"{late} answered too" if early.pending else "Recent eBay sales came in"
+        return f"{lead}, so here's the updated list.\n\n{elsewhere_text(final, sites)}"
+    if not early.pending:
+        return None
+    answered = [name for name in early.pending if name in final.searched]
+    if answered:
+        return f"{names_of(answered)} had nothing better than the deals above."
+    return f"({late} couldn't be searched just now.)"
 
 
 def elsewhere_card(found: Found) -> MetadataContent | None:
@@ -1146,7 +1174,6 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     follow_ups: set[asyncio.Task[None]] = set()  # keeps background replies from being collected
     fields = {f.name for f in dataclasses.fields(Conversation)} - {"key"}
     finder = backend.finder
-    searching: dict[str, str] = {}  # conversation -> what to say while other sites are searched
 
     def load(key: str) -> Conversation:
         saved = store.load_conversation(key)
@@ -2098,7 +2125,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         words = search_words(query)
         conv.last_query = words
         conv.budget = budget or conv.budget
-        text = f'{lead} "{words}"{_under(budget)} right now, so I checked {finder.site_names()}.'
+        text = (
+            f'{lead} "{words}"{_under(budget)} right now, so I\'m checking {finder.site_names()}.'
+        )
         return Reply(text, elsewhere=(words, budget))
 
     def asked_for(conv: Conversation, command: commands.Command) -> tuple[str, int | None]:
@@ -2122,31 +2151,67 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             elsewhere=(query, budget),
         )
 
-    async def with_deals_elsewhere(key: str, reply: Reply) -> Reply:
-        """The reply with the best deals on other sites added. While the sites are searched,
-        on_chat can say so if the answer is slow."""
-        assert reply.elsewhere is not None
-        query, budget = reply.elsewhere
-        searching[key] = f"{reply.text}\n\n{SEARCHING_ELSEWHERE}"
-        try:
-            found = await finder.find(query, budget)
-        except SourceError as ex:
-            return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
-        finally:
-            searching.pop(key, None)
-        # The reply opens with the best deal ("Found it: ..."), then says Yardsale had nothing.
-        headline = deals_headline(found)
-        rest = elsewhere_text(found, finder.site_names(), headline=not headline)
-        text = f"{headline}\n\n{reply.text}\n\n{rest}" if headline else f"{reply.text}\n\n{rest}"
+    def with_deals(reply: Reply, found: Found) -> Reply:
+        """The reply with the best deals on other sites added to it. With Yardsale's own results
+        (and their card), the deals follow as a second message that opens with the headline;
+        otherwise the headline ("Found it: ...") leads the whole reply."""
+        sites = finder.site_names()
         card = elsewhere_card(found)
         if reply.card is not None and card is not None:
-            # Yardsale's own results keep their card; the deals follow as a second message.
             return Reply(
-                reply.text,
-                reply.card,
-                (*reply.more, (elsewhere_text(found, finder.site_names()), card)),
+                reply.text, reply.card, (*reply.more, (elsewhere_text(found, sites), card))
             )
+        headline = deals_headline(found) if found.deals else ""
+        rest = elsewhere_text(found, sites, headline=not headline)
+        text = f"{headline}\n\n{reply.text}\n\n{rest}" if headline else f"{reply.text}\n\n{rest}"
         return Reply(text, card or reply.card, reply.more)
+
+    def deals_reply(found: Found) -> Reply:
+        return Reply(elsewhere_text(found, finder.site_names()), elsewhere_card(found))
+
+    async def send_later(
+        ctx: Context, key: str, running: Search, early: Found | None, deliver: Deliver
+    ) -> None:
+        """The deals once they're in (by the finder's deadline), then slower sites' deals."""
+        try:
+            if early is None:
+                early = await running.early()
+                await deliver(deals_reply(early))
+            if running.done():
+                return
+            final = await running.complete()
+            later = later_text(early, final, finder.site_names())
+            if later is not None:
+                card = elsewhere_card(final) if final.deals != early.deals else None
+                await deliver(Reply(later, card))
+        except Exception:
+            ctx.logger.exception(f"Sending deals from other sites in {key[:8]} failed")
+
+    def in_background(job: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(job)
+        follow_ups.add(task)
+        task.add_done_callback(follow_ups.discard)
+
+    async def with_deals_elsewhere(
+        ctx: Context, key: str, reply: Reply, deliver: Deliver | None
+    ) -> Reply:
+        """The reply at once, and the best deals on other sites as the next message once the
+        sites answer: by the finder's deadline (elsewhere.SOURCE_WITHIN), with slower sites'
+        deals after that. A search that's already answered (asked before) goes in the reply."""
+        assert reply.elsewhere is not None
+        query, budget = reply.elsewhere
+        reply = reply._replace(elsewhere=None)
+        try:
+            running = finder.search(query, budget)
+        except SourceError as ex:
+            return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
+        if running.ready() or deliver is None:
+            found = await running.early()
+            if deliver is not None and not running.done():
+                in_background(send_later(ctx, key, running, found, deliver))
+            return with_deals(reply, found)
+        in_background(send_later(ctx, key, running, None, deliver))
+        return reply._replace(text=f"{reply.text}\n\n{SEARCHING_ELSEWHERE}")
 
     def watch(conv: Conversation, command: commands.Command | None) -> str:
         """A standing search over other sites (watches.py), from the message or the last search."""
@@ -2618,7 +2683,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         try:
             reply = await handle(ctx, key, msg, deadline, deliver)
             if reply.elsewhere is not None:
-                reply = await with_deals_elsewhere(key, reply)
+                # Never waits on other sites: their deals follow as later messages.
+                reply = await with_deals_elsewhere(ctx, key, reply, deliver)
             return reply
         except Exception:
             ctx.logger.exception(f"Chat message in {key[:8]} failed")
@@ -2696,7 +2762,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if done:
             reply = job.result()
         else:
-            reply = Reply(STILL_WORKING if photos_in(msg) else searching.get(key, WORKING))
+            reply = Reply(STILL_WORKING if photos_in(msg) else WORKING)
 
             async def send_when_done() -> None:
                 result = await job
