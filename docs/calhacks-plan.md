@@ -475,8 +475,9 @@ relays it, so both have to be read.
   `searchListings`, `searchOtherSites`, `priceCheck`, `startNegotiation`, `getNegotiation`,
   and the description, with confirmation on `startNegotiation`
   ([fetch-business.md](fetch-business.md)). The skill, Business Information, starter prompts,
-  and description were updated the same day. Not yet tried in its chat with the new tools
-  beyond a free `getNegotiation` call; a search or price check there is a paid Apify run.
+  and description were updated the same day. Checked from ASI:One: a `getNegotiation` call
+  for a made-up ref reached the server with the key (404, no 401). A search or price check
+  there is a paid Apify run and hasn't been tried with the new tools.
 - **Craigslist's relay is unverified.** Nothing has been run against real Craigslist: whether
   the relay accepts replies from the posting email, keeps the subject, how long it takes, and
   whether it strips links (if it does, `YARDSALE_MAIL_LINKS=0` gives the amount and asks for a

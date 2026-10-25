@@ -139,7 +139,10 @@ API changes (new `priceCheck` and `startNegotiation`, new descriptions) or the t
    October 25 (the key pasted by hand; the rest of the form was filled from this page): Fetch
    made 6 tools, `searchListings`, `searchOtherSites`, `priceCheck`, `startNegotiation`,
    `getNegotiation`, and `getOpenApi`, and set confirmation on `startNegotiation` by itself.
-   The Tools page shows each tool's confirmation but doesn't let it be changed.
+   The Tools page shows each tool's confirmation but doesn't let it be changed. Checked from
+   ASI:One right after: asking `@yardsale` about a made-up negotiation ref made a
+   `getNegotiation` call that reached the server with the key (a 404 "not found", no 401), so
+   the credential is right. A search or price check there is a paid Apify run; not tried yet.
 4. After saving, the Integration lists the tools Fetch made from the description. Check that it
    shows **searchListings**, **searchOtherSites**, **priceCheck**, **startNegotiation**, and
    **getNegotiation** (on October 24 it made 6 tools from 5 operations plus the description
