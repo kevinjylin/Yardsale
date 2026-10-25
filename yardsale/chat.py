@@ -212,6 +212,13 @@ class Backend(Protocol):
 
     def available(self) -> list[Listing]: ...
 
+    async def ask_deal_finder(self, query: str, budget_cents: int | None, zip_code: str) -> Found:
+        """Have the Deal Finder agent run a search and return its first answer (by
+        elsewhere.SOURCE_WITHIN). It searches with `finder`, so finder.search() with the same
+        words afterwards returns that running search, for slower sites. Raises SourceError if
+        it refuses or doesn't answer."""
+        ...
+
     @property
     def checkout(self) -> Checkout: ...
 
@@ -2300,15 +2307,42 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         card = await deals_card(key, found)
         return Reply(text, card or cards.notice(text, [cards.BUY, cards.WATCHES]))
 
+    async def from_deal_finder(
+        ctx: Context, query: str, budget: int | None, near: str
+    ) -> tuple[Found, Search | None]:
+        """A new search, done by the Deal Finder agent: its first answer (by the finder's
+        deadline), and the search it's still running for slower sites, which the Market shares
+        (None if it's gone). If the agent refuses or doesn't answer, the Market searches itself,
+        so the buyer still gets deals. Raises SourceError only if that can't search either."""
+        try:
+            found = await backend.ask_deal_finder(query, budget, near)
+        except Exception as ex:
+            ctx.logger.warning(
+                f"The Deal Finder agent didn't answer ({type(ex).__name__}); searching here"
+            )
+            running = finder.search(query, budget, near)
+            return await running.early(), running
+        return found, finder.cached(query, budget, near)
+
     async def send_later(
-        ctx: Context, key: str, running: Search, early: Found | None, deliver: Deliver
+        ctx: Context,
+        key: str,
+        running: Search | None,
+        early: Found | None,
+        deliver: Deliver,
+        asked: tuple[str, int | None, str] = ("", None, ""),
     ) -> None:
-        """The deals once they're in (by the finder's deadline), then slower sites' deals."""
+        """The deals once they're in (by the finder's deadline), then slower sites' deals.
+        Without a running search, the search is new and the Deal Finder agent does it
+        (`asked`: its words, budget, and ZIP)."""
         try:
             if early is None:
-                early = await running.early()
+                if running is None:
+                    early, running = await from_deal_finder(ctx, *asked)
+                else:
+                    early = await running.early()
                 await deliver(await deals_reply(key, early))
-            if running.done():
+            if running is None or running.done():
                 return
             final = await running.complete()
             later = later_text(early, final, finder.site_names())
@@ -2328,20 +2362,28 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     ) -> Reply:
         """The reply at once, and the best deals on other sites as the next message once the
         sites answer: by the finder's deadline (elsewhere.SOURCE_WITHIN), with slower sites'
-        deals after that. A search that's already answered (asked before) goes in the reply."""
+        deals after that. A new search is the Deal Finder agent's, and its answer is what the
+        buyer sees first; a search that's already answered or running (asked before, here or
+        through the API) is picked up from the finder the agent shares, with no message. A
+        search that's already answered goes in the reply."""
         assert reply.elsewhere is not None
         query, budget, near = reply.elsewhere
         reply = reply._replace(elsewhere=None)
         try:
-            running = finder.search(query, budget, near)
+            finder.check(query)  # nothing to search for, or sites off: said now, nothing started
+            running = finder.cached(query, budget, near)
+            if running is None and deliver is None:  # nowhere to send it later: wait for it
+                found, running = await from_deal_finder(ctx, query, budget, near)
+                return await with_deals(key, reply, found)
         except SourceError as ex:
             return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
-        if running.ready() or deliver is None:
+        if running is not None and (running.ready() or deliver is None):
             found = await running.early()
             if deliver is not None and not running.done():
                 in_background(send_later(ctx, key, running, found, deliver))
             return await with_deals(key, reply, found)
-        in_background(send_later(ctx, key, running, None, deliver))
+        assert deliver is not None
+        in_background(send_later(ctx, key, running, None, deliver, (query, budget, near)))
         return reply._replace(
             text=f"{reply.text}\n\n{SEARCHING_ELSEWHERE}",
             card=reply.card or cards.searching(finder.site_names()),

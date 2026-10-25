@@ -736,6 +736,19 @@ without live asking prices. Agents other than the chat send `ListPhoto`, get `Pr
 progress at once. Message types are in [models.py](../yardsale/models.py), and each agent's
 Agentverse profile text is in [yardsale/readmes/](../yardsale/readmes/).
 
+**Requests go through Agentverse** ([relay.py](../yardsale/relay.py), since October 25). Every
+service agent runs in the same server as the Market, and uagents hands messages between agents
+in one process over in memory, so Agentverse never saw them: the Identifier, Researcher,
+Appraiser, Market Scout, and Deal Finder showed 0 interactions on their profiles while the
+Market showed 148. In live mode the Market now posts each request to the service's Agentverse
+mailbox, the way an agent elsewhere would, and the service picks it up from there (uagents
+checks a mailbox every second); replies still come back in memory. A request Agentverse
+refuses, or one not picked up within 8 seconds, is handed over in memory instead, and each
+service handles only the first copy of a request ID, so nothing is lost or done twice. The
+Scout is now asked as an agent too (before, the Market ran its search code itself): it answers
+by its own 18-second deadline with the sites that answered by then. `YARDSALE_VIA_AGENTVERSE=0`
+turns this off; offline mode always hands requests over in memory.
+
 **Cost per photo:** about $0.08 of Apify (about $0.004 per sold listing, 20 listings), with a
 $0.50 cap per search, plus two Claude calls (`claude-opus-5-5` at medium effort by default; change
 them with `YARDSALE_CLAUDE_MODEL` and `YARDSALE_CLAUDE_EFFORT`).

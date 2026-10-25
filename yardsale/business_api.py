@@ -560,6 +560,21 @@ def _opening_summary(n: Negotiation) -> str:
     )
 
 
+def _searching_other_sites(sites: str) -> web.Response:
+    """A search of other sites still running past answer_within: a plain 200, since a tool
+    runner may treat 202 as a failure."""
+    return web.json_response(
+        {
+            "status": "running",
+            "count": 0,
+            "listings": [],
+            "summary": f"Yardsale is searching {sites}.",
+            "next_step": "Call searchOtherSites again with the same q and max_usd. It "
+            "picks up the same search and waits for the result.",
+        }
+    )
+
+
 class BusinessApi:
     """The API's handlers, over the Market's chat backend. The haggle and deal calls are served
     only with `haggle` (YARDSALE_API_HAGGLE=1); the rest are always on."""
@@ -587,6 +602,9 @@ class BusinessApi:
         self.research = research
         self.cache_for = cache_for
         self.running: dict[str, asyncio.Task[HaggleResult]] = {}
+        # Requests to the Deal Finder agent still out, kept so a caller that stopped waiting
+        # (answer_within) doesn't drop them: the agent's search goes on either way.
+        self.asking: set[asyncio.Task[Found]] = set()
         # (words, zip) -> (started, the check). A running check is joined, a finished one reused.
         self.checks: dict[tuple[str, str], tuple[float, asyncio.Task[dict[str, Any]]]] = {}
 
@@ -714,11 +732,24 @@ class BusinessApi:
 
     # --- Other sites ------------------------------------------------------------------------
 
+    def _ask_deal_finder(self, query: str, budget: int | None, near: str) -> asyncio.Task[Found]:
+        task = asyncio.ensure_future(self.backend.ask_deal_finder(query, budget, near))
+        self.asking.add(task)
+        task.add_done_callback(self._asked)
+        return task
+
+    def _asked(self, task: asyncio.Task[Found]) -> None:
+        self.asking.discard(task)
+        if not task.cancelled():
+            task.exception()  # read, so a failure nobody waited for isn't logged as unretrieved
+
     async def other_sites(self, request: web.Request) -> web.Response:
         """The best deals on other sites: what's in by the finder's deadline (about 20 seconds),
-        with slower sites in `pending`, waiting at most answer_within seconds. A search still
-        running keeps going, and the same q and max_usd pick it up with whatever has come in
-        since (elsewhere.Search)."""
+        with slower sites in `pending`, waiting at most answer_within seconds. A new search is
+        the Deal Finder agent's, and its first answer is what's returned; if the agent refuses
+        or doesn't answer, the Market searches itself. A search still running keeps going, and
+        the same q and max_usd pick it up from the finder the agent shares, with whatever has
+        come in since (elsewhere.Search)."""
         finder = self.backend.finder
         if not finder.enabled:
             return _error(503, "Searching other sites is off on this server.", "sources_off")
@@ -732,20 +763,28 @@ class BusinessApi:
                 return _error(400, "max_usd must be a dollar amount, like 300.", "bad_amount")
         # A place in q ("in Berkeley") or a zip parameter scopes the local sites.
         near = request.query.get("zip", "").strip()[:5]
-        running = finder.search(query, budget, near if near.isdigit() and len(near) == 5 else "")
+        near = near if near.isdigit() and len(near) == 5 else ""
+        started = time.monotonic()
+        running = finder.cached(query, budget, near)
+        if running is None:
+            asked = self._ask_deal_finder(query, budget, near)
+            try:
+                found = await asyncio.wait_for(asyncio.shield(asked), self.answer_within)
+            except TimeoutError:
+                return _searching_other_sites(finder.site_names())
+            except Exception as ex:
+                log.warning(
+                    f"API other sites: the Deal Finder agent didn't answer "
+                    f"({type(ex).__name__}); searching here"
+                )
+                running = finder.search(query, budget, near)
+            else:
+                return web.json_response(_other_sites_json(found, finder.site_names()))
+        left = max(0.5, self.answer_within - (time.monotonic() - started))
         try:
-            found = await asyncio.wait_for(running.early(), self.answer_within)
+            found = await asyncio.wait_for(running.early(), left)
         except TimeoutError:
-            return web.json_response(
-                {
-                    "status": "running",
-                    "count": 0,
-                    "listings": [],
-                    "summary": f"Yardsale is searching {finder.site_names()}.",
-                    "next_step": "Call searchOtherSites again with the same q and max_usd. It "
-                    "picks up the same search and waits for the result.",
-                }
-            )
+            return _searching_other_sites(finder.site_names())
         return web.json_response(_other_sites_json(found, finder.site_names()))
 
     # --- Price checks -----------------------------------------------------------------------

@@ -15,7 +15,7 @@ from typing import Any
 import aiohttp
 from uagents import Agent, Context, Protocol
 
-from yardsale import sources
+from yardsale import relay, sources
 from yardsale.agentverse import service_agent
 from yardsale.models import Comp, ResearchRequest, ResearchResult, ServiceError
 
@@ -155,6 +155,8 @@ def build_researcher(research: Research, offline: bool) -> Agent:
 
     @proto.on_message(ResearchRequest, replies={ResearchResult, ServiceError})
     async def handle(ctx: Context, sender: str, msg: ResearchRequest) -> None:
+        if not relay.claim(msg.request_id):
+            return  # another copy of this request arrived first (relay.py)
         try:
             comps = await research(msg.query, msg.condition, max(1, min(msg.max_results, 50)))
         except ResearchError as ex:

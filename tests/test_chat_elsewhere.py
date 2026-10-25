@@ -12,8 +12,10 @@ import pytest
 from uagents_core.contrib.protocols.chat import ChatMessage, MetadataContent
 
 from tests import fakes, sim
-from yardsale import bureau_server, chat, commands
+from yardsale import bureau_server, chat, commands, dealfinder
 from yardsale.card_schema import Card, CarouselCardPayload, extract_card
+from yardsale.elsewhere import Found
+from yardsale.models import DealsFound
 from yardsale.sources import ExternalListing, SourceError
 from yardsale.store import Store
 
@@ -50,6 +52,32 @@ class Site:
 
 async def down(query: str, where: str, limit: int) -> list[ExternalListing]:
     raise SourceError("OfferUp is down")
+
+
+AGENT_MARK = "Agentville (00000)"  # a place no search names: marks the agent's own answers
+
+
+def spy_on_agent(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The searches the Deal Finder agent answers (their words). Each answer it sends says
+    its local sites searched around AGENT_MARK, so a test can tell the agent's answer from one
+    the Market found itself."""
+    answered: list[str] = []
+    real = dealfinder.deals_found
+
+    def marked(request_id: str, found: Found) -> DealsFound:
+        answered.append(found.query)
+        message = real(request_id, found)
+        message.place = AGENT_MARK
+        return message
+
+    monkeypatch.setattr(dealfinder, "deals_found", marked)
+    return answered
+
+
+async def no_answer(
+    backend: bureau_server.MarketBackend, query: str, budget_cents: int | None, zip_code: str
+) -> Found:
+    raise SourceError("A Yardsale agent didn't answer within 35s.")
 
 
 def card_in(msg: ChatMessage) -> Card | None:
@@ -257,6 +285,39 @@ async def test_asking_again_uses_the_cached_search(shop: sim.Market, ebay: Site)
     other = await shop.user("other").say("search ebay and craigslist for a road bike under $300")
     assert "Trek road bike 54cm" in other
     assert ebay.calls == ["road bike"]  # one paid search for all three
+
+
+async def test_a_new_search_is_the_deal_finder_agents_and_its_answer_is_shown(
+    shop: sim.Market, ebay: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answered = spy_on_agent(monkeypatch)
+    deals = await shop.user("buyer").say("find me a road bike under $300")
+    assert answered == ["road bike"]  # the Market asked the agent, and the agent searched
+    assert f"(Local sites searched around {AGENT_MARK}.)" in deals  # what the buyer sees
+    assert "Trek road bike 54cm" in deals
+    assert ebay.calls == ["road bike"]
+
+
+async def test_a_cached_search_sends_the_agent_nothing(
+    shop: sim.Market, ebay: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answered = spy_on_agent(monkeypatch)
+    buyer = shop.user("buyer")
+    await buyer.say("find me a road bike under $300")
+    again = await buyer.say("search other sites")  # the same words and max: from the cache
+    assert "Trek road bike 54cm" in again and AGENT_MARK not in again
+    assert answered == ["road bike"] and ebay.calls == ["road bike"]
+
+
+async def test_if_the_agent_doesnt_answer_the_market_searches_itself(
+    shop: sim.Market, ebay: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answered = spy_on_agent(monkeypatch)
+    monkeypatch.setattr(bureau_server.MarketBackend, "ask_deal_finder", no_answer)
+    deals = await shop.user("buyer").say("find me a road bike under $300")
+    assert deals.startswith("Found it:") and "Trek road bike 54cm" in deals
+    assert answered == [] and AGENT_MARK not in deals
+    assert ebay.calls == ["road bike"]
 
 
 async def test_the_first_reply_goes_out_at_once_and_the_deals_follow(

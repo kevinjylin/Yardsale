@@ -31,9 +31,12 @@ buyer opens the link to buy from the seller.
 | `max_cents` | int or null | The most the buyer pays, shipping included; null for any price |
 | `zip` | string | A ZIP code for sources that search around one; "" for the server's default |
 
-**Reply: `DealsFound`** with `request_id`, `query`, `max_cents`, `deals` (best first), `searched`
-and `failed` (which sites answered), `considered`, `typical_cents` (the market price, or null),
-`comps_used`, and `comps_note`. Each deal has `source`, `title`, `url`, `price_cents`,
+**Reply: `DealsFound`**, within about 20 seconds, with `request_id`, `query`, `max_cents`,
+`deals` (best first), `searched` and `failed` (which sites answered), `sites` (each site's
+outcome; a site still searching at 20 seconds is `pending`, and asking again with the same
+search picks up its results), `considered`, `typical_cents` (the market price, or null),
+`comps_used`, `comps_low_cents` and `comps_high_cents` (its spread), `comps_basis`, and
+`comps_note`. Each deal has `source`, `title`, `url`, `price_cents`,
 `shipping_cents`, `total_cents`, `location`, `condition`, `image_url`, `posted_at`,
 `accepts_offers`, `photo_count`, `seller_rating`, `score`, `versus_market_pct` (positive means
 under the typical sold price), `why`, and `flags`. On failure the reply is **`ServiceError`**

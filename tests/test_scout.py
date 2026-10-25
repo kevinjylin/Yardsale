@@ -232,7 +232,7 @@ async def test_a_failing_or_slow_scout_never_blocks_a_proposal(
         await asyncio.Event().wait()
         return []
 
-    monkeypatch.setattr(bureau_server, "SCOUT_TIMEOUT", 0.2)
+    monkeypatch.setattr(scout, "ANSWER_WITHIN", 0.2)
     for sources in ({"offerup": down, "facebook": explodes}, {"craigslist": never}):
         async with sim.running_market(store, scout_sources=sources) as m:
             seller = Peer("seller", *SELLER_KINDS)
@@ -250,9 +250,9 @@ async def test_a_failing_or_slow_scout_never_blocks_a_proposal(
 async def test_a_slow_site_is_left_out_and_the_rest_still_count(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Market searches the Scout's sites in this process with a deadline, so a fast site's
-    prices make the proposal and a slow one doesn't hold it up."""
-    monkeypatch.setattr(bureau_server, "SCOUT_TIMEOUT", 0.3)
+    """The Scout agent answers by its deadline, so a fast site's prices make the proposal and a
+    slow one doesn't hold it up."""
+    monkeypatch.setattr(scout, "ANSWER_WITHIN", 0.3)
     slow = Site(BIKES, delay=30.0)
     async with sim.running_market(
         store, scout_sources={"craigslist": Site(BIKES), "facebook": slow}

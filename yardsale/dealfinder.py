@@ -7,15 +7,17 @@ work is elsewhere.DealFinder (the searches, the eBay sold comps, the cache) and 
 scoring); this module is the agent around it.
 
 Other agents talk to it the way the Market talks to the Identifier, Researcher, and Appraiser: a
-request with a request_id, a reply with the same ID, or a ServiceError. The reply waits for
-every site (each gives up after elsewhere.SOURCE_LIMIT seconds).
+request with a request_id, a reply with the same ID, or a ServiceError. The reply is the
+search's first answer (elsewhere.Search.early): every site that answered within
+elsewhere.SOURCE_WITHIN seconds (about 20), with sites still searching marked "pending" in
+`sites`. The search keeps going after the reply, so asking again with the same words, budget,
+and ZIP gets the slower sites too, from the cache.
 
-The chat and @yardsale's API don't go through this agent. Messages between agents in one Bureau
-are delivered in-process (uAgents' dispatcher, live or offline), so the hop cost under a
-millisecond, but its one reply can only come once every site has answered: a buyer would wait
-for the slowest site, with a 240-second timeout as the only limit. They use the Market's
-DealFinder directly instead, which answers by its deadline and sends slower sites' deals later.
-This agent shares that DealFinder, so its searches and cache are the same ones.
+Every new search from the chat and from @yardsale's API comes here: the Market sends this agent
+a FindDeals (through its Agentverse mailbox when relay.py is on, so Agentverse sees it) and shows
+the buyer this agent's answer. The agent and the Market share one DealFinder, so the Market then
+follows the same running search for slower sites' deals, and repeats are answered from its cache
+without a message. If this agent refuses or doesn't answer, the Market searches in-process.
 
 The buyer's max and search words are never logged, here or in the finder.
 """
@@ -26,6 +28,7 @@ import logging
 
 from uagents import Agent, Context, Protocol
 
+from yardsale import relay
 from yardsale.agentverse import service_agent
 from yardsale.deals import MarketPrice, ScoredDeal
 from yardsale.elsewhere import DealFinder, Found, SiteResult
@@ -60,6 +63,8 @@ def to_message(deal: ScoredDeal) -> FoundDeal:
         accepts_offers=listing.accepts_offers,
         photo_count=listing.photo_count,
         seller_rating=listing.seller_rating,
+        latitude=listing.latitude,
+        longitude=listing.longitude,
         score=deal.score,
         versus_market_pct=deal.versus_market_pct,
         why=deal.why,
@@ -77,6 +82,8 @@ def from_message(deal: FoundDeal) -> ScoredDeal:
         url=deal.url,
         location=deal.location,
         image_url=deal.image_url,
+        latitude=deal.latitude,
+        longitude=deal.longitude,
         posted_at=deal.posted_at,
         condition=deal.condition,
         shipping_cents=deal.shipping_cents,
@@ -102,6 +109,9 @@ def deals_found(request_id: str, found: Found) -> DealsFound:
         typical_cents=market.typical_cents if market else None,
         comps_used=market.sales if market else 0,
         comps_note=found.comps_note,
+        comps_low_cents=market.low_cents if market else None,
+        comps_high_cents=market.high_cents if market else None,
+        comps_basis=market.basis if market else "",
         sites=[
             SiteOutcome(source=s.source, status=s.status, raw=s.raw, kept=s.kept, reason=s.reason)
             for s in found.sites
@@ -116,10 +126,12 @@ def found_from(msg: DealsFound) -> Found:
         plural = "s" if msg.comps_used != 1 else ""
         market = MarketPrice(
             typical_cents=msg.typical_cents,
-            low_cents=msg.typical_cents,
-            high_cents=msg.typical_cents,
+            low_cents=msg.comps_low_cents if msg.comps_low_cents is not None else msg.typical_cents,
+            high_cents=(
+                msg.comps_high_cents if msg.comps_high_cents is not None else msg.typical_cents
+            ),
             sales=msg.comps_used,
-            basis=f"{msg.comps_used} eBay sale{plural} in the last 90 days",
+            basis=msg.comps_basis or f"{msg.comps_used} eBay sale{plural} in the last 90 days",
         )
     return Found(
         query=msg.query,
@@ -130,6 +142,7 @@ def found_from(msg: DealsFound) -> Found:
         considered=msg.considered,
         market=market,
         comps_note=msg.comps_note,
+        pending=tuple(s.source for s in msg.sites if s.status == "pending"),
         sites=tuple(SiteResult(s.source, s.status, s.raw, s.kept, s.reason) for s in msg.sites),
         place=msg.place,
     )
@@ -146,8 +159,13 @@ def build_dealfinder(finder: DealFinder, offline: bool) -> Agent:
 
     @proto.on_message(FindDeals, replies={DealsFound, ServiceError})
     async def handle(ctx: Context, sender: str, msg: FindDeals) -> None:
+        if not relay.claim(msg.request_id):  # the copy that came the other way; already handled
+            return
         try:
-            found = await finder.find(msg.query, msg.max_cents, msg.zip[:10])
+            # Start the search, or join the same one if it's cached or running, and answer by
+            # its deadline: slower sites keep searching and are "pending" in the reply.
+            running = finder.search(msg.query, msg.max_cents, msg.zip[:10])
+            found = await running.early()
         except SourceError as ex:  # nothing to search, or no sources
             ctx.logger.warning(f"Deal search refused: {ex}")
             await ctx.send(sender, ServiceError(request_id=msg.request_id, reason=str(ex)[:300]))
@@ -158,6 +176,7 @@ def build_dealfinder(finder: DealFinder, offline: bool) -> Agent:
             return
         ctx.logger.info(
             f"{len(found.deals)} deal(s) from {len(found.searched)} source(s), "
+            f"{len(found.pending)} still searching, "
             f"{'with' if found.market else 'without'} a market price"
         )
         await ctx.send(sender, deals_found(msg.request_id, found))

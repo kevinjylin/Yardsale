@@ -4,8 +4,10 @@ fakes; nothing is paid."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
+import time
 
 import pytest
 
@@ -15,7 +17,7 @@ from tests.test_chat_elsewhere import Site, deal, down
 from yardsale import bureau_server
 from yardsale.dealfinder import deals_found, found_from
 from yardsale.deals import MarketPrice, ScoredDeal
-from yardsale.elsewhere import DealFinder, Found
+from yardsale.elsewhere import DealFinder, Found, SiteResult
 from yardsale.models import DealsFound, FindDeals, ServiceError
 from yardsale.store import Store
 
@@ -84,17 +86,39 @@ async def test_the_agent_log_has_no_search_words_or_max(
 
 
 def test_messages_carry_everything_the_finder_found() -> None:
+    """The Market shows the buyer the agent's answer, so the message loses nothing: the
+    market price's spread and basis, a site still searching, and a post's coordinates."""
     market = MarketPrice(31000, 28000, 34000, 4, "4 eBay sales of the same thing")
-    listing = deal("Trek road bike 54cm", 18000)
+    listing = dataclasses.replace(
+        deal("Trek road bike 54cm", 18000), latitude=37.87, longitude=-122.27
+    )
     scored = ScoredDeal(listing, 18000, 45.0, 42, "42% under the $310 typical sold price", ())
-    found = Found("road bike", 30000, (scored,), ("craigslist",), ("offerup",), 7, market)
+    sites = (
+        SiteResult("craigslist", "ok", raw=2, kept=1),
+        SiteResult("offerup", "failed", reason="timeout"),
+        SiteResult("facebook", "pending"),
+    )
+    found = Found(
+        "road bike",
+        30000,
+        (scored,),
+        ("craigslist",),
+        ("offerup",),
+        7,
+        market,
+        pending=("facebook",),
+        sites=sites,
+        place="Berkeley (94704)",
+    )
 
     message = deals_found("r9", found)
     assert message.request_id == "r9" and message.typical_cents == 31000
     back = found_from(message)
+    assert back == found  # everything, the deals and market included
     assert back.query == "road bike" and back.budget_cents == 30000 and back.considered == 7
     assert back.searched == ("craigslist",) and back.failed == ("offerup",)
-    assert back.typical_cents == 31000 and back.market is not None and back.market.sales == 4
+    assert back.pending == ("facebook",) and back.site("facebook").status == "pending"
+    assert back.typical_cents == 31000 and back.market == market
     (again,) = back.deals
     assert again.listing == listing and again.score == 45.0 and again.versus_market_pct == 42
     assert again.why == scored.why and back.listings == (listing,)
@@ -114,11 +138,38 @@ def test_an_unpriced_or_over_budget_deal_stays_so_through_the_message() -> None:
     assert back.deals[1].listing.price_cents is None
 
 
-async def test_the_market_searches_in_process_with_the_agents_finder(
+async def test_the_agent_answers_by_its_deadline_and_slower_sites_follow_from_the_cache(
+    store: Store, sources: dict[str, Site], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent replies with what's in by the finder's deadline, a slow site "pending", and
+    keeps searching: the same search asked again gets the slow site without searching again."""
+    sources["craigslist"].delay = 1.0
+    async with sim.running_market(store, sources=sources):
+        rt = bureau_server.runtime()
+        monkeypatch.setattr(rt.finder, "within", 0.2)
+        buyer = Peer("buyer", DealsFound, ServiceError)
+        try:
+            started = time.monotonic()
+            request = FindDeals(request_id="r5", query="road bike", max_cents=30000)
+            first = await buyer.ask(rt.services.dealfinder, request, DealsFound)
+            assert time.monotonic() - started < 0.8  # not waiting on Craigslist
+            await asyncio.sleep(1.0)
+            again = FindDeals(request_id="r6", query="road bike", max_cents=30000)
+            later = await buyer.ask(rt.services.dealfinder, again, DealsFound)
+        finally:
+            await sim.stop([buyer.agent])
+    assert first.searched == ["ebay"] and found_from(first).pending == ("craigslist",)
+    assert [d.title for d in first.deals] == ["Giant road bike"]
+    assert later.searched == ["ebay", "craigslist"] and found_from(later).pending == ()
+    assert "Trek road bike 54cm" in [d.title for d in later.deals]
+    assert sources["craigslist"].calls == ["road bike"]  # one paid search for both
+
+
+async def test_the_market_and_the_agent_share_one_finder(
     store: Store, sources: dict[str, Site]
 ) -> None:
-    """The chat and the API don't wait on the agent's one reply; they share its finder, so a
-    search the agent ran is a cache hit for the chat, and the other way round."""
+    """The agent searches with the Market's finder, so a search the agent ran is a cache hit
+    for the chat and the API, and the other way round."""
     async with sim.running_market(store, sources=sources):
         rt = bureau_server.runtime()
         assert isinstance(rt.finder, DealFinder)

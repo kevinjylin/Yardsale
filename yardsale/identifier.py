@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel
 from uagents import Agent, Context, Protocol
 
-from yardsale import llm
+from yardsale import llm, relay
 from yardsale.agentverse import service_agent
 from yardsale.models import Identified, IdentifyRequest, ItemDetails, ServiceError
 
@@ -72,6 +72,8 @@ def build_identifier(identify: Identify, offline: bool) -> Agent:
 
     @proto.on_message(IdentifyRequest, replies={Identified, ServiceError})
     async def handle(ctx: Context, sender: str, msg: IdentifyRequest) -> None:
+        if not relay.claim(msg.request_id):
+            return  # another copy of this request arrived first (relay.py)
         try:
             item = tidy(await identify(msg.image_b64, msg.media_type, msg.note))
         except llm.LLMError as ex:  # no key, or Claude declined

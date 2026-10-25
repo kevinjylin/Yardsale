@@ -136,6 +136,7 @@ def readiness(mode: str) -> list[Check]:
     checks.append(_mail_check())
     checks.append(_campus_check())
     checks.append(_facebook_check())
+    checks.append(_relay_check(mode))
     checks.append(
         Check(
             "YARDSALE_ORDERS_WEBHOOK",
@@ -307,6 +308,32 @@ def _facebook_check() -> Check:
         "YARDSALE_FACEBOOK",
         True,
         "on: searches include Facebook Marketplace (the priciest site per search)",
+        False,
+    )
+
+
+def _relay_check(mode: str) -> Check:
+    # The same rule as relay.configure(), read here so the check starts nothing.
+    if mode != "live":
+        return Check(
+            "YARDSALE_VIA_AGENTVERSE",
+            False,
+            "offline mode: the Market hands requests to its helper agents in memory",
+            False,
+        )
+    if os.getenv("YARDSALE_VIA_AGENTVERSE", "1").strip() == "0":
+        return Check(
+            "YARDSALE_VIA_AGENTVERSE",
+            False,
+            "0: the Market hands requests to its helper agents in memory, so Agentverse doesn't "
+            "count them",
+            False,
+        )
+    return Check(
+        "YARDSALE_VIA_AGENTVERSE",
+        True,
+        "on: the Market's requests to its helper agents go through their Agentverse mailboxes "
+        "so Agentverse counts them; one not picked up within a few seconds goes in memory",
         False,
     )
 

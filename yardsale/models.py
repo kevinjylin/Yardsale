@@ -423,6 +423,8 @@ class FoundDeal(Model):
     accepts_offers: bool = False
     photo_count: int | None = None
     seller_rating: float | None = None  # percent positive, when the site gives one
+    latitude: float | None = None  # Craigslist gives these
+    longitude: float | None = None
     score: float = 0.0  # higher is better; price against the market first, then quality, fit
     versus_market_pct: int | None = None  # positive: under the typical sold price; None: unknown
     why: str = ""  # one line: "35% under the $185 typical sold price, like new, 6 photos"
@@ -435,7 +437,8 @@ class FoundDeal(Model):
 class SiteOutcome(Model):
     """How one site's search went (elsewhere.SiteResult): "ok" with `raw` listings, `kept` of
     them fitting; "empty", it answered with none; "failed", with `reason` (timeout, blocked,
-    busy, credit, setup, error). A failed site never counts as having nothing."""
+    busy, credit, setup, error); "pending", still searching when the answer went out. A failed
+    or pending site never counts as having nothing."""
 
     source: str
     status: str
@@ -458,5 +461,12 @@ class DealsFound(Model):
     typical_cents: int | None = None  # the median of matching eBay sales in the last 90 days
     comps_used: int = 0  # how many sales that median is from
     comps_note: str = ""  # why there's no market price, when there isn't
-    sites: list[SiteOutcome] = []  # noqa: RUF012  # per site, in the order searched
+    # The market price's spread (lower and upper quartile) and what it's from, "4 eBay sales
+    # of the same thing in the last 90 days"; None and "" without a market price.
+    comps_low_cents: int | None = None
+    comps_high_cents: int | None = None
+    comps_basis: str = ""
+    # Per site, in the order searched. A site still searching when the answer went out (the
+    # Deal Finder answers by its deadline, about 20 s) is "pending".
+    sites: list[SiteOutcome] = []  # noqa: RUF012
     place: str = ""  # where the local sites searched: "Berkeley (94704)", "the SF Bay Area"

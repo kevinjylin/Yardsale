@@ -24,7 +24,7 @@ from typing import Any
 
 from uagents import Agent, Context, Protocol
 
-from yardsale import deals
+from yardsale import deals, relay
 from yardsale.agentverse import service_agent
 from yardsale.elsewhere import ZIP_SOURCES, search_words
 from yardsale.models import ScoutListing, ScoutReport, ScoutRequest, ServiceError, SourcePrices
@@ -41,6 +41,10 @@ DESCRIPTION = (
 CLOSEST = 3  # listings shown per site, nearest the median
 MIN_PRICE_CENTS = 100  # $0 and $1 posts are "contact me" placeholders, not prices
 MAX_PER_SOURCE = 50
+# Seconds the agent's sites get before it answers; slower ones count as failed, so a photo's
+# proposal never waits on the slowest site. Leaves room for Agentverse's hop within the 20 s
+# the Researcher usually takes.
+ANSWER_WITHIN = 18.0
 _ZIP = re.compile(r"\d{5}")
 
 
@@ -225,13 +229,15 @@ def build_scout(sources: dict[str, Source], offline: bool) -> Agent:
 
     @proto.on_message(ScoutRequest, replies={ScoutReport, ServiceError})
     async def handle(ctx: Context, sender: str, msg: ScoutRequest) -> None:
+        if not relay.claim(msg.request_id):
+            return  # another copy of this request arrived first (relay.py)
         if not msg.query.strip():
             await ctx.send(
                 sender, ServiceError(request_id=msg.request_id, reason="nothing to search for")
             )
             return
         try:
-            found, failed = await scout_prices(sources, msg)
+            found, failed = await scout_prices(sources, msg, ANSWER_WITHIN)
         except Exception as ex:  # report every failure to the caller instead of going silent
             ctx.logger.exception("Scouting failed")
             await ctx.send(sender, ServiceError(request_id=msg.request_id, reason=str(ex)[:300]))

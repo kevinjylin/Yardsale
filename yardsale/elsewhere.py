@@ -5,8 +5,9 @@ A buyer says what they want and the most they'll pay. `DealFinder.find` asks eve
 (the Researcher's eBay sold-listings search, `comps`), scores every listing against that market
 price and its own quality signals (deals.py), and returns the best few within the budget, each
 with a one-line reason. `watches.py` does the same search on a schedule; this is the one-off
-version. The chat and @yardsale's API use the Market's finder in this process; the Deal Finder
-agent (dealfinder.py) runs the same one for other agents.
+version. The Market and the Deal Finder agent (dealfinder.py) share one finder: a new search
+from the chat or @yardsale's API is the agent's (the Market asks it), and the Market then picks
+up that same running search for slower sites, and answers repeats from the cache.
 
 Sites answer at very different speeds (live on October 24: OfferUp 3 s, eBay 7 s, Craigslist
 16 s, Facebook 20 s, the comps 5 s), so a buyer never waits for the slowest. Every source and
@@ -491,19 +492,33 @@ class DealFinder:
             if now - started > (FAILED_CACHE_FOR if failed else COMPS_CACHE_FOR):
                 del self._comps[query]
 
-    def search(self, query: str, budget_cents: int | None, zip_code: str = "") -> Search:
-        """The search for these words, budget, and ZIP: a cached or running one, or a new one.
-        Raises SourceError if there's nothing to search for or no source is set up."""
+    def check(self, query: str) -> str:
+        """The words a search would look for. Raises SourceError, with what to tell the buyer,
+        if there's nothing to search for or no source is set up. Starts nothing."""
         if not self.enabled:
             raise SourceError("searching other sites is off on this Yardsale server")
         words = search_words(query)
         if not words:
             raise SourceError('tell me what to look for, like "a road bike"')
+        return words
+
+    def cached(self, query: str, budget_cents: int | None, zip_code: str = "") -> Search | None:
+        """The cached or running search for these words, budget, and ZIP, or None: never
+        starts one (so a caller can hand a new search to the Deal Finder agent instead)."""
+        if not self.enabled or not search_words(query):
+            return None
         self._forget_old()
+        cached = self._searches.get(self._key(query, budget_cents, zip_code))
+        return cached[1] if cached is not None else None
+
+    def search(self, query: str, budget_cents: int | None, zip_code: str = "") -> Search:
+        """The search for these words, budget, and ZIP: a cached or running one, or a new one.
+        Raises SourceError if there's nothing to search for or no source is set up."""
+        words = self.check(query)
+        running = self.cached(query, budget_cents, zip_code)
+        if running is not None:
+            return running
         key = self._key(query, budget_cents, zip_code)
-        cached = self._searches.get(key)
-        if cached is not None:
-            return cached[1]
         running = Search(self, words, budget_cents, key[2])
         self._searches[key] = (self.clock(), running)
         return running

@@ -14,7 +14,7 @@ import anthropic
 from pydantic import BaseModel
 from uagents import Agent, Context, Protocol
 
-from yardsale import llm
+from yardsale import llm, relay
 from yardsale.agentverse import service_agent
 from yardsale.common import dollars
 from yardsale.models import (
@@ -189,6 +189,8 @@ def build_appraiser(judge: Judge, offline: bool) -> Agent:
 
     @proto.on_message(AppraiseRequest, replies={Appraisal, ServiceError})
     async def handle(ctx: Context, sender: str, msg: AppraiseRequest) -> None:
+        if not relay.claim(msg.request_id):
+            return  # another copy of this request arrived first (relay.py)
         try:
             judgements = await judge(msg.item, msg.image_b64, msg.media_type, msg.comps)
         except llm.LLMError as ex:  # no key, or Claude declined

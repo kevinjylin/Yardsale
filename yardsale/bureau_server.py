@@ -57,7 +57,7 @@ from uagents.registration import BatchAlmanacApiRegistrationPolicy
 from uagents_core.registration import BatchRegistrationPolicy
 from uagents_core.types import DeliveryStatus
 
-from yardsale import business_api, config, scout, students, watches
+from yardsale import business_api, config, relay, scout, students, watches
 from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
@@ -77,12 +77,12 @@ from yardsale.craigslist import search_craigslist
 from yardsale.craigslist_mail import POLL_EVERY as MAIL_POLL_EVERY
 from yardsale.craigslist_mail import CraigslistMail, Mailbox, MailConfigError, MailSettings
 from yardsale.craigslist_mail import settings_from_env as mail_settings_from_env
-from yardsale.dealfinder import build_dealfinder
+from yardsale.dealfinder import build_dealfinder, found_from
 from yardsale.ebay import search_ebay
 from yardsale.ebay_seller import CHECK_EVERY as EBAY_CHECK_EVERY
 from yardsale.ebay_seller import EbaySeller
 from yardsale.ebay_seller import from_env as ebay_from_env
-from yardsale.elsewhere import DealFinder
+from yardsale.elsewhere import SOURCE_WITHIN, DealFinder, Found
 from yardsale.facebook import enabled as facebook_enabled
 from yardsale.facebook import search_facebook
 from yardsale.hosting import HostingClient, HostingError, claim_handle, host_item, hosted_limit
@@ -134,7 +134,7 @@ from yardsale.pricing import NoSuggestedPrice, PriceError, listing_prices, marke
 from yardsale.researcher import Research, build_researcher, search_ebay_sold
 from yardsale.scout import build_scout, seller_zip
 from yardsale.shopper import Shopper, build_shopper, haggle_timeout
-from yardsale.sources import Source
+from yardsale.sources import Source, SourceError
 from yardsale.store import ACTIVE, AGENTVERSE, BUREAU, PROPOSED, DealRecord, Listing, Store
 
 log = logging.getLogger("yardsale.bureau")
@@ -146,7 +146,12 @@ Progress = Callable[[str, str], Awaitable[None]]  # (stage, text) -> tell the se
 IDENTIFY_TIMEOUT = 180.0
 RESEARCH_TIMEOUT = 240.0
 APPRAISE_TIMEOUT = 240.0
-SCOUT_TIMEOUT = 20.0  # seconds the Scout's sites get beside the Researcher; slower ones left out
+# The Scout agent answers by scout.ANSWER_WITHIN (its sites' deadline); this leaves room for
+# Agentverse's hop, or for handing the request over in memory when Agentverse is slow
+# (relay.ARRIVE_WITHIN).
+SCOUT_WAIT = 30.0
+# The Deal Finder agent answers by elsewhere.SOURCE_WITHIN, plus Agentverse's hop.
+DEALS_WAIT = SOURCE_WITHIN + 15.0
 NEGOTIATE_TIMEOUT = 15.0  # item agents in this Bureau answer in milliseconds
 HOSTED_NEGOTIATE_TIMEOUT = 25.0  # hosted ones answer through mailboxes; then the Market does
 RETRY_DELETES_EVERY = 60.0  # seconds between tries to delete closed listings' hosted agents
@@ -183,6 +188,7 @@ class Runtime:
     store: Store
     checkout: Checkout
     market: str = ""
+    market_agent: Agent | None = None  # sends the service agents their requests (relay.py)
     shopper: str = ""  # the buyer agent
     # Agentverse's Hosting API, with an API key in live mode: hosts up to host_limit item agents
     # and deletes the agents of sold or canceled listings.
@@ -496,19 +502,64 @@ async def request_reply(
         rt.pending.pop(request_id, None)
 
 
+ServiceRequest = IdentifyRequest | ResearchRequest | AppraiseRequest | FindDeals | ScoutRequest
+
+
 async def call_service(
-    ctx: Context,
+    ctx: Context | None,
     service: str,
-    request: IdentifyRequest | ResearchRequest | AppraiseRequest | FindDeals | ScoutRequest,
+    request: ServiceRequest,
     reply_type: type[R],
     wait_seconds: float,
 ) -> R:
-    reply = await request_reply(ctx, service, request, request.request_id, wait_seconds)
+    """Ask a service agent and wait for its answer. The request goes through the service's
+    Agentverse mailbox when the relay is on (relay.py), so Agentverse counts it."""
+    rt = runtime()
+    if rt.market_agent is None:  # a Runtime built without the Market, as some tests do
+        assert ctx is not None
+        reply = await request_reply(ctx, service, request, request.request_id, wait_seconds)
+    else:
+        reply = await relay_reply(rt.market_agent, service, request, wait_seconds)
     if isinstance(reply, ServiceError):
         raise PipelineError(reply.reason)
     if not isinstance(reply, reply_type):
         raise PipelineError(f"Expected {reply_type.__name__}, got {type(reply).__name__}.")
     return reply
+
+
+async def relay_reply(
+    market: Agent, service: str, request: ServiceRequest, wait_seconds: float
+) -> Model:
+    """Send a service its request through relay.py and wait for the reply with the same
+    request_id from that service."""
+    rt = runtime()
+    request_id = request.request_id
+    future: asyncio.Future[Model] = asyncio.get_running_loop().create_future()
+    rt.pending[request_id] = PendingReply(service=service, future=future)
+    started = time.monotonic()
+    try:
+        try:
+            await relay.deliver(market, service, request, request_id, _service_name(service))
+        except relay.DeliveryError as ex:
+            raise PipelineError(f"Couldn't reach a Yardsale agent ({ex}).") from None
+        try:
+            return await asyncio.wait_for(
+                future, max(1.0, wait_seconds - (time.monotonic() - started))
+            )
+        except TimeoutError:
+            waited = f"{wait_seconds:.0f}s"
+            raise PipelineError(f"A Yardsale agent didn't answer within {waited}.") from None
+    finally:
+        rt.pending.pop(request_id, None)
+
+
+def _service_name(address: str) -> str:
+    """ "Identifier", for the relay's log."""
+    services = runtime().services
+    for name in ("identifier", "researcher", "appraiser", "scout", "dealfinder"):
+        if getattr(services, name) == address:
+            return name.capitalize()
+    return address[:16]
 
 
 def _resolve(ctx: Context, sender: str, request_id: str, reply: Model) -> None:
@@ -695,21 +746,18 @@ async def haggle_for(
 
 
 async def scout_quietly(ctx: Context, run: str, query: str, zip_code: str) -> ScoutReport | None:
-    """Live asking prices from the Market Scout's sites, searched in this process with
-    SCOUT_TIMEOUT seconds for every site: a site still searching then counts as failed, so a
-    slow site never holds up a proposal. None if the Scout has no sites or fails.
-
-    Not through the Scout agent: its one reply waits for the slowest site, and the Researcher's
-    answer would wait with it. The agent stays registered for other agents."""
-    if not scout.SOURCES:
+    """Live asking prices from the Market Scout agent. It answers by scout.ANSWER_WITHIN with
+    the sites that answered by then (a site still searching counts as failed), so a slow site
+    never holds up a proposal. None if the Scout has no sites, fails, or doesn't answer."""
+    rt = runtime()
+    if not scout.SOURCES or not rt.services.scout:
         return None
     request = ScoutRequest(request_id=f"{run}-scout", query=query, zip_code=zip_code)
     try:
-        found, failed = await scout.scout_prices(scout.SOURCES, request, SCOUT_TIMEOUT)
+        return await call_service(ctx, rt.services.scout, request, ScoutReport, SCOUT_WAIT)
     except Exception as ex:
         ctx.logger.warning(f"No live asking prices for photo {run} ({type(ex).__name__})")
         return None
-    return ScoutReport(request_id=request.request_id, query=query, sources=found, failed=failed)
 
 
 async def price_photo(
@@ -932,6 +980,26 @@ class MarketBackend:
         self.ebay = rt.ebay
         self.finder = rt.finder
 
+    async def ask_deal_finder(self, query: str, budget_cents: int | None, zip_code: str) -> Found:
+        """Ask the Deal Finder agent (through Agentverse when the relay is on, else in memory)
+        and return its first answer: the sites that answered by elsewhere.SOURCE_WITHIN. It
+        searches with the finder the Market shares, so finder.search() with the same words
+        afterwards returns that same running search, for the slower sites. Raises SourceError
+        if it refuses or doesn't answer."""
+        request = FindDeals(
+            request_id=f"{uuid4().hex[:12]}-deals",
+            query=query,
+            max_cents=budget_cents,
+            zip=zip_code[:10],
+        )
+        try:
+            reply = await call_service(
+                None, self.rt.services.dealfinder, request, DealsFound, DEALS_WAIT
+            )
+        except PipelineError as ex:
+            raise SourceError(str(ex)) from None
+        return found_from(reply)
+
     async def propose(self, ctx: Context, owner: str, photo: ListPhoto) -> Listing:
         async def log_progress(stage: str, text: str) -> None:
             ctx.logger.info(f"Chat listing {photo.listing_ref[:8]}: {stage}")
@@ -1145,6 +1213,9 @@ def build(
         build_chat_protocol(MarketBackend(rt), read, fetch), publish_manifest=not offline
     )
     rt.market = shopper.market = market.address
+    rt.market_agent = market
+    if relay.configure(offline):
+        log.info("The Market's requests to its service agents go through Agentverse mailboxes")
     rt.checkout.market = market
 
     @market.on_interval(period=CHECK_EVERY)

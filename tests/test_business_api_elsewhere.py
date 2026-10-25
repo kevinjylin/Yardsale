@@ -15,7 +15,7 @@ import pytest
 from tests import fakes, sim
 from tests.helpers import local_server
 from tests.test_business_api import KEY, PUBLIC, Client
-from tests.test_chat_elsewhere import Site, deal, down
+from tests.test_chat_elsewhere import AGENT_MARK, Site, deal, down, no_answer, spy_on_agent
 from yardsale import bureau_server
 from yardsale.business_api import BusinessApi, openapi_spec
 from yardsale.store import Store
@@ -114,6 +114,31 @@ async def test_other_sites_explains_each_deal_against_the_market(store: Store, e
     )
     assert isinstance(bike["score"], float)
     assert found["next_step"].startswith("Start your answer with headline")
+
+
+async def test_a_new_search_is_the_deal_finder_agents_and_a_repeat_is_cached(
+    store: Store, ebay: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answered = spy_on_agent(monkeypatch)
+    async for client in api_over(store, {"ebay": ebay, "offerup": down}):
+        status, first = await client.call("GET", "/other-sites", q="road bike", max_usd=300)
+        assert status == 200 and first["status"] == "done" and first["count"] == 2
+        assert f"around {AGENT_MARK}" in first["summary"]  # the agent's answer, as it sent it
+        status, again = await client.call("GET", "/other-sites", q="bike road", max_usd=300)
+        assert status == 200 and again["count"] == 2
+        assert AGENT_MARK not in again["summary"]  # from the shared finder's cache
+    assert answered == ["road bike"] and ebay.calls == ["road bike"]
+
+
+async def test_if_the_agent_doesnt_answer_the_api_searches_itself(
+    store: Store, ebay: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answered = spy_on_agent(monkeypatch)
+    monkeypatch.setattr(bureau_server.MarketBackend, "ask_deal_finder", no_answer)
+    async for client in api_over(store, {"ebay": ebay}):
+        status, found = await client.call("GET", "/other-sites", q="road bike", max_usd=300)
+        assert status == 200 and found["status"] == "done" and found["count"] == 2
+    assert answered == [] and ebay.calls == ["road bike"]
 
 
 async def test_other_sites_checks_its_input(client: Client) -> None:
