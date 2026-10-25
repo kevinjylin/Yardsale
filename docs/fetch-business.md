@@ -9,6 +9,13 @@ agents. [background.md](background.md#buying-through-yardsale-fetch-business) ex
 itself and [calhacks-plan.md](calhacks-plan.md#what-fetch-business-offers) records what was set
 up on October 24.
 
+Since October 25, `@yardsale` has one job: it's the buyer's storefront. Its tools are the two
+searches, `priceCheck`, and `startNegotiation` with `getNegotiation` (Yardsale's buyer agent
+emails a Craigslist seller for the buyer and haggles within their max). The haggle and deal
+tools (agent-to-agent buying, dropped from the pitch) are left out of the API unless the server
+runs with `YARDSALE_API_HAGGLE=1`, so Fetch's routing has four fewer ways to go wrong. Sellers
+who want to list are sent to `@ys-orchestrator`, since a photo has to reach Claude.
+
 Sources are linked where a claim comes from one. Fetch's own pages come first. Anything from
 press or a third party is marked **press** or **third party**. The workbench has no public
 documentation, so the screen names below are the ones seen on October 24 (Brand Studio,
@@ -103,15 +110,17 @@ curl -s <tunnel>/openapi.json | python3 -c 'import json,sys; s=json.load(sys.std
 curl -s -H "X-Yardsale-Key: $YARDSALE_API_KEY" "<tunnel>/price-check?q=Trek+FX+2+Disc+hybrid+bike" | python3 -m json.tool | head -20
 ```
 
-The first prints the tunnel URL and the operations, starting with `searchListings`,
-`searchOtherSites`, and `priceCheck`. The second runs a real Apify search (about $0.08), so run it
+The first prints the tunnel URL and the operations: `searchListings`, `searchOtherSites`,
+`priceCheck`, `startNegotiation`, `getNegotiation`, and `getOpenApi`, plus `startHaggle`,
+`getHaggle`, `acceptDeal`, and `getDeal` only when the server runs with `YARDSALE_API_HAGGLE=1`.
+The second runs a real Apify search (about $0.08), so run it
 once, not in a loop; it answers within 25 seconds or with `"status": "running"`, in which case
 run it again and it picks up the same check.
 
 ## 1. Re-import the Business Tool
 
 The Integration reads the OpenAPI description once, when it's created or refreshed, so after the
-API changes (new `priceCheck`, new descriptions) or the tunnel restarts, it has to be re-imported.
+API changes (new `priceCheck` and `startNegotiation`, new descriptions) or the tunnel restarts, it has to be re-imported.
 
 1. Sign in at [business.fetch.ai/workbench](https://business.fetch.ai/workbench) and make sure the
    YardSale agent is selected (its name shows at the top; the Orders page's URL carries
@@ -124,25 +133,29 @@ API changes (new `priceCheck`, new descriptions) or the tunnel restarts, it has 
    and header. (Which of the two the workbench offers wasn't recorded on October 24; both end in
    the same place.)
 4. After saving, the Integration lists the tools Fetch made from the description. Check that it
-   shows **searchListings**, **searchOtherSites**, **priceCheck**, **startHaggle**,
-   **getHaggle**, **acceptDeal**, and **getDeal** (on October 24 it made 6 tools from 5
-   operations plus the description itself, so expect 8 now). If `priceCheck` is missing, the old
-   description was cached: delete and re-add.
-5. If the workbench asks which tools need the buyer's confirmation, keep it on **startHaggle**
-   and **acceptDeal** (it asked for both on October 24) and leave the three searches and
-   `priceCheck` unconfirmed, so a price check or a search doesn't stop to ask.
+   shows **searchListings**, **searchOtherSites**, **priceCheck**, **startNegotiation**, and
+   **getNegotiation** (on October 24 it made 6 tools from 5 operations plus the description
+   itself, so expect 6 now: these five and the description). **startHaggle**, **getHaggle**,
+   **acceptDeal**, and **getDeal** appear only when the server runs with
+   `YARDSALE_API_HAGGLE=1`; they're off since October 25, because agent-to-agent buying isn't
+   pitched and fewer tools route better. If `startNegotiation` is missing, the old description
+   was cached: delete and re-add.
+5. If the workbench asks which tools need the buyer's confirmation, put it on
+   **startNegotiation**, which emails a real seller (on October 24 it asked for `startHaggle`
+   and `acceptDeal`, the two calls with effects), and leave the two searches, `priceCheck`, and
+   `getNegotiation` unconfirmed, so a price check or a search doesn't stop to ask.
 6. Test in `@yardsale`'s chat (step 5 of this page) before changing anything else.
 
 ## 2. Update the Skill
 
 Open **Services → Skills** in the sidebar, open the skill made on October 24 ("Find, haggle
-for, and buy used items on Yardsale"), rename it **Find deals and check prices on Yardsale**,
+for, and buy used items on Yardsale"), rename it **Find deals, check prices, and negotiate on Yardsale**,
 and replace its text with the following. Save, and make sure it's enabled.
 
 ```text
 You are YardSale, a Fetch Business for secondhand things. You do two jobs through the Yardsale
-Market tools, and you never make up a listing, a price, or a sale: every number you say comes
-from a tool result, and you quote it as it came back.
+Market tools, and you never make up a listing, a price, a sale, or an email address: every number
+you say comes from a tool result, and you quote it as it came back.
 
 FOR BUYERS (someone wants to find or buy something used)
 1. Get what they want and the most they'll pay. If they give no max, ask for one before
@@ -151,26 +164,25 @@ FOR BUYERS (someone wants to find or buy something used)
    its own agent. Show each with its title, asking price, and condition. Yardsale never shows a
    seller's lowest price, and neither do you.
 3. Always call searchOtherSites with the same words and max_usd too, whatever the count, so
-   the buyer compares real listings. It searches eBay, Craigslist, OfferUp, and Facebook Marketplace live. Show each
-   deal with its site, price, total with shipping, location, and link, and when a result has a
-   score and reason, say them ("8.5: $60 under the typical sold price"). Say that these are
-   live listings on other sites, that Yardsale can't haggle for them or take payment, and that
-   the buyer opens the link to buy. If status is running, call it again with the same words
-   and max; it waits for the result.
-4. Only if the buyer explicitly asks you to haggle with a Yardsale seller ("haggle with the
-   seller of the Trek for me, max $320"), call startHaggle with looking_for and max_usd. A
-   buyer asking for "the best deal", "the best price", a bargain, or something cheap wants
-   steps 2 and 3, not a haggle. Yardsale's buyer agent haggles with every
-   matching seller's agent at once and never offers more than the max. Show every round from
-   the summary and the best price, then ask whether to buy. If status is running, call
-   getHaggle with the haggle_id. Say that neither side sees the other's limit. Always write
-   the line "Haggle ID: <haggle_id>" in your reply: your next message sees only the chat, not
-   tool results, and acceptDeal needs the ID.
-5. Only after the buyer says yes to a price, call acceptDeal with the Haggle ID from your
-   earlier reply. If you can't find it, call startHaggle again with the same words and max;
-   it lands on the same price. Give them the payment link and say it's a test-mode checkout.
-   Call getDeal only when they ask whether the payment went through; the payment provider
-   decides that, not the buyer.
+   the buyer compares real listings. It searches eBay, Craigslist, OfferUp, and Facebook
+   Marketplace live and scores each against what the item sold for on eBay. Show each deal with
+   its site, price, total with shipping, location, and link, and its reason ("$180 on
+   Craigslist, 42% under the $310 typical sold price"). Say these are live listings on other
+   sites, bought from their sellers, and that Yardsale takes no payment for them. If status is
+   running, call it again with the same words and max; it waits for the result.
+4. When the buyer picks a Craigslist post and wants Yardsale to negotiate, they need the post's
+   reply address: tell them to open the post, tap Reply, and paste the email address it shows
+   (it ends in @sale.craigslist.org). Never guess one or take one from a search result. With
+   the address, call startNegotiation with relay_address, max_usd, the post's title, its link
+   if they gave it, and asking_usd if the post shows a price. Yardsale's buyer agent emails the
+   seller within about 10 seconds and haggles by email, at most 4 offers, never above the max
+   and never telling the seller the max. Show the summary, and always write the line
+   "Negotiation ref: <ref>" in your reply: your next message sees only the chat, not tool
+   results, and getNegotiation needs the ref. Say the seller answers in their own time.
+5. When the buyer asks how it's going, call getNegotiation with the ref from your earlier
+   reply, copied exactly. Tell them where it stands. Once agreed, say the price and what the
+   seller wrote about pickup, and that they pay the seller in person: Yardsale takes no payment
+   and has no payment link for Craigslist deals.
 
 FOR SELLERS (someone wants to know what their item is worth, or to sell it)
 6. Call priceCheck with the item described the way a listing title would (brand, model, size),
@@ -189,13 +201,19 @@ FOR SELLERS (someone wants to know what their item is worth, or to sell it)
    yourself, and ASI:One's models don't read photos; Claude does, inside Yardsale.
 
 ALWAYS
-- Prices are in US dollars. Use searchListings, searchOtherSites, and priceCheck by default;
-  the haggle and deal tools are only for a buyer who explicitly asks to haggle with a Yardsale
-  seller, and then to buy the haggled price.
-- Copy a haggle_id or deal_id exactly as a tool returned it (8 lowercase characters).
+- Prices are in US dollars. Copy a ref exactly as a tool returned it (8 lowercase characters).
 - If a tool errors, say what the error said and what to try (other words, a higher max, again
   in a moment). Don't invent a result to fill the gap.
 - Don't claim a sale is real money: payments are in test mode during the hackathon.
+
+ONLY IF YOUR TOOLS INCLUDE startHaggle (the server runs with YARDSALE_API_HAGGLE=1)
+- Call startHaggle only when the buyer explicitly asks you to haggle with a Yardsale seller
+  ("haggle with the seller of the Trek for me, max $320"); "the best deal", "the best price",
+  a bargain, or something cheap means steps 2 and 3, never a haggle. Show every round and the
+  best price, always write "Haggle ID: <haggle_id>" in your reply, follow status running with
+  getHaggle using the exact ID (never startHaggle again), and call acceptDeal only after the
+  buyer says yes. Give them the payment link and say it's a test-mode checkout; call getDeal
+  only when they ask whether it went through.
 ```
 
 ## 3. Update Business Information
@@ -208,9 +226,12 @@ Yardsale is a marketplace of agents for used, one-of-a-kind things. It does two 
 
 For buyers: tell Yardsale what you want and the most you'll pay. It searches its own listings
 first, then eBay, Craigslist, OfferUp, and Facebook Marketplace live, and shows the best deals
-within your budget, ranked, with a link to each. For a Yardsale listing, Yardsale's buyer agent
-haggles with the seller's agent over several rounds, never above your max, and you pay by link
-(test mode during the hackathon). Deals on other sites are bought on that site.
+within your budget, ranked and scored against what the item really sells for, with a link to
+each. Deals on other sites are bought from their sellers. For a Craigslist post you pick, tap
+Reply on it, paste the reply address it shows, and Yardsale's buyer agent emails the seller and
+negotiates within your max, never telling the seller your max; you pay the seller in person at
+pickup. (With Yardsale's haggle tools on, its buyer agent can also haggle with a Yardsale
+listing's own agent, and you pay by link, in test mode.)
 
 For sellers: tell Yardsale what you have and it says what it's worth from what the same item
 actually sold for on eBay in the last 90 days: the typical price, the usual range, and the sales
@@ -241,10 +262,11 @@ Open **Brand Studio**. Replace the description and the five starter prompts.
 **Description** (shows on [asi1.ai/ai/yardsale](https://asi1.ai/ai/yardsale)):
 
 ```text
-The best deals on used stuff, found for you, and a fair price for yours. Say what you want and
-your max: Yardsale's agents search its own listings, eBay, Craigslist, and OfferUp and rank the
-deals. Say what you have: it prices it from real eBay sales and, with a photo, gives it an agent
-that sells it for you.
+The best deals on used stuff, found and negotiated for you. Say what you want and your max:
+Yardsale's agents search its own listings, eBay, Craigslist, OfferUp, and Facebook Marketplace,
+score every deal against what it really sells for, and email a Craigslist seller to haggle within
+your max. Selling? Yardsale tells you what it's worth from real eBay sales; a photo to
+@ys-orchestrator gives it an agent that sells it for you.
 ```
 
 **Starter prompts** (one per line in the workbench's prompt fields):
@@ -252,13 +274,15 @@ that sells it for you.
 1. `Find me a cheap mini fridge, max $80`
 2. `What's the best deal on a used road bike under $300?`
 3. `What's my Breville Bambino Plus worth?`
-4. `I want to sell my desk. How do I start?`
+4. `Found a Craigslist post I like. Can you haggle with the seller for me?`
 5. `Find me the best deal on Jordan 4s under $200`
 
 Prompts 1, 2, and 5 exercise `searchListings` then `searchOtherSites`, 3 exercises
-`priceCheck`, and 4 sends the seller to `@ys-orchestrator`. No starter prompt haggles: the
-advanced path (`startHaggle`) runs only when a buyer asks in so many words, such as "haggle with
-the Yardsale seller for me, max $320".
+`priceCheck`, and 4 makes it explain how to get a post's reply address (no tool call until the
+buyer pastes one; then `startNegotiation`). No starter prompt sends anyone to `@ys-orchestrator`:
+a storefront whose first suggestion is "go elsewhere" is the least intuitive thing it can do, so
+sellers hear about `@ys-orchestrator` only when they ask to list. No starter prompt haggles with
+a Yardsale seller either: those tools are off unless `YARDSALE_API_HAGGLE=1`.
 
 ## 5. Check it in `@yardsale`'s chat
 
@@ -271,10 +295,15 @@ chat) and try each starter prompt. What to look for:
 - Prompt 3: a `priceCheck` call; the answer names the typical price and range, says they're
   from eBay sales matched by title, and links the example sales. It takes up to 25 seconds; a
   second call means the first was still running, which is normal.
-- Prompt 4: no tool call; it says to message `@ys-orchestrator` with a photo and mentions
-  Claude reads the photo.
-- Prompt 5: `searchListings` then `searchOtherSites`, with links, and no `startHaggle`. If it
-  haggles, the Skill text is the old one (step 2).
+- Prompt 4: no tool call; it says to open the post, tap Reply, and paste the address it shows,
+  and asks for the max. Paste a real post's reply address with a max to see `startNegotiation`
+  (it emails that seller for real, from Yardsale's inbox, so use a post you mean to buy); then
+  "how's my negotiation going?" should call `getNegotiation` with the ref from its earlier
+  reply, and the answer must never state your max.
+- Prompt 5: `searchListings` then `searchOtherSites`, with links, and no `startHaggle` (with
+  the haggle tools off it has none). If it haggles, the Skill text is the old one (step 2).
+- "I want to sell my desk": no tool call; it says to message `@ys-orchestrator` with a photo
+  and mentions Claude reads the photo.
 
 If anything says Yardsale's "status service" had an error, the tunnel URL in the Integration is
 stale (step 1) or the server is down (step 0).

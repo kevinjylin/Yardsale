@@ -13,10 +13,12 @@ eBay actor; they could move here later, once more than one source is in use.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
-from collections.abc import Awaitable, Callable
+import weakref
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -28,11 +30,55 @@ MAX_PRICE_USD = 1_000_000  # above this is a parsing error, not a price
 ACTOR_TIMEOUT = 180.0  # seconds; a scrape of one city takes tens of seconds
 APIFY_LAST_RUN_URL = "https://api.apify.com/v2/acts/{actor}/runs/last"
 APIFY_RUN_LOG_URL = "https://api.apify.com/v2/actor-runs/{run}/log"
-# Apify's free plan runs at most 5 actors at once, and a buyer's search runs 4 or 5 (every site
-# plus the eBay comps) while the Scout may run 4 more: on October 24 a probe got a 402
-# "concurrent-runs-limit-exceeded" for OfferUp. A refused run costs nothing, so it's retried
-# after each of these waits before the site counts as failed.
-BUSY_RETRY_SECONDS: tuple[float, ...] = (3.0, 6.0)
+# Apify's free plan runs at most 5 actors at once across the whole account. A buyer's search
+# runs 5 (four sites plus the eBay comps), and so does a photo (the Researcher's eBay search plus
+# the Scout's four sites). On October 25 a photo's eBay search got a 402
+# "concurrent-runs-limit-exceeded" while another chat's deal search was running, and the photo
+# failed. So every run in this server waits for a slot (`apify_slot`), with one slot kept for
+# eBay sold-price searches. YARDSALE_APIFY_RUNS changes the limit, for a paid plan.
+APIFY_RUNS_AT_ONCE = 5
+# Runs from another machine on the same Apify account aren't counted by the slots. A refused run
+# costs nothing, so it's retried after each of these waits before it counts as failed.
+BUSY_RETRY_SECONDS: tuple[float, ...] = (3.0, 6.0, 12.0)
+
+
+def apify_runs_at_once() -> int:
+    """How many Apify runs this server starts at once (YARDSALE_APIFY_RUNS, default 5)."""
+    raw = os.getenv("YARDSALE_APIFY_RUNS", "").strip()
+    try:
+        return max(1, int(raw)) if raw else APIFY_RUNS_AT_ONCE
+    except ValueError:
+        return APIFY_RUNS_AT_ONCE
+
+
+# One pair of slot counters per event loop: (every run, listing runs). The server has one loop;
+# the tests start a new one per test, and an asyncio.Semaphore can't be shared between loops.
+_slots: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, tuple[asyncio.Semaphore, asyncio.Semaphore]
+] = weakref.WeakKeyDictionary()
+
+
+@contextlib.asynccontextmanager
+async def apify_slot(sold_comps: bool = False) -> AsyncIterator[None]:
+    """Wait for a free Apify run slot in this server, and hold it for one run.
+
+    Listing searches (every site, for buyers and the Scout) share all slots but one. eBay
+    sold-price searches (`sold_comps=True`) may also take the last one, so a photo's price never
+    waits behind a queue of listing searches: without sold prices there's no price at all.
+    """
+    loop = asyncio.get_running_loop()
+    slots = _slots.get(loop)
+    if slots is None:
+        runs = apify_runs_at_once()
+        slots = (asyncio.Semaphore(runs), asyncio.Semaphore(max(1, runs - 1)))
+        _slots[loop] = slots
+    every_run, listing_runs = slots
+    if sold_comps:
+        async with every_run:
+            yield
+    else:
+        async with listing_runs, every_run:
+            yield
 
 
 class SourceError(RuntimeError):
@@ -203,7 +249,8 @@ async def run_actor(
     """
     for wait in (*BUSY_RETRY_SECONDS, None):
         try:
-            return await _run_actor_once(actor, body, max_results, max_charge_usd)
+            async with apify_slot():
+                return await _run_actor_once(actor, body, max_results, max_charge_usd)
         except SourceError as ex:
             if ex.kind != "busy" or wait is None:
                 raise

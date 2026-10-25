@@ -1,11 +1,13 @@
-"""The HTTP API @yardsale (the Fetch Business agent) calls: finding, haggling, buying, and its
-OpenAPI description. Runs against the offline Market with fake payments, on this machine only."""
+"""The HTTP API @yardsale (the Fetch Business agent) calls: finding, negotiating with Craigslist
+sellers by email, haggling and buying (with the haggle tools on), and its OpenAPI description.
+Runs against the offline Market with fake payments, on this machine only."""
 
 from __future__ import annotations
 
 import json
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import aiohttp
@@ -13,13 +15,26 @@ import pytest
 
 from tests import fakes, sim
 from tests.helpers import local_server
-from yardsale import bureau_server
-from yardsale.business_api import ID_LENGTH, ID_LETTERS, KEY_HEADER, BusinessApi, openapi_spec
+from tests.test_craigslist_mail import INBOX, PASSWORD
+from yardsale import bureau_server, craigslist_buyer
+from yardsale.business_api import (
+    HAGGLE_PATHS,
+    ID_LENGTH,
+    ID_LETTERS,
+    KEY_HEADER,
+    NEGOTIATION_BUYER,
+    BusinessApi,
+    negotiation_json,
+    openapi_spec,
+)
 from yardsale.store import PAID, PENDING, Store
 
 KEY = "test-key-for-the-business-api-0123456789"
 PUBLIC = "https://yardsale-api.example.test"
 BIKE = fakes.photo_url("bike")
+POST = "a1b2c3d4e5@sale.craigslist.org"  # a Craigslist post's reply address, as Reply shows it
+ALWAYS = {"searchListings", "searchOtherSites", "priceCheck", "startNegotiation", "getNegotiation"}
+HAGGLING = {"startHaggle", "getHaggle", "acceptDeal", "getDeal"}
 
 
 class Client:
@@ -46,6 +61,7 @@ async def shop(store: Store) -> AsyncIterator[tuple[sim.Market, fakes.FakePaymen
             market.agent._build_context,
             KEY,
             PUBLIC,
+            haggle=True,
         )
         async with local_server(api.app()) as base, aiohttp.ClientSession() as session:
             yield market, payments, Client(base, session)
@@ -59,15 +75,27 @@ async def list_bike(market: sim.Market, name: str, asking: int, lowest: int) -> 
     assert "agent1q" in await seller.say("approve")
 
 
-def test_the_description_is_openapi_3_with_every_operation() -> None:
+def operations(spec: Any) -> set[str]:
+    return {op["operationId"] for path in spec["paths"].values() for op in path.values()}
+
+
+def test_the_description_is_openapi_3_with_the_haggle_tools_only_when_asked() -> None:
     spec = openapi_spec(PUBLIC)
     assert spec["openapi"].startswith("3.")
     assert spec["servers"] == [{"url": PUBLIC}]
     scheme = spec["components"]["securitySchemes"]["apiKey"]
     assert scheme == {"type": "apiKey", "in": "header", "name": KEY_HEADER}
-    ids = {op["operationId"] for path in spec["paths"].values() for op in path.values()}
-    assert {"searchListings", "startHaggle", "getHaggle", "acceptDeal", "getDeal"} <= ids
+    # Agent-to-agent buying was dropped from the pitch: by default Fetch doesn't see it at all.
+    assert operations(spec) == ALWAYS | {"getOpenApi"}
+    assert "startHaggle" not in spec["info"]["description"]
+    assert "startNegotiation" in spec["info"]["description"]
     json.dumps(spec)  # plain JSON
+
+    with_haggling = openapi_spec(PUBLIC, haggle=True)
+    assert operations(with_haggling) == ALWAYS | HAGGLING | {"getOpenApi"}
+    assert set(HAGGLE_PATHS) <= set(with_haggling["paths"])
+    assert "startHaggle" in with_haggling["info"]["description"]
+    json.dumps(with_haggling)
 
 
 async def test_every_call_but_the_description_needs_the_key(shop: Any) -> None:
@@ -94,6 +122,7 @@ async def test_search_shows_asking_prices_never_floors(shop: Any) -> None:
     assert bike["asking_usd"] == 360 and bike["asking_price"] == "$360"
     text = json.dumps(found)
     assert "floor" not in text and "300" not in text
+    assert "startHaggle" in found["next_step"]  # the shop fixture has the haggle tools on
     assert (await client.call("GET", "/listings", q="bike", max_usd=200))[1]["count"] == 0
     assert (await client.call("GET", "/listings", max_usd="lots"))[0] == 400
 
@@ -220,6 +249,7 @@ async def test_a_slow_haggle_answers_later(store: Store) -> None:
             market.agent._build_context,
             KEY,
             answer_within=0.0,
+            haggle=True,
         )
         async with local_server(api.app()) as base, aiohttp.ClientSession() as session:
             client = Client(base, session)
@@ -254,3 +284,144 @@ async def test_bad_requests_and_other_buyers_deals(shop: Any, store: Store) -> N
     assert "Deal!" in await buyer.say("accept")
     (chat_deal,) = store.deals()
     assert (await client.call("GET", f"/deals/{chat_deal.deal_id}"))[0] == 404
+
+
+async def test_the_haggle_tools_are_off_unless_asked_for(store: Store) -> None:
+    """Without YARDSALE_API_HAGGLE the four calls aren't described, and a Business Tool that
+    still has them from an earlier import gets a 404 that says so."""
+    async with sim.running_market(store, payments=fakes.FakePayments()) as market:
+        await list_bike(market, "ann", 360, 300)
+        api = BusinessApi(
+            bureau_server.MarketBackend(bureau_server.runtime()),
+            market.agent._build_context,
+            KEY,
+        )
+        async with local_server(api.app()) as base, aiohttp.ClientSession() as session:
+            client = Client(base, session)
+            _, spec = await client.call("GET", "/openapi.json", key=None)
+            assert operations(spec) == ALWAYS | {"getOpenApi"}
+            for method, path in (
+                ("POST", "/haggles"),
+                ("GET", "/haggles/abcdefgh"),
+                ("POST", "/haggles/abcdefgh/accept"),
+                ("GET", "/deals/x"),
+            ):
+                status, error = await client.call(method, path, {"looking_for": "b", "max_usd": 9})
+                assert (status, error["code"]) == (404, "haggle_off"), path
+                assert "startNegotiation" in error["error"]
+            # The key is still checked first, and the search doesn't point at a missing tool.
+            assert (await client.call("POST", "/haggles", {}, key="wrong"))[0] == 401
+            status, found = await client.call("GET", "/listings", q="hybrid bike")
+            assert status == 200 and found["count"] == 1
+            assert "startHaggle" not in found["next_step"]
+
+
+async def test_start_and_follow_a_craigslist_negotiation(
+    shop: Any, store: Store, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _, _, client = shop
+    ask = {"relay_address": POST, "title": "Trek FX 2 bike", "max_usd": 250, "asking_usd": 300}
+    status, error = await client.call("POST", "/negotiations", ask)
+    assert status == 503 and error["code"] == "mail_off"  # no inbox on this server
+    monkeypatch.setenv("YARDSALE_MAIL_ADDRESS", INBOX)
+    monkeypatch.setenv("YARDSALE_MAIL_PASSWORD", PASSWORD)
+    caplog.set_level(logging.INFO, logger="yardsale.api")
+
+    status, started = await client.call("POST", "/negotiations", ask)
+    assert status == 200 and started["status"] == "opening"
+    ref = started["ref"]
+    assert len(ref) == 8 and set(ref) <= set(ID_LETTERS)
+    assert started["title"] == "Trek FX 2 bike" and started["asking_usd"] == 300
+    assert "$195 to start" in started["summary"] and "in person" in started["summary"]
+    assert f"Negotiation ref: {ref}" in started["next_step"]
+    assert "250" not in json.dumps(started)  # the max never comes back
+    (saved,) = craigslist_buyer.owned(store, NEGOTIATION_BUYER)
+    assert (saved.ref, saved.max_cents, saved.asking_cents) == (ref, 25000, 30000)
+
+    # Following it, with the ref capitalised as a model might write it.
+    status, again = await client.call("GET", f"/negotiations/{ref.upper()}")
+    assert status == 200 and again["ref"] == ref
+    assert "first email is about to go out" in again["summary"]
+    assert f"Negotiation ref: {ref}" in again["next_step"] and "250" not in json.dumps(again)
+
+    # Asked again for the same post, it's the same negotiation, not a second one.
+    status, twice = await client.call("POST", "/negotiations", ask)
+    assert status == 200 and twice["ref"] == ref and twice["already_started"] is True
+    assert "already negotiating" in twice["summary"]
+    assert len(craigslist_buyer.owned(store, NEGOTIATION_BUYER)) == 1
+
+    # A chat buyer's negotiation isn't visible here, and nobody can join it.
+    other = craigslist_buyer.start(store, "asi1:someone", "zz9@sale.craigslist.org", 20000, "Lamp")
+    assert (await client.call("GET", f"/negotiations/{other.ref}"))[0] == 404
+    status, error = await client.call(
+        "POST", "/negotiations", {"relay_address": "zz9@sale.craigslist.org", "max_usd": 10}
+    )
+    assert status == 409 and error["code"] == "taken"
+    status, error = await client.call("GET", "/negotiations/qqqqqqqq")
+    assert status == 404 and "exactly" in error["error"]
+
+    # The log has the routes, never the ref, the title, or the max.
+    text = "\n".join(r.getMessage() for r in caplog.records if r.name == "yardsale.api")
+    assert "API POST /negotiations -> 200" in text
+    assert "API GET /negotiations/{ref} -> 200" in text
+    assert ref not in text and "Trek" not in text and "250" not in text
+
+
+async def test_bad_negotiation_requests_and_lenient_addresses(
+    shop: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("YARDSALE_MAIL_ADDRESS", INBOX)
+    monkeypatch.setenv("YARDSALE_MAIL_PASSWORD", PASSWORD)
+    _, _, client = shop
+    bad = {"relay_address": "someone@gmail.com", "max_usd": 250}
+    assert (await client.call("POST", "/negotiations", bad))[1]["code"] == "bad_request"
+    assert (await client.call("POST", "/negotiations", {"relay_address": POST}))[1][
+        "code"
+    ] == "bad_amount"
+    assert (
+        await client.call(
+            "POST", "/negotiations", {"relay_address": POST, "max_usd": 250, "asking_usd": "lots"}
+        )
+    )[1]["code"] == "bad_amount"
+    assert (await client.call("POST", "/negotiations", "nope"))[0] == 400
+    assert (await client.call("POST", "/negotiations", {"relay_address": POST}, key=None))[0] == 401
+
+    # The address may arrive inside what the buyer pasted, the max as text, and the title can
+    # come from the post's link.
+    status, started = await client.call(
+        "POST",
+        "/negotiations",
+        {
+            "relay_address": f"Here it is: {POST.upper()} thanks",
+            "post_url": "https://sfbay.craigslist.org/eby/bik/d/berkeley-trek-fx-2-hybrid-bike/7777.html",
+            "max_usd": "$250",
+        },
+    )
+    assert status == 200 and started["relay_address"] == POST
+    assert started["title"] == "berkeley trek fx 2 hybrid bike"
+    assert started["asking_usd"] is None and "ask the seller's price first" in started["summary"]
+
+
+def test_a_finished_negotiation_tells_the_buyer_how_it_ended(store: Store) -> None:
+    n = craigslist_buyer.start(store, NEGOTIATION_BUYER, POST, 25000, "Trek FX 2 bike", 30000)
+    agreed = replace(
+        n,
+        status=craigslist_buyer.AGREED,
+        offer_cents=22000,
+        seller_cents=22000,
+        price_cents=22000,
+        rounds=2,
+        note="Saturday 10am at Ashby BART works.",
+    )
+    data = negotiation_json(agreed)
+    assert data["agreed_usd"] == 220 and data["offers_made"] == 2
+    assert data["seller_note"] == "Saturday 10am at Ashby BART works."
+    assert "agreed at $220" in data["summary"] and "in person" in data["next_step"]
+    assert "250" not in json.dumps(data)
+
+    stopped = replace(n, status=craigslist_buyer.STOPPED, seller_cents=28000, rounds=4)
+    data = negotiation_json(stopped)
+    assert "no deal" in data["summary"] and "raise their max" in data["next_step"]
+    assert "250" not in json.dumps(data)
+    for status in (craigslist_buyer.SOLD, craigslist_buyer.NEEDS_YOU):
+        assert negotiation_json(replace(n, status=status))["next_step"]

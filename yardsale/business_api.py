@@ -4,18 +4,26 @@ Fetch Business's "OpenAPI Integration" (a Business Tool) lets @yardsale call an 
 its own chat. Fetch reads /openapi.json and makes one tool per operation, so the descriptions
 below are written for the model that picks between them. The two products come first: deals for
 buyers (Yardsale's listings, then the best deals on other sites) and prices for sellers (what
-something is worth, from real eBay sales). Haggling and buying stay available but are marked
-"advanced" and say to use them only when the buyer explicitly asks to haggle with a Yardsale
-seller, so @yardsale searches (Yardsale and other sites) for "the best deal" or "the best price":
+something is worth, from real eBay sales). For a Craigslist post the buyer picks, the buyer agent
+emails the seller and haggles for them. The four haggle and deal calls (agent-to-agent buying,
+dropped from the pitch) are left out of the API and its description unless YARDSALE_API_HAGGLE=1;
+with them in, they're marked "advanced" and say to use them only when the buyer explicitly asks
+to haggle with a Yardsale seller, so @yardsale searches (Yardsale and other sites) for "the best
+deal" or "the best price":
 
     GET  /listings                search what's for sale on Yardsale (asking prices only)
     GET  /other-sites             the best deals on eBay, Craigslist, OfferUp... under a max,
                                   with a deal score when the finder gives one (links only)
     GET  /price-check             what an item is worth: recent eBay sold prices for the words,
                                   plus local asking prices when a Scout agent is running
-    POST /haggles                 advanced: the buyer agent haggles with every match at once
+    POST /negotiations            the buyer agent emails a Craigslist seller and haggles within
+                                  the buyer's max (craigslist_buyer.py); the buyer pastes the
+                                  post's reply address, Yardsale never fetches one
+    GET  /negotiations/{ref}      where that negotiation stands
+    POST /haggles                 YARDSALE_API_HAGGLE=1: the buyer agent haggles with every
+                                  matching item agent at once
     GET  /haggles/{id}            a haggle that was still running when POST answered
-    POST /haggles/{id}/accept     advanced: buy at the haggled price; returns the payment link
+    POST /haggles/{id}/accept     buy at the haggled price; returns the payment link
     GET  /deals/{id}              whether a deal is paid
     GET  /openapi.json            this API's description (no key needed)
     GET  /ebay/callback           where eBay sends a seller after connecting their account (no
@@ -32,8 +40,9 @@ match YARDSALE_API_KEY. Without that key the API doesn't start. It listens on
 YARDSALE_API_URL is the public address the description gives.
 
 A haggle's ID is its buyer: only a caller holding the ID can see its prices or accept them, the
-way a chat conversation owns its haggles. The buyer's max and the sellers' floors stay out of
-the logs, and floors never leave the item agents.
+way a chat conversation owns its haggles. A negotiation's ref works the same way, and the API's
+negotiations belong to the API, so no chat lists them. The buyer's max and the sellers' floors
+stay out of the logs, and floors never leave the item agents.
 """
 
 from __future__ import annotations
@@ -54,9 +63,11 @@ from uuid import uuid4
 from aiohttp import web
 from uagents import Context
 
-from yardsale import deals
+from yardsale import craigslist_buyer, deals, haggle
 from yardsale.chat import LOWEST_SHARE_REACH, STATUS_TEXT, Backend, haggle_text
 from yardsale.common import PipelineError
+from yardsale.craigslist_buyer import EMAIL_ROUNDS, Negotiation
+from yardsale.craigslist_mail import MailConfigError, settings_from_env
 from yardsale.deals import ScoredDeal
 from yardsale.ebay_seller import EbayError
 from yardsale.elsewhere import (
@@ -121,12 +132,33 @@ NO_SUCH_HAGGLE = (
 )
 
 
+NO_SUCH_NEGOTIATION = (
+    "No negotiation has that ref. Copy ref exactly as startNegotiation returned it (8 lowercase "
+    "characters, from the 'Negotiation ref' line in the chat)."
+)
+HAGGLE_OFF = (
+    "Haggling with Yardsale's own sellers and buying through this API are off on this server "
+    "(YARDSALE_API_HAGGLE isn't set). Use searchListings, searchOtherSites, priceCheck, and "
+    "startNegotiation."
+)
+NEGOTIATION_BUYER = "api"  # owns every negotiation started here; a chat's owner is "asi1:<hash>"
+Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
+
+
 def keep_the_id(haggle_id: str) -> str:
     """A Fetch Business agent's next turn sees the chat, not earlier tool results (October 24:
     "lock it in" found no haggle_id), so the ID has to be in its reply."""
     return (
         f"Write the line 'Haggle ID: {haggle_id}' in your reply to the buyer. Your next message "
         "sees only the chat, not this tool result, and acceptDeal needs the ID."
+    )
+
+
+def keep_the_ref(ref: str) -> str:
+    """The same for a Craigslist negotiation's ref."""
+    return (
+        f"Write the line 'Negotiation ref: {ref}' in your reply to the buyer. Your next message "
+        "sees only the chat, not this tool result, and getNegotiation needs the ref."
     )
 
 
@@ -154,6 +186,12 @@ def api_port() -> int:
         return int(raw) if raw else DEFAULT_PORT
     except ValueError:
         raise ApiConfigError("YARDSALE_API_PORT must be a port number") from None
+
+
+def haggle_tools_enabled() -> bool:
+    """YARDSALE_API_HAGGLE=1 puts the haggle and deal calls (agent-to-agent buying, which the
+    pitch dropped) in the API and its description. Off, they answer 404 and say so."""
+    return os.getenv("YARDSALE_API_HAGGLE", "").strip().lower() in ("1", "true", "yes")
 
 
 def dollars(cents: int) -> float:
@@ -252,9 +290,11 @@ def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
             "listing with its url as a link and its reason, which says the price, shipping, how "
             "far under or over the budget it is, condition, location, and what the site didn't "
             "list. Say plainly which are over_budget or have no_price. They aren't Yardsale "
-            "listings: Yardsale's agents can't haggle for them or take payment, so the buyer "
-            "opens the link to buy from the seller. Craigslist sellers usually take offers by "
-            "email."
+            "listings, so Yardsale takes no payment for them: the buyer opens the link to buy "
+            "from the seller. For a Craigslist post the buyer picks, Yardsale's buyer agent can "
+            "email the seller and haggle for them (startNegotiation) once the buyer taps Reply "
+            "on the post and pastes the reply address it shows; on other sites the buyer deals "
+            "with the seller themselves."
         )
         if found.loose:
             next_step += " None had every word of the search; say these are the closest."
@@ -452,8 +492,77 @@ def _amount(value: Any) -> int | None:
     return cents if cents is not None and valid_cents(cents) else None
 
 
+def _usd_or_none(cents: int | None) -> float | None:
+    return dollars(cents) if cents is not None else None
+
+
+def negotiation_json(n: Negotiation) -> dict[str, Any]:
+    """Where a Craigslist negotiation stands, for @yardsale to tell the buyer. Never the max."""
+    if n.status in craigslist_buyer.LIVE:
+        next_step = (
+            "Tell the buyer where it stands. The seller answers by email in their own time "
+            f"(often hours), so there may be nothing new yet. {keep_the_ref(n.ref)} Call "
+            "getNegotiation again when they ask."
+        )
+    elif n.status == craigslist_buyer.AGREED:
+        next_step = (
+            "Tell the buyer the agreed price and what the seller wrote about pickup, and that "
+            "they pay the seller in person at pickup: Yardsale takes no payment for Craigslist "
+            "deals and has no payment link for this one."
+        )
+    elif n.status == craigslist_buyer.STOPPED:
+        next_step = (
+            "No deal: the seller wouldn't come down to the buyer's max. The buyer can raise "
+            "their max and call startNegotiation again with the same reply address, or reply "
+            "to the post themselves."
+        )
+    elif n.status == craigslist_buyer.SOLD:
+        next_step = "The seller says it's gone. Offer to search again with searchOtherSites."
+    else:
+        next_step = (
+            "The seller's last answer couldn't be read, so the buyer should reply to the post "
+            "themselves through Craigslist to carry on."
+        )
+    return {
+        "ref": n.ref,
+        "status": n.status,
+        "already_started": False,
+        "title": n.title,
+        "post_url": n.post_url or None,
+        "relay_address": n.relay,
+        "asking_usd": _usd_or_none(n.asking_cents),
+        "our_offer_usd": _usd_or_none(n.offer_cents),
+        "seller_price_usd": _usd_or_none(n.seller_cents),
+        "agreed_usd": _usd_or_none(n.price_cents),
+        "offers_made": n.rounds,
+        "offers_at_most": EMAIL_ROUNDS,
+        "seller_note": n.note or None,
+        "summary": craigslist_buyer.status_line(n),
+        "next_step": next_step,
+    }
+
+
+def _opening_summary(n: Negotiation) -> str:
+    """What the first email will do, for the buyer (the chat's reply says the same)."""
+    what = f'"{n.title}"' if n.title else "that post"
+    if n.asking_cents is not None:
+        first = haggle.opening_offer(n.asking_cents, craigslist_buyer.ceiling(n))
+        opener = f"offer {usd(first)} to start"
+    else:
+        opener = "ask the seller's price first"
+    return (
+        f"Yardsale's buyer agent will email the seller of {what} from Yardsale's inbox within "
+        f"about 10 seconds, through Craigslist's relay. It'll {opener}, haggle by email over at "
+        f"most {EMAIL_ROUNDS} offers, and never offer more than the buyer's max or tell the "
+        "seller what it is. Every email says it's from the buyer's Yardsale assistant, an AI "
+        "agent. Craigslist deals are paid to the seller in person at pickup; Yardsale takes no "
+        "payment for them."
+    )
+
+
 class BusinessApi:
-    """The API's handlers, over the Market's chat backend."""
+    """The API's handlers, over the Market's chat backend. The haggle and deal calls are served
+    only with `haggle` (YARDSALE_API_HAGGLE=1); the rest are always on."""
 
     def __init__(
         self,
@@ -465,8 +574,10 @@ class BusinessApi:
         clock: Callable[[], float] = time.time,
         research: ResearchComps = research_via_market,
         cache_for: float = PRICE_CHECK_CACHE,
+        haggle: bool = False,
     ) -> None:
         self.backend = backend
+        self.haggle = haggle
         self.store = backend.store
         self.context = context  # the Market's, for messages to the buyer and item agents
         self.key = key
@@ -487,10 +598,12 @@ class BusinessApi:
         app.router.add_get("/listings", self.listings)
         app.router.add_get("/other-sites", self.other_sites)
         app.router.add_get("/price-check", self.price_check)
-        app.router.add_post("/haggles", self.start_haggle)
-        app.router.add_get("/haggles/{haggle_id}", self.get_haggle)
-        app.router.add_post("/haggles/{haggle_id}/accept", self.accept)
-        app.router.add_get("/deals/{deal_id}", self.get_deal)
+        app.router.add_post("/negotiations", self.start_negotiation)
+        app.router.add_get("/negotiations/{ref}", self.get_negotiation)
+        app.router.add_post("/haggles", self._gated(self.start_haggle))
+        app.router.add_get("/haggles/{haggle_id}", self._gated(self.get_haggle))
+        app.router.add_post("/haggles/{haggle_id}/accept", self._gated(self.accept))
+        app.router.add_get("/deals/{deal_id}", self._gated(self.get_deal))
         app.router.add_get(EBAY_CALLBACK, self.ebay_callback)
         return app
 
@@ -524,6 +637,17 @@ class BusinessApi:
             return _error(401, f"Send the API key in the {KEY_HEADER} header.", "unauthorized")
         return await handler(request)
 
+    def _gated(self, handler: Handler) -> Handler:
+        """A haggle or deal call. With those tools off it answers a 404 that says so, since a
+        Business Tool imported while they were on may still carry them."""
+
+        async def gated(request: web.Request) -> web.StreamResponse:
+            if not self.haggle:
+                return _error(404, HAGGLE_OFF, "haggle_off")
+            return await handler(request)
+
+        return gated
+
     def _state_key(self, haggle_id: str) -> str:
         return f"api:{haggle_id}"
 
@@ -551,7 +675,7 @@ class BusinessApi:
             proto = request.headers.get("X-Forwarded-Proto", request.scheme)
             host = request.headers.get("X-Forwarded-Host", request.host)
             base = f"{proto}://{host}"
-        return web.json_response(openapi_spec(base))
+        return web.json_response(openapi_spec(base, haggle=self.haggle))
 
     # --- Finding ----------------------------------------------------------------------------
 
@@ -563,21 +687,28 @@ class BusinessApi:
             if budget is None:
                 return _error(400, "max_usd must be a dollar amount, like 300.", "bad_amount")
         found = search(self.backend.available(), query, budget)
+        if found:
+            next_step = (
+                "Show the buyer these with their asking prices, then call searchOtherSites "
+                "with the same q and max_usd so they can compare real listings elsewhere."
+            )
+            if self.haggle:
+                next_step += (
+                    " Call startHaggle only if the buyer explicitly asks Yardsale to haggle "
+                    "with a Yardsale seller."
+                )
+        elif self.backend.finder.enabled:
+            next_step = (
+                "Nothing on Yardsale matches right now. Call searchOtherSites with the same q "
+                "and max_usd to find deals on other sites, or try other words."
+            )
+        else:
+            next_step = "Nothing matches right now. Try other words or a higher budget."
         return web.json_response(
             {
                 "count": len(found),
                 "listings": [_listing_json(listing) for listing in found],
-                "next_step": (
-                    "Show the buyer these with their asking prices, then call searchOtherSites "
-                    "with the same q and max_usd so they can compare real listings elsewhere. "
-                    "Call startHaggle only if the buyer explicitly asks Yardsale to haggle with "
-                    "a Yardsale seller."
-                    if found
-                    else "Nothing on Yardsale matches right now. Call searchOtherSites with the "
-                    "same q and max_usd to find deals on other sites, or try other words."
-                    if self.backend.finder.enabled
-                    else "Nothing matches right now. Try other words or a higher budget."
-                ),
+                "next_step": next_step,
             }
         )
 
@@ -700,6 +831,100 @@ class BusinessApi:
         if "local" in summary:
             next_step += " The local block is what similar items are asking for nearby right now."
         return web.json_response({"status": "done", **summary, "next_step": next_step})
+
+    # --- Negotiating with Craigslist sellers ------------------------------------------------
+
+    async def start_negotiation(self, request: web.Request) -> web.Response:
+        """The buyer agent emails a Craigslist seller for the buyer (craigslist_buyer.py), the
+        way the chat's `negotiate` command does. The buyer pastes the post's reply address;
+        Yardsale never fetches one. The negotiation belongs to the API, so no chat lists it, and
+        only a caller holding the ref can follow it."""
+        try:
+            body = await request.json()
+        except ValueError:
+            return _error(400, "Send a JSON body.", "bad_request")
+        if not isinstance(body, dict):
+            return _error(400, "Send a JSON object.", "bad_request")
+        pasted = str(body.get("relay_address") or "")[:300].lower()
+        found = craigslist_buyer.RELAY.search(pasted)
+        if found is None:
+            return _error(
+                400,
+                "relay_address must be the post's Craigslist reply address, like "
+                "abc123@sale.craigslist.org. Craigslist shows it when the buyer taps Reply on "
+                "the post; ask them to copy it. Never guess one.",
+                "bad_request",
+            )
+        relay = found.group(0)
+        max_cents = _amount(body.get("max_usd"))
+        if max_cents is None:
+            return _error(
+                400, "max_usd must be the most the buyer will pay, like 250.", "bad_amount"
+            )
+        asking_cents = None
+        if body.get("asking_usd") not in (None, ""):
+            asking_cents = _amount(body.get("asking_usd"))
+            if asking_cents is None:
+                return _error(400, "asking_usd must be a dollar amount, like 300.", "bad_amount")
+        title = " ".join(str(body.get("title") or "").split())[:120]
+        post_url = str(body.get("post_url") or "").strip()[:300]
+        if not post_url.lower().startswith(("http://", "https://")):
+            post_url = ""
+        if not title and post_url:
+            title = craigslist_buyer.title_from_url(post_url)
+        try:
+            settings = settings_from_env()
+        except MailConfigError:
+            settings = None
+        if settings is None:
+            return _error(
+                503,
+                "Email negotiation is off on this Yardsale server (its Craigslist inbox isn't "
+                "set up), so it can't write to that seller. The buyer can reply to the post "
+                "themselves.",
+                "mail_off",
+            )
+        if relay == settings.address.lower():
+            return _error(
+                400, "That's Yardsale's own inbox, not a post's reply address.", "bad_request"
+            )
+        current = craigslist_buyer.live_for_relay(self.store, relay)
+        if current is not None:
+            if current.buyer != NEGOTIATION_BUYER:
+                return _error(
+                    409,
+                    "Someone is already negotiating for that post through Yardsale. Try again "
+                    "later.",
+                    "taken",
+                )
+            data = negotiation_json(current)
+            data["already_started"] = True
+            data["summary"] = "Yardsale is already negotiating for that post. " + data["summary"]
+            return web.json_response(data)
+        try:
+            n = craigslist_buyer.start(
+                self.store, NEGOTIATION_BUYER, relay, max_cents, title, asking_cents, post_url
+            )
+        except ValueError as error:
+            return _error(400, f"Yardsale can't negotiate that one: {error}.", "bad_request")
+        log.info(f"API negotiation {n.ref[:3]} started")
+        data = negotiation_json(n)
+        data["summary"] = _opening_summary(n)
+        data["next_step"] = (
+            "Tell the buyer this, and that the seller answers by email in their own time, so "
+            f"there's no result yet. {keep_the_ref(n.ref)} Call getNegotiation with the ref "
+            "when they ask how it's going."
+        )
+        return web.json_response(data)
+
+    async def get_negotiation(self, request: web.Request) -> web.Response:
+        """Where a negotiation stands, by its ref (capitals and spaces forgiven)."""
+        ref = request.match_info["ref"].strip().lower()
+        n = craigslist_buyer.get(self.store, ref) if ref.isascii() and len(ref) <= 64 else None
+        if n is None or n.buyer != NEGOTIATION_BUYER:  # a chat's negotiations stay private
+            log.info(f"API negotiation {ref[:3]!r} not found ({len(ref)} characters)")
+            return _error(404, NO_SUCH_NEGOTIATION, "not_found")
+        return web.json_response(negotiation_json(n))
 
     # --- Haggling ---------------------------------------------------------------------------
 
@@ -1186,6 +1411,64 @@ _DEAL = {
         "next_step": {"type": "string"},
     },
 }
+_NEGOTIATION = {
+    "type": "object",
+    "description": "A Craigslist negotiation. The buyer's max is never in it.",
+    "properties": {
+        "ref": {
+            "type": "string",
+            "description": "8 characters; also the 'Yardsale ref' in every email to the seller",
+        },
+        "status": {
+            "type": "string",
+            "enum": ["opening", "waiting", "agreed", "stopped", "sold", "needs_you"],
+            "description": (
+                "opening: the first email is about to go out. waiting: waiting for the seller. "
+                "agreed: a price is agreed; the buyer pays in person. stopped: the seller "
+                "wouldn't come down to the max. sold: the seller says it's gone. needs_you: "
+                "the seller's answer couldn't be read; the buyer should reply themselves"
+            ),
+        },
+        "already_started": {
+            "type": "boolean",
+            "description": "True when that post was already being negotiated: this is its state",
+        },
+        "title": {"type": "string"},
+        "post_url": {"type": "string", "nullable": True},
+        "relay_address": {"type": "string"},
+        "asking_usd": {
+            "type": "number",
+            "nullable": True,
+            "description": "The seller's asking price, once known",
+        },
+        "our_offer_usd": {
+            "type": "number",
+            "nullable": True,
+            "description": "The buyer agent's latest offer",
+        },
+        "seller_price_usd": {
+            "type": "number",
+            "nullable": True,
+            "description": "The seller's latest price",
+        },
+        "agreed_usd": {"type": "number", "nullable": True, "description": "Set once agreed"},
+        "offers_made": {"type": "integer"},
+        "offers_at_most": {"type": "integer"},
+        "seller_note": {
+            "type": "string",
+            "nullable": True,
+            "description": "What the seller wrote after agreeing (pickup time and place)",
+        },
+        "summary": {"type": "string", "description": "Where it stands, ready to show the buyer"},
+        "next_step": {"type": "string"},
+    },
+}
+HAGGLE_PATHS = (
+    "/haggles",
+    "/haggles/{haggle_id}",
+    "/haggles/{haggle_id}/accept",
+    "/deals/{deal_id}",
+)
 
 
 def _ok(schema: dict[str, Any], what: str) -> dict[str, Any]:
@@ -1202,31 +1485,44 @@ def _haggle_id_param() -> dict[str, Any]:
     }
 
 
-def openapi_spec(base_url: str) -> dict[str, Any]:
-    return {
+def _description(haggle: bool) -> str:
+    """The API's one-paragraph description, for the model that picks between its tools. It
+    mentions the haggle and deal operations only when they're in."""
+    description = (
+        "Yardsale does two things. For buyers: say what you want and the most you'll pay, and "
+        "Yardsale finds the best deals, first among its own listings (searchListings), then "
+        "across eBay, Craigslist, OfferUp and Facebook Marketplace with a deal score and a "
+        "reason for each (searchOtherSites). For a Craigslist post the buyer picks, Yardsale's "
+        "buyer agent emails the seller and negotiates within the buyer's max, never telling the "
+        "seller the max (startNegotiation, then getNegotiation to follow it); the buyer taps "
+        "Reply on the post and pastes the reply address it shows. For sellers: say what you "
+        "have and get what it's worth from real eBay sales of the last 90 days, and what similar "
+        "items are asking nearby (priceCheck). To list an item for sale, a seller attaches a "
+        "photo in a message to Yardsale's Market agent, @ys-orchestrator, in ASI:One: Claude "
+        "reads the photo and prices it from matching sales; ASI:One's models read typed text "
+        "only, and this API takes no photos. Each listed item has its own agent that holds the "
+        "seller's private lowest price."
+    )
+    if haggle:
+        description += (
+            " Advanced: Yardsale's buyer agent can haggle with every matching item's agent at "
+            "once under the buyer's max and buy with a payment link (startHaggle, acceptDeal); "
+            "use those only when the buyer explicitly asks Yardsale to haggle with a Yardsale "
+            "seller, never for a buyer who just wants a good deal or the best price (search for "
+            "those)."
+        )
+    return description + (
+        " Never invent listings, prices, sales, or email addresses: every one comes from a call "
+        "or from the buyer. Prices are in US dollars."
+    )
+
+
+def openapi_spec(base_url: str, haggle: bool = False) -> dict[str, Any]:
+    """The description Fetch reads. The haggle and deal operations are in it only with `haggle`
+    (YARDSALE_API_HAGGLE=1)."""
+    spec: dict[str, Any] = {
         "openapi": "3.0.3",
-        "info": {
-            "title": "Yardsale",
-            "version": "1.0.0",
-            "description": (
-                "Yardsale does two things. For buyers: say what you want and the most you'll "
-                "pay, and Yardsale finds the best deals, first among its own listings "
-                "(searchListings), then across eBay, Craigslist, OfferUp and Facebook "
-                "Marketplace with a deal score and a reason for each (searchOtherSites). For "
-                "sellers: say what you have and get what it's worth from real eBay sales of "
-                "the last 90 days, and what similar items are asking nearby (priceCheck). To "
-                "list an item for sale, a seller attaches a photo in a message to Yardsale's "
-                "Market agent, @ys-orchestrator, in ASI:One: Claude reads the photo and prices "
-                "it from matching sales; ASI:One's models read typed text only, and this API "
-                "takes no photos. Each listed item has its own agent that holds the seller's "
-                "private lowest price. Advanced: Yardsale's buyer agent can haggle with every "
-                "matching item's agent at once under the buyer's max and buy with a payment "
-                "link (startHaggle, acceptDeal); use those only when the buyer explicitly asks "
-                "Yardsale to haggle with a Yardsale seller, never for a buyer who just wants a "
-                "good deal or the best price (search for those). Never invent listings, "
-                "prices, or sales: every number comes from a call. Prices are in US dollars."
-            ),
-        },
+        "info": {"title": "Yardsale", "version": "1.0.0", "description": _description(haggle)},
         "servers": [{"url": base_url}],
         "components": {
             "securitySchemes": {"apiKey": {"type": "apiKey", "in": "header", "name": KEY_HEADER}}
@@ -1439,6 +1735,107 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     },
                 }
             },
+            "/negotiations": {
+                "post": {
+                    "operationId": "startNegotiation",
+                    "summary": (
+                        "Email a Craigslist seller and haggle for the buyer, under their max"
+                    ),
+                    "description": (
+                        "Use it when the buyer wants Yardsale to negotiate with the seller of a "
+                        "Craigslist post, usually one searchOtherSites returned, and has pasted "
+                        "the post's reply address (Craigslist shows it after tapping Reply on "
+                        "the post; it ends in @sale.craigslist.org). Never guess an address or "
+                        "take one from a search result: without it, tell the buyer how to get "
+                        "it. Yardsale's buyer agent then emails the seller from Yardsale's inbox "
+                        "within about 10 seconds, through Craigslist's relay: it asks whether "
+                        "the item is available, opens with an offer under the asking price (or "
+                        "asks the price, without asking_usd), and haggles by email over at most "
+                        "4 offers, never offering more than max_usd or telling the seller the "
+                        "max. Every email says it's from the buyer's Yardsale assistant, an AI "
+                        "agent. The seller answers in their own time, so there's no result yet: "
+                        "show the buyer the summary with its 'Negotiation ref' line, and call "
+                        "getNegotiation with the ref when they ask how it's going. Agreed deals "
+                        "are paid to the seller in person at pickup; Yardsale takes no payment "
+                        "for Craigslist deals."
+                    ),
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["relay_address", "max_usd"],
+                                    "properties": {
+                                        "relay_address": {
+                                            "type": "string",
+                                            "description": (
+                                                "The post's Craigslist reply address, like "
+                                                "abc123@sale.craigslist.org, as the buyer "
+                                                "pasted it"
+                                            ),
+                                        },
+                                        "max_usd": {
+                                            "type": "number",
+                                            "description": "The most the buyer will pay. Never "
+                                            "sent to the seller.",
+                                        },
+                                        "title": {
+                                            "type": "string",
+                                            "description": "The post's title, for the email "
+                                            'subject, like "Trek FX 2 hybrid bike"',
+                                        },
+                                        "post_url": {
+                                            "type": "string",
+                                            "description": "The post's link, when the buyer "
+                                            "gave it",
+                                        },
+                                        "asking_usd": {
+                                            "type": "number",
+                                            "description": "The post's asking price, when "
+                                            "known; the first email then opens with an offer "
+                                            "under it",
+                                        },
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": _ok(
+                            _NEGOTIATION,
+                            "The negotiation, just started (or already underway for that post)",
+                        ),
+                        "400": _ERROR,
+                        "401": _ERROR,
+                        "409": _ERROR,
+                        "503": _ERROR,
+                    },
+                }
+            },
+            "/negotiations/{ref}": {
+                "get": {
+                    "operationId": "getNegotiation",
+                    "summary": "How a Craigslist negotiation is going",
+                    "description": (
+                        "Use it when the buyer asks how a Craigslist negotiation is going, with "
+                        "the 'Negotiation ref' written earlier in the chat. Returns where it "
+                        "stands: the offers so far, the seller's latest price, and once agreed, "
+                        "the price and what the seller wrote about pickup."
+                    ),
+                    "parameters": [
+                        {
+                            "name": "ref",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "The ref startNegotiation returned, copied exactly "
+                            "(8 characters)",
+                        }
+                    ],
+                    "responses": {"200": _ok(_NEGOTIATION, "The negotiation"), "404": _ERROR},
+                }
+            },
             "/haggles": {
                 "post": {
                     "operationId": "startHaggle",
@@ -1571,3 +1968,7 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
             },
         },
     }
+    if not haggle:
+        for path in HAGGLE_PATHS:
+            del spec["paths"][path]
+    return spec

@@ -6,6 +6,7 @@ Apify. It's pay-per-result, about $0.004 per listing, so a 20-result search cost
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -14,6 +15,7 @@ from typing import Any
 import aiohttp
 from uagents import Agent, Context, Protocol
 
+from yardsale import sources
 from yardsale.agentverse import service_agent
 from yardsale.models import Comp, ResearchRequest, ResearchResult, ServiceError
 
@@ -24,10 +26,51 @@ ACTOR = os.getenv("YARDSALE_APIFY_ACTOR", "caffein.dev~ebay-sold-listings")
 RUN_URL = f"https://api.apify.com/v2/acts/{ACTOR}/run-sync-get-dataset-items"
 MAX_CHARGE_USD = "0.50"  # hard cap per search, enforced by Apify
 MAX_PRICE_USD = 1_000_000  # anything above is a parsing error, not a sale
+TIMEOUT_SECONDS = 180
+
+# The message reaches the seller's chat as "I couldn't price this. <message> Send the photo again
+# to retry.", so a failure Apify explains is said in plain words (by sources.failure's kind),
+# never as Apify's raw JSON.
+PLAIN_FAILURES = {
+    "busy": "Too many price searches were running at once.",
+    "credit": "Yardsale's eBay price search is out of credit.",
+    "timeout": "eBay's sold listings took too long to load.",
+}
 
 
 class ResearchError(RuntimeError):
     pass
+
+
+async def _run_once(body: dict[str, Any], params: dict[str, str], token: str) -> Any:
+    """One run of the actor -> its parsed dataset. Raises sources.SourceError on an error status."""
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout = aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)
+    async with (
+        aiohttp.ClientSession(timeout=timeout) as session,
+        session.post(RUN_URL, params=params, json=body, headers=headers) as resp,
+    ):
+        if resp.status not in (200, 201):
+            raise sources.failure(resp.status, (await resp.text())[:600])
+        return await resp.json()
+
+
+async def _run(body: dict[str, Any], params: dict[str, str], token: str) -> Any:
+    """Run the actor in one of this server's Apify slots (the one kept for sold prices counts),
+    retrying a run Apify refused because too many were running, like sources.run_actor."""
+    for wait in (*sources.BUSY_RETRY_SECONDS, None):
+        try:
+            async with sources.apify_slot(sold_comps=True):
+                return await _run_once(body, params, token)
+        except sources.SourceError as ex:
+            if ex.kind != "busy" or wait is None:
+                raise ResearchError(PLAIN_FAILURES.get(ex.kind, str(ex))) from ex
+        except TimeoutError as ex:
+            raise ResearchError(PLAIN_FAILURES["timeout"]) from ex
+        except aiohttp.ClientError as ex:
+            raise ResearchError(f"Couldn't reach the eBay price search ({ex}).") from ex
+        await asyncio.sleep(wait)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _cents(value: Any) -> int | None:
@@ -83,16 +126,7 @@ async def search_ebay_sold(query: str, condition: str, max_results: int) -> list
         "ebaySite": "ebay.com",
     }
     params = {"timeout": "120", "maxItems": str(max_results), "maxTotalChargeUsd": MAX_CHARGE_USD}
-    headers = {"Authorization": f"Bearer {token}"}
-    timeout = aiohttp.ClientTimeout(total=180)
-    async with (
-        aiohttp.ClientSession(timeout=timeout) as session,
-        session.post(RUN_URL, params=params, json=body, headers=headers) as resp,
-    ):
-        if resp.status not in (200, 201):
-            raise ResearchError(f"Apify returned {resp.status}: {(await resp.text())[:200]}")
-        items = await resp.json()
-
+    items = await _run(body, params, token)
     if not isinstance(items, list):
         raise ResearchError(f"Apify returned {type(items).__name__}, not a list of sales")
     comps: list[Comp] = []

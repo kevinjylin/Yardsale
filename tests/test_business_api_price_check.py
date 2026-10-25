@@ -74,10 +74,21 @@ def test_the_description_leads_with_search_and_price_check() -> None:
     spec = openapi_spec(PUBLIC)
     text = json.dumps(spec)
     ids = [op["operationId"] for path in spec["paths"].values() for op in path.values()]
-    assert ids[:3] == ["searchListings", "searchOtherSites", "priceCheck"]
+    assert ids[:5] == [
+        "searchListings",
+        "searchOtherSites",
+        "priceCheck",
+        "startNegotiation",
+        "getNegotiation",
+    ]
+    # The haggle and deal calls are in only with the haggle tools on, and then marked advanced.
+    haggling = openapi_spec(PUBLIC, haggle=True)
     for advanced in ("startHaggle", "getHaggle", "acceptDeal", "getDeal"):
         path = next(
-            p for p in spec["paths"].values() for op in p.values() if op["operationId"] == advanced
+            p
+            for p in haggling["paths"].values()
+            for op in p.values()
+            if op["operationId"] == advanced
         )
         (operation,) = path.values()
         assert operation["summary"].startswith("Advanced")
