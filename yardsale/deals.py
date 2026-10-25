@@ -84,7 +84,7 @@ RED_FLAG = 60  # parts, repair, broken, lot
 ACCESSORY = 40  # a part of or add-on for the thing
 FAR_UNDER = 70  # percent under the market that's suspicious
 ABOUT_MARKET = 5  # within this many percent is "about the typical sold price"
-MIN_PRICE_CENTS = 100  # $0 and $1 posts are almost always "contact me" placeholders
+MIN_PRICE_CENTS = 500  # $0, $1, and other sub-$5 posts are "contact me" placeholders, not prices
 LIMIT = 5  # deals shown to the buyer
 MARKET_NEEDED = 3  # sales with every search word; fewer, and half-matches count too
 SIMILAR_TITLES = 0.8  # Jaccard overlap of title words that makes two listings the same item
@@ -229,7 +229,7 @@ class ScoredDeal:
     # The score's reason: the market comparison, photos, seller rating, and cautions. Price,
     # site, shipping, condition, location, and age come from the listing (`describe`).
     why: str
-    # parts | accessory | missing_words | far_under | over_budget | no_price
+    # parts | accessory | missing_words | over_budget | no_price
     flags: tuple[str, ...] = field(default=())
 
 
@@ -518,14 +518,12 @@ def score(
     part = not_the_thing(listing.title, have, set(wanted))
     if market is not None:
         versus = percent_under(market.typical_cents, total)
-        if versus > FAR_UNDER and part is not None:
-            # A "road bike" at 84% under market that says "brake levers" is the levers, not a
-            # bargain bike (seen live on October 24). Not worth showing at all.
+        if versus > FAR_UNDER:
+            # A "road bike" at 84% under market is brake levers, a placeholder price, or a
+            # scam, never a bargain bike (seen live on October 24 and 25). Not shown at all.
             return None
         points += max(-PRICE_POINTS, min(PRICE_POINTS, versus * PRICE_POINTS / PRICE_FULL_AT))
         notes.append(_market_phrase(versus, market.typical_cents))
-        if versus > FAR_UNDER:
-            flags.append("far_under")
     elif reference_cents:
         relative = percent_under(reference_cents, total)
         points += max(-RELATIVE_POINTS, min(RELATIVE_POINTS, relative * RELATIVE_POINTS / 50))
@@ -548,8 +546,6 @@ def score(
     unsaid = [term for term in soft if term not in have]
     points -= SOFT_MISSING * len(unsaid)
 
-    if "far_under" in flags:
-        notes.append("far under market, so check it's the whole item")
     if "parts" in flags:
         notes.append("listed as parts or for repair")
     if "accessory" in flags:
@@ -909,7 +905,4 @@ def headline(
     if not fits:
         return f"Nothing fits your {usd(budget_cents or 0)} budget yet. Closest: {sentence}."
     lead = "Closest match" if NEAR_MISS & set(best.flags) else "Found it"
-    text = f"{lead}: {sentence}."
-    if "far_under" in best.flags:
-        text += " It's far under the usual price, so check it's the whole item."
-    return text
+    return f"{lead}: {sentence}."

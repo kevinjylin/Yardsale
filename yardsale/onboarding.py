@@ -132,9 +132,7 @@ def email_form() -> MetadataContent:
                     placeholder="you@berkeley.edu",
                 )
             ],
-            submit_cta=CtaAction(
-                label="Send me a code", selection={"action": "student_email"}, primary=True
-            ),
+            submit_cta=CtaAction(label="Join", selection={"action": "student_email"}, primary=True),
         ),
         card_id=uuid4(),
     )

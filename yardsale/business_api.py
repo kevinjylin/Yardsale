@@ -1085,7 +1085,7 @@ _EXTERNAL = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "parts, accessory, missing_words, or far_under: reasons for caution. "
+                "parts, accessory, or missing_words: reasons for caution. "
                 "over_budget: shown because fewer than 3 fit the max. no_price: the seller "
                 "didn't list a price (always last)"
             ),
