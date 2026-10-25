@@ -29,10 +29,11 @@ Each listing's score adds up, in this order of weight:
 3. Fit: each search word the title lacks costs MISSING_WORD. A title missing more than half the
    words is dropped before scoring.
 
-"Parts", "for repair", "broken", "lot" and the like cost RED_FLAG, and accessories of the thing
-("road bike helmet" for "road bike") cost ACCESSORY, unless the buyer asked for them. Something
-more than FAR_UNDER percent under the market is flagged for the buyer to check, since it's as
-likely a part or a scam as a bargain.
+"Parts", "for repair", "broken", "lot", "frame only" and the like cost RED_FLAG, and parts of or
+add-ons for the thing ("road bike helmet" or "road bike brake levers" for "road bike") cost
+ACCESSORY, unless the buyer asked for them. Something more than FAR_UNDER percent under the
+market is flagged for the buyer to check, since it's as likely a part or a scam as a bargain, and
+when it also carries a part word it's dropped: that's the part, priced as a part.
 
 Repeats of the same item across sites (the same words and the same price, or near enough) are
 dropped, keeping the better-scored one.
@@ -70,16 +71,26 @@ BUDGET_WORDS = {
     "around", "up", "to", "at", "from", "no", "over", "price",
 }  # fmt: skip
 
-# Words that mean the listing isn't a whole, working item.
+# Words that mean the listing isn't a whole, working item. Matched on search.words(), which
+# drops a trailing plural s, so "brakes" is "brake" and "levers" is "lever".
 RED_FLAGS = {
     "part", "parts", "repair", "repairs", "broken", "lot", "cracked", "damaged", "faulty",
     "defective", "untested", "salvage", "asis", "wanted", "iso", "spares", "incomplete",
 }  # fmt: skip
+# Phrases that mean the same, which single words miss ("frame only", "box only").
+RED_FLAG_PHRASES = ("frame only", "box only", "for parts", "parts only", "not working", "as is")
 # Words that make a listing a part of or an add-on for the thing, unless the buyer asked for them.
+# A road bike search on October 24 ranked "Road Bike Brake Levers" third, so bike parts are
+# spelled out.
 ACCESSORIES = {
-    "case", "cover", "charger", "cable", "manual", "box", "tire", "tyre", "tube", "wheel",
-    "wheelset", "pedal", "saddle", "seat", "helmet", "light", "mount", "rack", "bag", "strap",
-    "sticker", "decal", "replacement", "adapter", "skin", "protector", "stand", "kit", "only",
+    # anything
+    "case", "cover", "charger", "cable", "cord", "remote", "manual", "box", "mount", "bracket",
+    "rack", "bag", "strap", "sticker", "decal", "replacement", "adapter", "skin", "protector",
+    "stand", "kit", "only", "cushion", "leg", "light", "helmet",
+    # bikes
+    "tire", "tyre", "tube", "wheel", "wheelset", "pedal", "saddle", "seat", "stem", "handlebar",
+    "fork", "derailleur", "crank", "crankset", "cassette", "shifter", "lever", "brake",
+    "groupset", "frameset",
 }  # fmt: skip
 # How the sites word condition, best first, with the points each is worth.
 CONDITIONS: tuple[tuple[str, int], ...] = (
@@ -151,7 +162,7 @@ def market_price(comps: list[Comp], query: str) -> MarketPrice | None:
     partial: list[Comp] = []
     for comp in comps:
         have = set(words(comp.title))
-        if have & RED_FLAGS or (have & ACCESSORIES) - set(wanted):
+        if not_the_thing(comp.title, have, set(wanted)):
             continue
         hits = sum(1 for w in wanted if w in have)
         if hits == len(wanted):
@@ -174,6 +185,18 @@ def market_price(comps: list[Comp], query: str) -> MarketPrice | None:
         sales=len(prices),
         basis=f"{len(prices)} eBay sale{plural} {what} in the last 90 days",
     )
+
+
+def not_the_thing(title: str, have: set[str], wanted: set[str]) -> str | None:
+    """ "parts" when a title says the item is broken, incomplete, or a part; "accessory" when it
+    names a part of or add-on for the thing; None otherwise. Words the buyer asked for don't
+    count against a listing ("bike helmet" for "bike helmet")."""
+    lowered = title.lower()
+    if have & (RED_FLAGS - wanted) or any(phrase in lowered for phrase in RED_FLAG_PHRASES):
+        return "parts"
+    if (have & ACCESSORIES) - wanted:
+        return "accessory"
+    return None
 
 
 def percent_under(reference_cents: int, total_cents: int) -> int:
@@ -275,8 +298,13 @@ def score(
     flags: list[str] = []
     notes: list[str] = []
     versus: int | None = None
+    part = not_the_thing(listing.title, have, set(wanted))
     if market is not None:
         versus = percent_under(market.typical_cents, total)
+        if versus > FAR_UNDER and part is not None:
+            # A "road bike" at 84% under market that says "brake levers" is the levers, not a
+            # bargain bike (seen live on October 24). Not worth showing at all.
+            return None
         points += max(-PRICE_POINTS, min(PRICE_POINTS, versus * PRICE_POINTS / PRICE_FULL_AT))
         notes.append(_market_phrase(versus, market.typical_cents))
         if versus > FAR_UNDER:
@@ -289,10 +317,10 @@ def score(
     points += quality_points
     notes += quality_notes
 
-    if have & (RED_FLAGS - set(wanted)):
+    if part == "parts":
         points -= RED_FLAG
         flags.append("parts")
-    elif (have & ACCESSORIES) - set(wanted):
+    elif part == "accessory":
         points -= ACCESSORY
         flags.append("accessory")
     if missing:
@@ -359,7 +387,7 @@ def rank(
             and c.price_cents is not None
             and c.price_cents >= MIN_PRICE_CENTS
             and set(wanted) <= set(words(c.title))
-            and not set(words(c.title)) & ((RED_FLAGS | ACCESSORIES) - set(wanted))
+            and not_the_thing(c.title, set(words(c.title)), set(wanted)) is None
         ]
         totals = full or [
             c.total_cents

@@ -43,15 +43,12 @@ async def test_the_market_gets_scored_deals_back(store: Store, sources: dict[str
     assert found.request_id == "r1" and found.query == "road bike" and found.max_cents == 30000
     assert found.typical_cents == 31000 and found.comps_used == 4
     assert found.searched == ["ebay", "craigslist"] and found.failed == ["offerup"]
-    assert [d.title for d in found.deals] == [
-        "Trek road bike 54cm",
-        "Giant road bike",
-        "Road bike helmet",
-    ]
-    trek, giant, helmet = found.deals
+    # The $25 helmet is an accessory far under the $310 market: dropped, not shown.
+    assert [d.title for d in found.deals] == ["Trek road bike 54cm", "Giant road bike"]
+    trek, giant = found.deals
     assert trek.versus_market_pct == 42 and trek.why.startswith("42% under the $310 typical")
     assert giant.total_cents == 24000 and giant.shipping_cents == 3000
-    assert "accessory" in helmet.flags and found.deals[0].score > found.deals[-1].score
+    assert trek.score > giant.score and found.considered == 3
     assert sources["ebay"].calls == ["road bike"]  # one paid search
 
 
