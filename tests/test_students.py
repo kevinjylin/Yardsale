@@ -112,7 +112,26 @@ def test_an_empty_school_never_matches_itself() -> None:
 
 def test_the_school_reads_nicely() -> None:
     assert schools.school_label("berkeley.edu") == "Berkeley"
-    assert schools.school_label("ox.ac.uk") == "Ox"
+    assert schools.school_label("stanford.edu") == "Stanford"
+    assert schools.school_label("ox.ac.uk") == "Oxford"
+    assert schools.school_label("cal-poly.edu") == "Cal Poly"
+
+
+@pytest.mark.parametrize(
+    ("key", "label"),
+    [
+        ("ucr.edu", "UCR"),
+        ("ucla.edu", "UCLA"),
+        ("ucsd.edu", "UCSD"),
+        ("mit.edu", "MIT"),
+        ("usc.edu", "USC"),
+        ("nyu.edu", "NYU"),
+        ("ucl.ac.uk", "UCL"),
+    ],
+)
+def test_school_initials_read_as_initials(key: str, label: str) -> None:
+    """On October 25 a UCR student was told "You're in, at Ucr"."""
+    assert schools.school_label(key) == label
 
 
 # --- Same school only ----------------------------------------------------------------------
