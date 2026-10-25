@@ -1109,6 +1109,18 @@ class MailError(RuntimeError):
     pass
 
 
+def _why(ex: Exception) -> str:
+    """For the log: the error's type, plus the mail server's own words for login and connection
+    errors ("Invalid credentials", "Connection unexpectedly closed"). Other errors can carry an
+    address, so they give only their type."""
+    if isinstance(ex, imaplib.IMAP4.error | smtplib.SMTPAuthenticationError) or type(ex) in (
+        smtplib.SMTPServerDisconnected,
+        smtplib.SMTPConnectError,
+    ):
+        return f"{type(ex).__name__}: {str(ex)[:160]}"
+    return type(ex).__name__
+
+
 class ImapSmtpMailbox:
     """The real inbox: IMAP over TLS to read, SMTP over TLS to send, with an app password."""
 
@@ -1202,13 +1214,13 @@ class CraigslistMail:
         self._sent: defaultdict[str, deque[float]] = defaultdict(deque)
 
     def _too_many(self, buyer_ref: str) -> bool:
+        """True once this buyer got REPLIES_PER_HOUR replies in the last hour. Only replies that
+        went out count: on October 25 Gmail dropped every send for a few minutes, the retries
+        used up the limit, and the buyer's emails were marked read without an answer."""
         now, sent = self.clock(), self._sent[buyer_ref]
         while sent and sent[0] < now - 3600:
             sent.popleft()
-        if len(sent) >= REPLIES_PER_HOUR:
-            return True
-        sent.append(now)
-        return False
+        return len(sent) >= REPLIES_PER_HOUR
 
     async def poll(self, ctx: Context) -> int:
         """Answer every new Craigslist email, as the Market (ctx). Returns how many replies went
@@ -1219,7 +1231,7 @@ class CraigslistMail:
             try:
                 new = await asyncio.to_thread(self.mailbox.unseen)
             except Exception as ex:  # a dropped connection or a refused login: retry next time
-                log.warning(f"Couldn't read the Craigslist inbox ({type(ex).__name__})")
+                log.warning(f"Couldn't read the Craigslist inbox ({_why(ex)})")
                 await asyncio.to_thread(self.mailbox.close)
                 return 0
             sent = 0
@@ -1302,9 +1314,10 @@ class CraigslistMail:
         try:
             await asyncio.to_thread(self.mailbox.send, reply)
         except Exception as ex:  # the next check tries again; the email is still unread
-            log.warning(f"Couldn't send a Craigslist reply ({type(ex).__name__})")
+            log.warning(f"Couldn't send a Craigslist reply ({_why(ex)})")
             await asyncio.to_thread(self.mailbox.close)
             return False
+        self._sent[answer.buyer_ref].append(self.clock())
         log.info(f"Craigslist email from buyer {who} on {answer.item_id}: {answer.kind}")
         if not answer.final:
             self._held.add(answer.key)  # left unread, so the item agent gets it next time
@@ -1323,7 +1336,7 @@ class CraigslistMail:
             try:
                 await asyncio.to_thread(self.mailbox.send, step.email)
             except Exception as ex:
-                log.warning(f"Couldn't send a Craigslist negotiation email ({type(ex).__name__})")
+                log.warning(f"Couldn't send a Craigslist negotiation email ({_why(ex)})")
                 await asyncio.to_thread(self.mailbox.close)
                 return False
         if step.kind != "answered":

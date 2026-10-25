@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
+import smtplib
 from collections.abc import AsyncIterator
 from email import message_from_bytes, policy
 from email.message import EmailMessage
@@ -312,6 +313,30 @@ async def test_the_same_email_is_answered_once(shop: Shop) -> None:
     assert rt.craigslist is not None
     assert await rt.craigslist.poll(shop.market.agent._build_context()) == 1
     assert shop.mailbox.seen == {"1", "2"}
+
+
+async def test_failed_sends_dont_use_up_the_reply_limit(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live October 25: Gmail dropped every send for a few minutes, each retry counted toward
+    the limit, and the buyer's "deal" email was marked read without an answer."""
+    monkeypatch.setattr(craigslist_mail, "REPLIES_PER_HOUR", 2)
+    sent = shop.mailbox.send
+
+    def down(message: EmailMessage) -> None:
+        raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    monkeypatch.setattr(shop.mailbox, "send", down)
+    shop.mailbox.deliver(email("$250?", f"{shop.title} - $360"))
+    rt = bureau_server.runtime()
+    assert rt.craigslist is not None
+    ctx = shop.market.agent._build_context()
+    for _ in range(5):
+        assert await rt.craigslist.poll(ctx) == 0
+    assert shop.mailbox.seen == set()  # still unread, so it's tried again
+    monkeypatch.setattr(shop.mailbox, "send", sent)
+    assert await rt.craigslist.poll(ctx) == 1
+    assert "$" in body(shop.mailbox.sent[-1]) and shop.mailbox.seen == {"1"}
 
 
 # --- When the item agent is slow -----------------------------------------------------------------
