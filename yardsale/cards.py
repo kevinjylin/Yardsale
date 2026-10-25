@@ -359,6 +359,22 @@ def notice(text_shown: str, actions: Sequence[Action] = (), title: str = "") -> 
     return screen(title or "Yardsale", "warning" if trouble else "info", lead, actions=actions)
 
 
+SOMETHING_ELSE: Action = ("Something else", MAIN_MENU[1])
+
+
+def question(asked: str, actions: Sequence[Action]) -> MetadataContent:
+    """A short clarifying question, with a button for each likely meaning and Something else."""
+    return screen(
+        "Did you mean…", "info", [text(asked, "emphasis")], actions=[*actions, SOMETHING_ELSE]
+    )
+
+
+def buyers(about: str, lines: Sequence[str], actions: Sequence[Action]) -> MetadataContent:
+    """A seller's buyers: each listing's Craigslist post and who's emailing about it."""
+    body: list[Node] = [steps(list(lines))] if lines else []
+    return screen("Your buyers", "craigslist", [text(about)], body, [*actions, LISTINGS])
+
+
 # --- The menu, selling, buying -------------------------------------------------------------------
 
 

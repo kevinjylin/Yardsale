@@ -24,7 +24,10 @@ buys at that price. Buyers never see a floor price, and sellers never see a buye
 Paying: once a deal closes, the Market's checkout (checkout.py) makes a payment link (Visa Pay By
 Link or Stripe, test mode) and the chat shows it. "paid" checks with the provider.
 
-commands.py reads commands without a model. Anything else goes to ASI:One (asione.py).
+commands.py reads commands without a model. Anything else goes to ASI:One (asione.py). A seller
+asking about buyers ("someone messaged me, reply to them") gets each listing's Craigslist post and
+buyers; a message nobody understood gets a short question about what the conversation has going,
+with buttons, and "yes" or "the second one" answers it. Only first contact gets the greeting.
 Every reply is a short line of text and an Interactive Card (cards.py): the menu, the sell and
 buy screens, proposals, listings, results, offers, haggles, payments, orders, watches, and deals
 on other sites, each with a picture and buttons, and a Main menu button on all but the menu.
@@ -218,11 +221,25 @@ _MENTIONS_PHOTO = re.compile(
     r"\b(photos?|pictures?|pics?|images?|upload(ed)?|attach(ed|ment)?)\b", re.IGNORECASE
 )
 
-HELP = (
-    "Hi, I'm Yardsale. To sell, attach a photo (up to "
-    f'{MAX_PHOTOS} at once) and say your minimum, like "at least $40". To buy, tell me what you '
-    'want and your max, like "find me Jordan 4s under $200", and I\'ll search Yardsale and '
-    "other marketplaces. Or pick from the menu."
+HOW_IT_WORKS = (
+    f"To sell, attach a photo (up to {MAX_PHOTOS} at once) and say your minimum, like "
+    '"at least $40". To buy, tell me what you want and your max, like "find me Jordan 4s under '
+    "$200\", and I'll search Yardsale and other marketplaces. Or pick from the menu."
+)
+HELP = "Hi, I'm Yardsale. " + HOW_IT_WORKS  # the greeting, for a conversation's first contact
+UNCLEAR = "I didn't catch that. " + HOW_IT_WORKS  # a returning conversation isn't greeted again
+AGENT_ANSWERS_EMAIL = (
+    "Its agent answers Craigslist buyers' emails by itself, usually within seconds: it haggles "
+    "with your prices, never below your lowest, and sends a payment link once a buyer says deal. "
+    "You don't need to tell it to reply or haggle."
+)
+EMAIL_OFF = (
+    "Craigslist email isn't connected on this Yardsale server, so its agent can't answer "
+    "Craigslist buyers yet; buyers in ASI:One and @yardsale still haggle with it."
+)
+CRAIGSLIST_CHAT = (
+    "It can't read messages sent in Craigslist's own chat, though. If a buyer messaged you "
+    "there, ask them to email the address on the post instead."
 )
 HAGGLE_FIRST = (
     'Haggling is only for Yardsale listings, so search first, like "find me a road bike under '
@@ -321,8 +338,13 @@ class Conversation:
     results: list[str] = field(default_factory=list)  # item IDs from the last search, as numbered
     selected: str | None = None  # the item an offer without a number is for
     counter: dict[str, Any] | None = None  # {"item_id", "cents"}: the open counter-offer
-    # "proposal", "counter", "max", or "craigslist" (offered a post): what a bare reply answers
+    # "proposal", "counter", "max", "craigslist" (offered a post), or "choice" (asked what an
+    # unclear message meant): what a bare reply answers
     awaiting: str | None = None
+    # With awaiting "choice": the card selections offered, in order, so "yes" or "the second
+    # one" does what tapping that button does.
+    choices: list[dict[str, Any]] = field(default_factory=list)
+    introduced: bool = False  # has had the "Hi, I'm Yardsale" greeting
     quotes: dict[str, int] = field(default_factory=dict)  # item ID -> price on offer to this buyer
     budget: int | None = None  # the buyer's max from their last search or haggle
     # Seller's photos by number ("approve 2"): proposal item IDs, "" for photos that aren't one.
@@ -2371,8 +2393,162 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             school=school,
         )
 
-    def menu_reply(conv: Conversation, text: str = HELP) -> Reply:
+    def menu_reply(conv: Conversation, text: str | None = None) -> Reply:
+        """The menu. Without `text`, the greeting on first contact and plain help after."""
+        if text is None:
+            text = HELP if not has_history(conv) else HOW_IT_WORKS
+            conv.introduced = True
         return Reply(text, menu_card(conv))
+
+    def has_history(conv: Conversation) -> bool:
+        """Whether this conversation has met Yardsale: greeted, or anything sold, searched,
+        priced, bought, or watched."""
+        return bool(
+            conv.introduced
+            or conv.seen_photos
+            or conv.pricing
+            or conv.numbered
+            or conv.unpriced
+            or conv.results
+            or conv.last_query
+            or conv.deals
+            or conv.counter
+            or store.owned(conv.owner)
+            or store.deals(buyer=f"chat:{conv.key}")
+            or store.watches_for(conv.owner)
+            or craigslist_buyer.buyer_lines(store, conv.owner)
+        )
+
+    def buyers_view(conv: Conversation) -> Reply:
+        """A seller asking about buyers ("someone messaged me, reply to them and haggle"): each
+        live listing's Craigslist post and who's emailing, and that its agent answers them."""
+        listings = store.owned(conv.owner)
+        active = [listing for listing in listings if listing.status == ACTIVE]
+        if not active:
+            if craigslist_buyer.buyer_lines(store, conv.owner):
+                # A buyer asking whether a Craigslist seller they had me email has answered.
+                text = craigslist_buyer.negotiations_reply(store, conv.owner)
+                return Reply(text, cards.notice(text, [cards.ORDERS, cards.BUY], "Negotiations"))
+            nothing = "You have nothing for sale right now, so there are no buyers to answer."
+            sold = craigslist_mail.seller_lines(store, listings)
+            text = "\n".join([nothing, *sold, "Attach a photo to sell something."])
+            return Reply(text, cards.notice(text, [cards.LISTINGS, cards.SELL], "Your buyers"))
+        lines: list[str] = []
+        actions: list[cards.Action] = []
+        posted = False
+        for n, listing in enumerate(active, 1):
+            if craigslist_mail.posted_title(store, listing.item_id) is not None:
+                posted = True
+                continue
+            say = f'"craigslist {n}"' if len(active) > 1 else '"craigslist"'
+            lines.append(
+                f"Your {listing.title} isn't on Craigslist yet: say {say} for a post to paste."
+            )
+            if not actions:
+                actions.append(("Craigslist post", {"action": "craigslist", **item_ref(listing)}))
+        lines += craigslist_mail.seller_lines(store, active)
+        # TODO: add recent_exchanges. Once craigslist_mail.recent_exchanges(store, conv.owner,
+        # limit=5) is merged, list each Exchange here (title, buyer_label, buyer_said, we_said)
+        # so the seller sees what buyers wrote and what the agent answered.
+        try:
+            email_on = craigslist_mail.settings_from_env() is not None
+        except craigslist_mail.MailConfigError:
+            email_on = False
+        about = [AGENT_ANSWERS_EMAIL if email_on else EMAIL_OFF]
+        if posted:
+            about.append(CRAIGSLIST_CHAT)
+        head = (
+            f"Buyers for your {active[0].title}:"
+            if len(active) == 1
+            else "Buyers for your listings:"
+        )
+        text = "\n".join([head, *lines, "", *about])
+        return Reply(text, cards.buyers(about[0], lines, actions))
+
+    def item_ref(listing: Listing) -> dict[str, str]:
+        return {"item_id": listing.item_id}
+
+    def clarify(conv: Conversation) -> Reply:
+        """The answer to a message nobody understood: a short question about what this
+        conversation has going, with a button for each likely meaning. The greeting only on
+        first contact; plain help when there's nothing to ask about."""
+        pending = store.owned(conv.owner, PROPOSED)
+        if conv.counter is not None and conv.awaiting == "counter":
+            listing = store.get(str(conv.counter["item_id"]))
+            cents = int(conv.counter["cents"])
+            title = listing.title if listing else "item"
+            selection = {
+                "action": "accept",
+                "item_id": str(conv.counter["item_id"]),
+                "cents": cents,
+            }
+            asked = f'Do you want the {title} at {usd(cents)}? Reply "accept", or make an offer.'
+            return Reply(asked, cards.question(asked, [(f"Accept {usd(cents)}", selection)]))
+        if len(pending) == 1 and conv.unpriced is None and not conv.needs_price:
+            proposal = pending[0]
+            conv.awaiting = "proposal"  # a "yes" now approves it, as after the proposal itself
+            asked = (
+                f"Did you mean your {proposal.title}, waiting for your approval at "
+                f'{usd(proposal.asking_cents)}? Reply "approve" to put it up for sale, or '
+                '"cancel".'
+            )
+            approve_it = ("Approve", {"action": "approve", **item_ref(proposal)})
+            review_it = ("Review it", {"action": "review", **item_ref(proposal)})
+            return Reply(asked, cards.question(asked, [approve_it, review_it]))
+        # Everything else this conversation has going, most likely first: (what it's called,
+        # its buttons). Each button only shows something; none approves, buys, or sets a price.
+        options: list[tuple[str, list[cards.Action]]] = []
+        active = store.owned(conv.owner, ACTIVE)
+        if active:
+            posted = next(
+                (each for each in active if craigslist_mail.posted_title(store, each.item_id)),
+                None,
+            )
+            listing = posted or active[0]
+            more = f" (and {len(active) - 1} more)" if len(active) > 1 else ""
+            options.append(
+                (
+                    f"buyers for your {listing.title}{more}",
+                    [("Show buyers", {"action": "buyers"}), cards.LISTINGS],
+                )
+            )
+        if conv.unpriced is not None or conv.needs_price:
+            options.append(
+                ("the photo that needs your price", [("Review it", {"action": "review"})])
+            )
+        if conv.results:
+            options.append(
+                (
+                    f'your search for "{conv.last_query}"' if conv.last_query else "your search",
+                    [("Back to results", {"action": "results"})],
+                )
+            )
+        if conv.deals:
+            options.append(
+                (
+                    f'the deals I found for "{conv.last_query}"',
+                    [("Deals on other sites", {"action": "deals"})],
+                )
+            )
+        if store.deals(buyer=f"chat:{conv.key}"):
+            options.append(("your orders", [cards.ORDERS]))
+        if craigslist_buyer.buyer_lines(store, conv.owner):
+            options.append(
+                ("your Craigslist negotiations", [("Negotiations", {"action": "negotiations"})])
+            )
+        if store.watches_for(conv.owner):
+            options.append(("your watches", [cards.WATCHES]))
+        if not options:
+            if not has_history(conv):
+                return menu_reply(conv)  # first contact: the greeting
+            return menu_reply(conv, UNCLEAR)
+        top = options[:2]
+        actions = top[0][1][:2] if len(top) == 1 else [option[1][0] for option in top]
+        meant = " or ".join(name for name, _ in top)
+        asked = f"Did you mean {meant}? Tap one, or say it another way."
+        conv.awaiting = "choice"
+        conv.choices = [selection for _, selection in actions]
+        return Reply(asked, cards.question(asked, actions))
 
     def next_steps(conv: Conversation) -> list[cards.Action]:
         """The buttons under a short message: what this conversation can do next."""
@@ -2410,6 +2586,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     ) -> str | Reply:
         """A tapped card button. Checked exactly like the typed command it stands for."""
         action, item_id = str(choice.get("action", "")), str(choice.get("item_id", ""))
+        if conv.awaiting == "choice":  # a tap answers the question; a later "yes" doesn't
+            conv.awaiting, conv.choices = None, []
         if not choice:
             return menu_reply(conv, "OK.")
         # Signing up. Nothing else can happen until a conversation has a school.
@@ -2445,6 +2623,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return review(conv, "")
         if action == "listings":
             return my_listings(conv)
+        if action == "buyers":
+            return buyers_view(conv)
         if action == "orders":
             return my_orders(conv)
         if action == "watches":
@@ -2648,7 +2828,45 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             f"{match.reason or 'no reason given'}."
         )
 
+    def seller_question(conv: Conversation, text: str, kind: str | None) -> Reply | None:
+        """A seller asking after their listings, read with patterns: buyers ("someone messaged
+        me, reply to them and haggle") or how it's doing ("did it sell?"). Haggling words from a
+        seller never start the buyer agent. None when the message isn't one of these."""
+        mine = store.owned(conv.owner)
+        if not mine or kind not in (None, "haggle"):
+            return None
+        if commands.asks_about_buyers(text):
+            return buyers_view(conv)
+        if kind is None and commands.asks_about_status(text):
+            return as_reply(my_listings(conv))
+        if kind != "haggle" or not commands.vague_haggle(text):
+            return None
+        active = [listing for listing in mine if listing.status == ACTIVE]
+        if not active:
+            return None
+        if not conv.results:  # nothing searched: "haggle with them" means their buyers
+            return buyers_view(conv)
+        # "haggle with them" with search results and a listing of their own: ask which.
+        haggle_sellers = ("Haggle with sellers", {"action": "haggle_form"})
+        show_buyers = ("Show buyers", {"action": "buyers"})
+        asked = (
+            f"Did you mean have my buyer agent haggle with the sellers in your search for "
+            f'"{conv.last_query}", or your own buyers for your {active[0].title}?'
+        )
+        conv.awaiting = "choice"
+        conv.choices = [haggle_sellers[1], show_buyers[1]]
+        return Reply(asked, cards.question(asked, [haggle_sellers, show_buyers]))
+
     async def handle_text(ctx: Context, conv: Conversation, text: str) -> str | Reply:
+        # A bare answer ("yes", "the second one", "no") to the question an unclear message got
+        # does what tapping that button does. Anything else drops the question.
+        if conv.awaiting == "choice":
+            offered, conv.awaiting, conv.choices = conv.choices, None, []
+            picked = commands.choice_answer(text, len(offered))
+            if picked == -1:
+                return menu_reply(conv, "OK. Tell me in other words, or pick from the menu.")
+            if picked is not None:
+                return await handle_choice(ctx, conv, offered[picked])
         # A pasted Craigslist reply address: email that seller and haggle for this buyer.
         negotiating = craigslist_buyer.command(text)
         if negotiating is not None:
@@ -2691,6 +2909,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return await ebay_command(conv, command)
         if kind == "craigslist_end":
             return CRAIGSLIST_END
+        seller_view = seller_question(conv, text, kind)
+        if seller_view is not None:
+            return seller_view
         if command is not None:
             by_number = await numbered_command(ctx, conv, command, waiting)
             if by_number is not None:
@@ -2810,8 +3031,13 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         ):
             return await accept_typed(ctx, conv, None)
 
-        # Not a command, or not one that fits this conversation: ASI:One reads it.
+        # Not a command, or not one that fits this conversation: ASI:One reads it. Its reading
+        # only ever picks a view or a search: it never approves, accepts, or sets a price alone.
         wanted = await read(text, False)
+        if wanted.intent == "buyers":
+            return buyers_view(conv)
+        if wanted.intent == "status":
+            return my_listings(conv) if store.owned(conv.owner) else clarify(conv)
         if wanted.intent == "buy":  # always a search; haggling is only ever an explicit command
             return find(conv, wanted.query, to_cents(wanted.budget_usd), search_place(text))
         if wanted.intent == "sell":
@@ -2830,10 +3056,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return find(conv, text, None)
         if len(waiting) > 1:
             return waiting_reply(conv, waiting, "Waiting for your approval:")
-        if proposal is not None:
-            text = f"Your {proposal.title} is waiting at {usd(proposal.asking_cents)}. "
-            return Reply(text + APPROVE_PROMPT, proposal_card(proposal))
-        return menu_reply(conv)
+        return clarify(conv)
 
     async def handle(
         ctx: Context,
