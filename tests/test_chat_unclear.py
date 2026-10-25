@@ -217,3 +217,29 @@ async def test_a_pasted_post_link_is_saved_for_the_listing(
     assert "that Craigslist post is your Trek" in reply
     found = craigslist_mail.listing_for_post(store, "otenzZmpUXQLFoGHL2bxr7")
     assert found is not None and found.item_id == listing.item_id
+
+
+async def test_an_offer_waiting_on_the_agent_shows_in_the_chat(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seen live: a buyer got "let me check" and the seller's chat said no buyers had emailed."""
+    monkeypatch.setenv("YARDSALE_MAIL_ADDRESS", "yardsale.test@example.com")
+    monkeypatch.setenv("YARDSALE_MAIL_PASSWORD", "app-password")
+    async with sim.running_market(store) as market:
+        seller = market.user("seller")
+        await list_and_post(seller)
+        (listing,) = store.active()
+        held = craigslist_mail.Answer(
+            "holding",
+            listing.item_id,
+            "email-abc123",
+            craigslist_mail.HOLDING,
+            "key-2",
+            buyer_said="can you do 10 dollars and 50 cents?",
+        )
+        craigslist_mail._record_exchange(store, held)
+        reply = await seller.say("any buyers?")
+        assert "1 buyer emailing, no offer yet" in reply
+        assert '"can you do 10 dollars and 50 cents?"' in reply
+        assert "working on an answer" in reply
+        assert "no buyers have emailed yet" not in reply

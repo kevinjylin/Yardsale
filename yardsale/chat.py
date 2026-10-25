@@ -1838,6 +1838,15 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         lines = [f"Your {listing.title}: {usd(listing.asking_cents)}."]
         if listing.host == AGENTVERSE:
             lines.append(f"Its agent on Agentverse: [{listing.address}]({profile_link(listing)})")
+        on_craigslist = craigslist_mail.seller_lines(store, [listing])
+        if on_craigslist and listing.status == ACTIVE:
+            pairs.append(("On Craigslist", on_craigslist[0].split(": ", 1)[-1]))
+            mine = [
+                exchange
+                for exchange in craigslist_mail.recent_exchanges(store, conv.owner, limit=20)
+                if exchange.item_id == listing.item_id
+            ]
+            lines += exchange_lines(mine[:3])
         record = store.ebay_listing(listing.item_id)
         if record is not None and record.status == "active":
             pairs.append(("On eBay", "Yes; the link is in the message above"))
@@ -2499,11 +2508,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 actions.append(("Craigslist post", {"action": "craigslist", **item_ref(listing)}))
         lines += craigslist_mail.seller_lines(store, active)
         # What buyers wrote and what each item's agent answered, newest first.
-        for exchange in craigslist_mail.recent_exchanges(store, conv.owner, limit=5):
-            lines.append(
-                f"- {exchange.buyer_label} on your {exchange.title}: "
-                f'"{_clip(exchange.buyer_said)}" I answered: "{_clip(exchange.we_said)}"'
-            )
+        lines += exchange_lines(craigslist_mail.recent_exchanges(store, conv.owner, limit=5))
         try:
             email_on = craigslist_mail.settings_from_env() is not None
         except craigslist_mail.MailConfigError:
@@ -2524,6 +2529,19 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         )
         text = "\n".join([head, *lines, "", *about])
         return Reply(text, cards.buyers(about[0], lines, actions))
+
+    def exchange_lines(exchanges: list[craigslist_mail.Exchange]) -> list[str]:
+        """What Craigslist buyers wrote and what each item's agent answered, newest first."""
+        lines = []
+        for exchange in exchanges:
+            said = (
+                f'- {exchange.buyer_label} on your {exchange.title}: "{_clip(exchange.buyer_said)}"'
+            )
+            if exchange.kind == "holding":
+                lines.append(f"{said} Its agent is working on an answer; they've been told so.")
+            else:
+                lines.append(f'{said} I answered: "{_clip(exchange.we_said)}"')
+        return lines
 
     def post_link(conv: Conversation, text: str) -> str | None:
         """A seller pasting their live Craigslist post's link: save which listing it is, so

@@ -345,6 +345,8 @@ async def test_a_slow_item_agent_gets_one_holding_reply_and_a_retry() -> None:
         ("300", 30000),
         ("$1,200.50 is my max", 120050),
         ("250 bucks cash", 25000),
+        ("Ouu shit, can you do 10 dollars and 50 cents? Im super interested", 1050),
+        ("10 dollars 5 cents", 1005),
         ("Is it still available? I can come at 5pm", None),
         ("Could you do 5pm tomorrow?", None),
         ("https://sfbay.craigslist.org/sfc/bik/d/trek/7791234567.html", None),

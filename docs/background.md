@@ -503,8 +503,16 @@ the item's agent (in the server or hosted on Agentverse) the same `Offer` or `Ac
 `buyer_ref` `email-<hash of the relay address>`. The item agent's counter, agreement, or deal
 becomes the email reply, sent through the relay in the buyer's thread with a payment link once
 they accept. A dollar amount is an offer, and "deal", "I'll take it", or "yes" while a price is
-on the table accepts it; both are read with patterns, not a model. If the item agent doesn't
-answer in time, the buyer gets "let me check" once and the email is tried again.
+on the table accepts it; both are read with patterns, not a model ("10 dollars and 50 cents" is
+$10.50). If the item agent doesn't answer in time, the buyer gets "let me check" once and the
+email is tried again; the seller's chat shows the waiting offer right away.
+
+A hosted item agent that doesn't answer within 25 seconds (`HOSTED_NEGOTIATE_TIMEOUT`) is
+answered for by the Market, with the same rules (`negotiation.py`) and the floor, gap, and market
+line it gave the hosted agent; that buyer's haggle then stays in the Market, and a sale there
+deletes the hosted agent. Seen live October 25: an emailed offer to the hosted ThermoFlask got
+"let me check" and nothing after, and the seller's chat said no buyers had emailed. This applies
+to chat buyers' offers too.
 
 **What the first live post taught (October 25).** A ThermoFlask was posted with Yardsale's inbox,
 and the buyer's email went unanswered: its subject was "Waterbottle", which the buyer typed, so

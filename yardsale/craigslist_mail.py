@@ -621,19 +621,23 @@ def seller_lines(store: Store, listings: list[Listing]) -> list[str]:
             continue
         if listing.status == ACTIVE:
             row = db.execute(
-                "SELECT COUNT(*) AS buyers, MAX(offer_cents) AS best FROM craigslist_buyers "
-                "WHERE item_id = ?",
+                "SELECT MAX(offer_cents) AS best FROM craigslist_buyers WHERE item_id = ?",
                 (listing.item_id,),
             ).fetchone()
-            buyers = int(row["buyers"])
+            # A buyer counts from their first email, before any price is agreed or countered.
+            buyers = db.execute(
+                "SELECT COUNT(*) AS n FROM (SELECT buyer_ref FROM craigslist_buyers "
+                "WHERE item_id = ? UNION SELECT buyer_ref FROM craigslist_exchanges "
+                "WHERE item_id = ?)",
+                (listing.item_id, listing.item_id),
+            ).fetchone()["n"]
             line = f'On Craigslist as "{title}": '
             if buyers == 0:
                 line += "no buyers have emailed yet."
             else:
-                line += (
-                    f"{buyers} buyer{'s' if buyers > 1 else ''} emailing, highest offer "
-                    f"{usd(int(row['best']))}."
-                )
+                line += f"{buyers} buyer{'s' if buyers > 1 else ''} emailing"
+                best = row["best"]
+                line += f", highest offer {usd(int(best))}." if best else ", no offer yet."
             lines.append(line)
         elif listing.status == SOLD:
             deal = store.deal_for(listing.item_id)
@@ -664,6 +668,9 @@ _AMOUNTS = (
         re.IGNORECASE,
     ),
     re.compile(r"^\s*" + _NUMBER + r"\s*[?!.]*\s*$"),
+)
+_DOLLARS_AND_CENTS = re.compile(
+    r"\b(\d{1,6})\s*(?:dollars?|bucks?)\s*(?:and\s+)?(\d{1,2})\s*cents?\b", re.IGNORECASE
 )
 _NO_DEAL = re.compile(r"\b(?:no|not)\s+(?:a\s+)?deal\b", re.IGNORECASE)
 _ACCEPT = re.compile(
@@ -706,11 +713,14 @@ def offer_cents(text: str) -> int | None:
     """The amount a buyer offers: the last dollar amount they wrote. Numbers in links, email
     addresses, times, and distances aren't offers."""
     plain = _EMAIL.sub(" ", _URL.sub(" ", text))
-    found: list[tuple[int, str]] = []
+    found: dict[int, str] = {}
     for pattern in _AMOUNTS:
         for match in pattern.finditer(plain):
-            found.append((match.start(1), match.group(1) + (match.group(2) or "")))
-    for _, amount in sorted(found, reverse=True):
+            found.setdefault(match.start(1), match.group(1) + (match.group(2) or ""))
+    for match in _DOLLARS_AND_CENTS.finditer(plain):
+        # "10 dollars and 50 cents" is $10.50, not the $10 the "dollars" pattern sees.
+        found[match.start(1)] = f"{match.group(1)}.{int(match.group(2)):02d}"
+    for _, amount in sorted(found.items(), reverse=True):
         try:
             cents = parse_usd(amount)
         except PriceError:
@@ -1281,6 +1291,7 @@ class CraigslistMail:
         log.info(f"Craigslist email from buyer {who} on {answer.item_id}: {answer.kind}")
         if not answer.final:
             self._held.add(answer.key)  # left unread, so the item agent gets it next time
+            _record_exchange(self.agent.store, answer)  # the seller sees the offer is waiting
             return True
         self._held.discard(answer.key)
         self.agent.answered(answer)  # so it's never answered twice, even if it stays unread
