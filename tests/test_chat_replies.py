@@ -263,3 +263,23 @@ def test_the_sales_line_agrees_with_the_cards_and_the_count() -> None:
     assert carousel.metadata["card_kind"] == "carousel"
     assert reply.text.endswith(chat.comps_text(proposal))
     assert reply.more == ()  # one message
+
+
+@pytest.mark.parametrize(
+    ("first", "answered"), [("find me a mini fridge under $60", True), ("hey!", False)]
+)
+async def test_a_new_students_first_words_are_answered_after_sign_up(
+    campus: None, store: Store, first: str, answered: bool
+) -> None:
+    """Searches are same-school, so a first request waits for the school, then gets its answer
+    with the sign-up line. A bare hello gets nothing more than the sign-up."""
+    async with sim.running_market(store) as market:
+        student = market.user("student")
+        welcome = await turn(student, sim.chat_message(first, start_session=True))
+        assert [m.text() for m in welcome] == [onboarding.ARE_YOU_A_STUDENT]
+        await turn(student, tap({"action": "student"}))
+        joined = await turn(student, tap({"action": "student_email", "email": "sam@ucr.edu"}))
+        text = "\n".join(m.text() for m in joined)
+        assert text.startswith("You're in, at UCR.")
+        assert ("mini fridge" in text.lower()) is answered
+        assert "Hi, I'm Yardsale" not in text

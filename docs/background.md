@@ -197,7 +197,8 @@ on twice. If the first answer wasn't delivered, the whole answer goes again.
 is held until the student signs up: the sign-up confirmation ("You're in, at UCR") and the
 proposal then come as one message, as separate paragraphs, and if pricing is still running the
 confirmation says so and the proposal follows once. Words in that first message without a
-photo aren't answered; the student asks again after signing up. School names read as people
+photo ("find me a mini fridge under $60") are kept and answered with the sign-up confirmation,
+since searches are same-school; a bare hello isn't. School names read as people
 say them: "UCR", "UCLA", "MIT", "Berkeley".
 
 ### Messages the chat doesn't recognize

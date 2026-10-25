@@ -240,6 +240,8 @@ EMAIL_OFF = (
     "Craigslist email isn't connected on this Yardsale server, so its agent can't answer "
     "Craigslist buyers yet; buyers in ASI:One and @yardsale still haggle with it."
 )
+# A first message that's only a hello: nothing to answer after sign-up.
+_GREETING = re.compile(r"(?i)^\W*(hi|hey|hello|yo|sup|hiya|howdy|good (morning|evening))\W*$")
 CHAT_NOTICE_WINDOW = 86400.0  # seconds: Craigslist chat notices a seller hears about
 
 
@@ -1061,6 +1063,9 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     # Conversation key -> (pricing job, photo count): a new student's first photos, answered once
     # they've signed up.
     held: OrderedDict[str, tuple[asyncio.Future[Reply], int]] = OrderedDict()
+    # A new student's first words (no photo), answered once they've signed up: searches are
+    # same-school, so they can't run before the school is known.
+    held_words: OrderedDict[str, ChatMessage] = OrderedDict()
     follow_ups: set[asyncio.Task[None]] = set()  # keeps background replies from being collected
     fields = {f.name for f in dataclasses.fields(Conversation)} - {"key"}
     finder = backend.finder
@@ -3268,10 +3273,14 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         """The answer to one message, with a new student's held photos once they've joined."""
         reply = await handle_safely(ctx, key, msg, deadline, deliver)
         try:
-            return await with_held_photos(ctx, key, reply, deadline, deliver)
+            reply = await with_held_photos(ctx, key, reply, deadline, deliver)
         except Exception:
             ctx.logger.exception(f"Held photos in {key[:8]} failed")
-            return reply
+        if key in held_words and store.student(f"asi1:{key}") is not None:
+            words = held_words.pop(key)
+            answered = await handle_safely(ctx, key, words, deadline, deliver)
+            reply = answered._replace(text=f"{reply.text}\n\n{answered.text}")
+        return reply
 
     def loop_time() -> float:
         return asyncio.get_running_loop().time()
@@ -3357,6 +3366,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             # proposal comes with the sign-up confirmation.
             if photos_in(msg):
                 hold(ctx, key, msg)
+            elif clean_text(msg) and not _GREETING.match(clean_text(msg)):
+                held_words[key] = msg  # "find me a mini fridge": answered after sign-up
+                while len(held_words) > MAX_REMEMBERED:
+                    held_words.popitem(last=False)
             welcome = Reply(onboarding.ARE_YOU_A_STUDENT, onboarding.student_welcome())
             remember(msg_id, welcome)
             if await send_reply(ctx, sender, welcome, True, sent):
