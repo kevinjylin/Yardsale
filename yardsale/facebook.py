@@ -93,7 +93,9 @@ def parse_listing(raw: Any) -> ExternalListing | None:
         url=url,
         location=_location(raw),
         image_url=_photo(raw),
-        photo_count=photo_count(raw.get("listing_photos")) or (1 if _photo(raw) else None),
+        # Search results carry one primary photo and no condition or date (checked live on
+        # October 24); those come only with includeListingDetails, a paid page load each.
+        photo_count=photo_count(raw.get("listing_photos")),
     )
 
 

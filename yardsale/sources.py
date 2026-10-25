@@ -100,10 +100,14 @@ def first_web_link(value: Any) -> str | None:
 
 
 def photo_count(value: Any) -> int | None:
-    """How many photos a scraper's photo field holds: a list's length, 1 for a bare link or a
-    {"url": ...} photo, None when there's no field to count."""
+    """How many photos a scraper's photo field holds: a count the actor gives (Craigslist's
+    `imageCount`), a list's length, 1 for a bare link or a {"url": ...} photo, None when there's
+    no field to count."""
     if value in (None, "", [], {}) or isinstance(value, bool):
         return None
+    if isinstance(value, int | float) or (isinstance(value, str) and value.strip().isdigit()):
+        count = int(value)
+        return count if 0 <= count <= 1000 else None
     if isinstance(value, list):
         return sum(1 for item in value if item not in (None, ""))
     return 1

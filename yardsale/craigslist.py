@@ -69,7 +69,8 @@ def parse_listing(raw: Any) -> ExternalListing | None:
         latitude=latitude,
         longitude=longitude,
         posted_at=iso_date(raw.get("postedDate")),
-        photo_count=photo_count(raw.get("images")),
+        # The actor trims `images` in search results; `imageCount` is the real number.
+        photo_count=photo_count(raw.get("imageCount")) or photo_count(raw.get("images")),
     )
 
 
