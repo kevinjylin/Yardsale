@@ -89,7 +89,7 @@ async def test_shopping_words_search_other_sites(
     shop: sim.Market, ebay: Site, haggles: list[int], text: str, query: str
 ) -> None:
     reply = await shop.user("buyer").say(text)
-    assert reply.startswith("Nothing on Yardsale matches")
+    assert reply.startswith("Found it:") and "Nothing on Yardsale matches" in reply
     assert "Best deals on other sites" in reply
     assert f"https://ebay.example.test/{query.replace(' ', '-')}" in reply  # a direct link
     assert ebay.calls == [query]
@@ -144,7 +144,7 @@ async def test_a_budget_after_a_search_searches_again(
     for budget in ("max $300", "$300"):
         reply = await buyer.say(budget)
         # The $360 bike is over the budget, so it's other sites; no offer is made.
-        assert reply.startswith('Nothing on Yardsale matches "hybrid bike" under $300')
+        assert 'Nothing on Yardsale matches "hybrid bike" under $300' in reply
         assert "offer" not in reply.lower()
     assert set(ebay.calls) == {"hybrid bike"}
     assert haggles == [] and store.deals() == []
@@ -160,7 +160,7 @@ async def test_shopping_prose_never_takes_a_price_on_offer(
     assert "Yours for" in await buyer.say("haggle with the seller, max $340")
     # The planner relays a new shopping request while that price is open: a search, not a buy.
     reply = await buyer.say("The buyer wants Jordans under $200. Please proceed with the purchase.")
-    assert reply.startswith('Nothing on Yardsale matches "jordan" under $200')
+    assert 'Nothing on Yardsale matches "jordan" under $200' in reply
     assert "Deal!" not in reply
     assert "Deal!" not in await buyer.say("sure, find me a hydro flask under $40")
     assert "Deal!" not in await buyer.say("ok")  # the search ended the haggle

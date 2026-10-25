@@ -247,7 +247,8 @@ async def test_a_slow_search_says_so_first(
 async def test_haggle_words_in_a_search_only_search(shop: sim.Market) -> None:
     """Asking to haggle before there's anything on Yardsale is a search, never a haggle."""
     reply = await shop.user("buyer").say("find me a road bike, haggle for me, max $300")
-    assert reply.startswith('Nothing on Yardsale matches "road bike" under $300')
+    assert reply.startswith("Found it:")
+    assert 'Nothing on Yardsale matches "road bike" under $300' in reply
     assert "Trek road bike 54cm" in reply and "haggled" not in reply
 
 
