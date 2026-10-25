@@ -47,6 +47,9 @@ class ExternalListing:
     shipping_cents: int | None = None  # None when unknown; 0 means free shipping
     accepts_offers: bool = False  # the site lets a buyer send an offer, e.g. eBay Best Offer
     negotiable: bool = False  # nothing scraped is: there's no agent on the other end
+    # Quality signals for the deal finder (deals.py). None when the site doesn't say.
+    photo_count: int | None = None
+    seller_rating: float | None = None  # percent positive feedback, 0 to 100
 
     @property
     def total_cents(self) -> int | None:
@@ -94,6 +97,29 @@ def first_web_link(value: Any) -> str | None:
         if link:
             return link
     return None
+
+
+def photo_count(value: Any) -> int | None:
+    """How many photos a scraper's photo field holds: a list's length, 1 for a bare link or a
+    {"url": ...} photo, None when there's no field to count."""
+    if value in (None, "", [], {}) or isinstance(value, bool):
+        return None
+    if isinstance(value, list):
+        return sum(1 for item in value if item not in (None, ""))
+    return 1
+
+
+def percent(value: Any) -> float | None:
+    """A percentage such as a seller's positive feedback ("99.6%", 99.6), or None."""
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).replace("%", "").strip())
+    except ValueError:
+        return None
+    if number != number or not 0 <= number <= 100:  # NaN fails its own equality check
+        return None
+    return number
 
 
 def coordinate(value: Any, limit: float) -> float | None:

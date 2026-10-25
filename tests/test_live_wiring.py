@@ -37,7 +37,7 @@ async def test_live_build_restores_item_agents_at_the_public_url(
     assert not rt.offline and not rt.started
     (item_agent,) = rt.agents.values()
     assert [e.url for e in item_agent._endpoints] == ["https://yardsale.example/submit"]
-    # The four public agents use Agentverse mailboxes, not the Bureau's endpoint.
+    # The Market and the service agents use Agentverse mailboxes, not the Bureau's endpoint.
     for agent in (market, *services):
         assert all("agentverse" in e.url for e in agent._endpoints)
     store.close()

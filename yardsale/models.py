@@ -323,3 +323,58 @@ class Appraised(Model):
     listing_ref: str
     item: ItemDetails
     appraisal: Appraisal
+
+
+# --- The Deal Finder: Market <-> Deal Finder ----------------------------------------------------
+
+
+class FindDeals(Model):
+    """Market -> Deal Finder: the best-priced, best-quality listings for a buyer's search on
+    other sites (eBay, Craigslist, OfferUp, ...), scored against what the item sells for."""
+
+    request_id: str
+    query: str  # the words to search for; the Deal Finder strips filler itself
+    max_cents: int | None = None  # the most the buyer pays, shipping included; None for any
+    zip: str = ""  # a ZIP code for sources that search around one; "" for the server's default
+
+
+class FoundDeal(Model):
+    """One listing on another site, scored. Prices are integer cents; shipping is None when
+    the site doesn't say."""
+
+    source: str  # craigslist | ebay | offerup | facebook
+    external_id: str
+    title: str
+    url: str
+    price_cents: int
+    shipping_cents: int | None
+    total_cents: int  # price plus known shipping, what the buyer pays
+    location: str = ""
+    condition: str = ""
+    image_url: str | None = None
+    posted_at: str = ""  # YYYY-MM-DD when the site gives one
+    accepts_offers: bool = False
+    photo_count: int | None = None
+    seller_rating: float | None = None  # percent positive, when the site gives one
+    score: float = 0.0  # higher is better; price against the market first, then quality, fit
+    versus_market_pct: int | None = None  # positive: under the typical sold price; None: unknown
+    why: str = ""  # one line: "35% under the $185 typical sold price, like new, 6 photos"
+    # parts | accessory | missing_words | far_under. uAgents models are pydantic v1, which copies
+    # a default list per instance.
+    flags: list[str] = []  # noqa: RUF012
+
+
+class DealsFound(Model):
+    """Deal Finder -> Market: the top deals, best first, with the market price they're judged
+    against. typical_cents is None when no recent eBay sales matched the search."""
+
+    request_id: str
+    query: str
+    max_cents: int | None
+    deals: list[FoundDeal]
+    searched: list[str]  # sources that answered
+    failed: list[str]  # sources that couldn't be searched
+    considered: int  # listings the sources returned before filtering
+    typical_cents: int | None = None  # the median of matching eBay sales in the last 90 days
+    comps_used: int = 0  # how many sales that median is from
+    comps_note: str = ""  # why there's no market price, when there isn't

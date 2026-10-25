@@ -59,6 +59,7 @@ Yardsale was started during [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/
 | [yardsale-researcher](https://agentverse.ai/agents/details/agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2/profile) | `@ys-researcher` | `agent1q0eltxwa77247ajr0ckhdmxgjks3r0r07k5ugypdsrg87zlau38rywefvm2` | Finds what that product sold for on eBay in the last 90 days, through Apify. |
 | [yardsale-appraiser](https://agentverse.ai/agents/details/agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k/profile) | `@ys-appraiser` | `agent1q04thzahn3fg54reqd26xlaqq2nqzr42x4992sx0xhvwjfrkz3dq6wdxx5k` | Claude picks which sales are the same product; code sets the asking price and the floor. |
 | [yardsale-shopper](https://agentverse.ai/agents/details/agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs/profile) | `@ys-shopper` | `agent1qgf2ezv39kw6gtxjdcv9lltyxgldvk6xr7uxzlfe9gk2wpcyv8fa2y7lnqs` | The buyer agent: haggles with several item agents at once for a shopper, never above their max. New; it connects to Agentverse the next time the server starts live. |
+| yardsale-dealfinder | `@ys-dealfinder` | (set on the first live start) | The Deal Finder: searches eBay, Craigslist, OfferUp, and Facebook Marketplace for a buyer's search, prices each listing against what it sold for on eBay, and explains the best deals. New; its address and profile appear the next time the server starts live. |
 
 Every approved listing also gets its own **item agent**, which holds the seller's private floor
 and haggles with buyers. By default item agents run in the Bureau and register on Fetch's Almanac
@@ -84,7 +85,7 @@ running.
 - [ASI:One API key](https://asi1.ai/developer) (`ASI_ONE_API_KEY`, recommended): `asi1-mini` reads what
   people type. Without it, a simpler keyword reader is used.
 - [Agentverse API key](https://agentverse.ai/) (`AGENTVERSE_API_KEY`, optional): connects the
-  five agents' mailboxes at startup and uploads their profile READMEs from
+  six agents' mailboxes at startup and uploads their profile READMEs from
   [yardsale/readmes/](yardsale/readmes/). With `YARDSALE_HOST_ITEMS`, it also hosts item agents.
 - Payment links (optional; without them a deal is an agreed price only): a
   [Visa Acceptance sandbox](https://developer.visaacceptance.com/) account for Pay By Link
@@ -187,22 +188,30 @@ Market acknowledges every message at once and replies within 40 seconds: with th
 5. **Pay.** The reply has a payment link (Visa Pay By Link or Stripe, test mode) and a card with
    "I've paid". `paid` checks with the provider; `my orders` lists purchases. The server also
    checks pending payments every minute. Without payment keys, the deal is an agreed price only.
-6. **Nothing on Yardsale?** When a search or haggle finds nothing, the Market searches eBay,
-   Craigslist, and OfferUp once through Apify ([elsewhere.py](yardsale/elsewhere.py)) and lists
-   the best five within the max (price plus shipping): closest match first, parts and
-   accessories last, then cheapest. They're links, marked as not Yardsale listings: no agent
-   haggles for them. `search other sites` (or `check ebay and craigslist`) does the same on
-   request. A slow search gets "searching" first and the deals as a second message. Each search
-   is cached for 10 minutes, so asking again costs nothing.
+6. **Nothing on Yardsale?** When a search or haggle finds nothing, the Market asks the Deal
+   Finder agent ([dealfinder.py](yardsale/dealfinder.py)), which searches eBay, Craigslist, and
+   OfferUp once through Apify ([elsewhere.py](yardsale/elsewhere.py)), looks up what the item
+   sold for on eBay in the last 90 days, and scores every listing ([deals.py](yardsale/deals.py)):
+   price against that typical sold price first, then quality (condition, photos, seller rating,
+   title, age), then fit; parts, repairs, lots, and accessories sink; the same item on two sites
+   shows once. The reply lists the best five within the max (price plus shipping), each with a
+   reason: "$180 on Craigslist, 42% under the $310 typical sold price, like new, 6 photos".
+   They're links, marked as not Yardsale listings: no agent haggles for them. `search other
+   sites` (or `check ebay and craigslist`) does the same on request. A slow search gets
+   "searching" first and the deals as a second message. Each search is cached for 10 minutes,
+   so asking again costs nothing.
 7. **Watch for it.** `watch for it` (or `watch for a road bike under $300`) keeps checking those
    sites every 6 hours for a week ([watches.py](yardsale/watches.py)). New finds are told the
    next time the buyer says anything; `my watches` shows them, `stop watching 1` stops one.
 
 Each search of other sites runs one Apify actor per site, about $0.03 to $0.05 for 20 results
 each: Craigslist (`logiover/craigslist-scraper`), eBay (`charitable_trousseau/ebay-search-scraper`),
-and OfferUp (`igolaizola/offerup-scraper`, near `YARDSALE_OFFERUP_ZIP`). Facebook Marketplace
-(Apify's own `apify/facebook-marketplace-scraper`, about $0.05 to $0.12 a search) joins with
+and OfferUp (`igolaizola/offerup-scraper`, near `YARDSALE_OFFERUP_ZIP`), plus about $0.08 for
+the eBay sold comps the market price comes from. Facebook Marketplace (Apify's own
+`apify/facebook-marketplace-scraper`, about $0.05 to $0.12 a search) joins with
 `YARDSALE_FACEBOOK=1`. Demo mode searches no other sites.
+`uv run python -m yardsale.elsewhere --probe "road bike" --max 300` runs each source once, small
+(about $0.10), and prints what the parsers made of the live output.
 
 **The haggling rules** ([haggle.py](yardsale/haggle.py)), the same wherever an item agent runs:
 
@@ -420,7 +429,7 @@ uv run python -m yardsale.hosting --cleanup   # delete the ones whose listing is
 `--cleanup` does the same deletes by hand, for when the server isn't running.
 
 Agentverse's agent limits (reportedly 8 on the free plan and 25 on Premium; not checked against
-our account) count the five mailbox agents too. Hosting was run live on October 24: a hosted
+our account) count the six mailbox agents too. Hosting was run live on October 24: a hosted
 agent starts in about 3 seconds and answers a haggle round through Agentverse in a few seconds.
 Agentverse shows only 32 characters of a name, so each hosted agent is named after its item.
 
@@ -498,6 +507,7 @@ All agents run inside one uAgents `Bureau`: one process, one port (8100).
 | Researcher | Apify finds eBay sold listings | mailbox |
 | Appraiser | Claude matches sales; code sets the price | mailbox |
 | Shopper | the buyer agent: haggles with several item agents at once | mailbox |
+| Deal Finder | searches other sites through Apify and scores the deals against eBay sold prices | mailbox |
 | Item agents, one per listing | hold the private floor, haggle, close deals | none (Almanac only), or hosted on Agentverse |
 
 Item agents in the Bureau don't connect to Agentverse, so there's no cap on them from
@@ -557,8 +567,9 @@ agent can't accept a chat buyer's counter-offer.
 - [sources.py](yardsale/sources.py), [ebay.py](yardsale/ebay.py),
   [craigslist.py](yardsale/craigslist.py), [offerup.py](yardsale/offerup.py),
   [facebook.py](yardsale/facebook.py): listings on other sites, through Apify actors.
-  [elsewhere.py](yardsale/elsewhere.py) searches them once for a buyer;
-  [watches.py](yardsale/watches.py) keeps searching them.
+  [elsewhere.py](yardsale/elsewhere.py) searches them once for a buyer, [deals.py](yardsale/deals.py)
+  scores what they return against eBay sold prices, [dealfinder.py](yardsale/dealfinder.py) is
+  the agent that does both for the Market; [watches.py](yardsale/watches.py) keeps searching them.
 - [config.py](yardsale/config.py): settings, the public endpoint, and the readiness check.
 - [agentverse.py](yardsale/agentverse.py): Agentverse profiles and mailbox connection.
 - [offline.py](yardsale/offline.py): offline mode's local stand-in for the Almanac, and the switch

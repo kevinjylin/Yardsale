@@ -28,6 +28,7 @@ from yardsale.sources import (
     cents_or_none,
     deduplicated,
     one_line,
+    photo_count,
     run_actor,
     web_link,
 )
@@ -92,6 +93,7 @@ def parse_listing(raw: Any) -> ExternalListing | None:
         url=url,
         location=_location(raw),
         image_url=_photo(raw),
+        photo_count=photo_count(raw.get("listing_photos")) or (1 if _photo(raw) else None),
     )
 
 

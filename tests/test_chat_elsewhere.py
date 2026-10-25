@@ -108,6 +108,29 @@ async def test_nothing_on_yardsale_shows_the_best_deals_elsewhere(
     assert ebay.calls == ["road bike"]
 
 
+async def test_deals_are_scored_against_what_the_item_sells_for(
+    store: Store, ebay: Site, craigslist: Site
+) -> None:
+    sources = {"ebay": ebay, "craigslist": craigslist}
+    async with sim.running_market(
+        store, research=fakes.research_with_comps, sources=sources
+    ) as market:
+        buyer = market.user("buyer")
+        reply = await buyer.exchange(sim.chat_message("find me a road bike under $300"))
+    text = reply.text()
+    assert "(typical sold price on eBay: $310, from 4 sales):" in text
+    lines = text.splitlines()
+    first = next(n for n, line in enumerate(lines) if line.startswith("1. "))
+    assert "$180 on Craigslist, 42% under the $310 typical sold price (Oakland, CA)" in lines[first]
+    assert "$210 + $30 shipping on eBay, 23% under the $310 typical sold price" in lines[first + 1]
+    assert "looks like an accessory" in lines[first + 2]
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, CarouselCardPayload)
+    assert card.payload.items[0].subtitle == "$180, 42% under typical"
+    assert card.payload.items[1].subtitle == "$240 with shipping, 23% under typical"
+    assert ebay.calls == ["road bike"]
+
+
 async def test_yardsale_listings_come_first(shop: sim.Market, ebay: Site) -> None:
     await list_bike(shop, 360, 300)
     reply = await shop.user("buyer").say("find me a hybrid bike")

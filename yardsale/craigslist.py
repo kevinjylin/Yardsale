@@ -27,6 +27,7 @@ from yardsale.sources import (
     first_web_link,
     iso_date,
     one_line,
+    photo_count,
     run_actor,
     web_link,
 )
@@ -68,6 +69,7 @@ def parse_listing(raw: Any) -> ExternalListing | None:
         latitude=latitude,
         longitude=longitude,
         posted_at=iso_date(raw.get("postedDate")),
+        photo_count=photo_count(raw.get("images")),
     )
 
 

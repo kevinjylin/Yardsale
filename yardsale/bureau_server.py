@@ -21,8 +21,8 @@ protocol (haggle.py, negotiation.py). Most run in this Bureau and register on th
 with its endpoint. With hosting on (hosting.py), approved items get an agent hosted on
 Agentverse instead, up to YARDSALE_HOST_ITEMS of them, each with a handle made from its title
 and, with YARDSALE_ITEM_AVATARS=1, a picture ASI:One draws (avatars.py). The Market, the buyer
-agent (shopper.py), the Identifier, Researcher, and Appraiser use Agentverse mailboxes in live
-mode.
+agent (shopper.py), the Identifier, Researcher, Appraiser, and Deal Finder (dealfinder.py, other
+sites' deals scored for a buyer) use Agentverse mailboxes in live mode.
 
 When a buyer accepts, the deal is recorded and the Market's checkout (checkout.py) sends a payment
 link through the Agent Payment Protocol, or in the chat for chat buyers.
@@ -73,6 +73,7 @@ from yardsale.craigslist import search_craigslist
 from yardsale.craigslist_mail import POLL_EVERY as MAIL_POLL_EVERY
 from yardsale.craigslist_mail import CraigslistMail, Mailbox, MailConfigError, MailSettings
 from yardsale.craigslist_mail import settings_from_env as mail_settings_from_env
+from yardsale.dealfinder import DEALS_TIMEOUT, DealsClient, build_dealfinder
 from yardsale.ebay import search_ebay
 from yardsale.ebay_seller import CHECK_EVERY as EBAY_CHECK_EVERY
 from yardsale.ebay_seller import EbaySeller
@@ -92,6 +93,8 @@ from yardsale.models import (
     CancelListing,
     Counter,
     Deal,
+    DealsFound,
+    FindDeals,
     HaggleRequest,
     HaggleResult,
     Identified,
@@ -148,6 +151,7 @@ class Services:
     identifier: str
     researcher: str
     appraiser: str
+    dealfinder: str = ""  # the Deal Finder (dealfinder.py): other sites' deals, scored
 
 
 @dataclass
@@ -482,7 +486,7 @@ async def request_reply(
 async def call_service(
     ctx: Context,
     service: str,
-    request: IdentifyRequest | ResearchRequest | AppraiseRequest,
+    request: IdentifyRequest | ResearchRequest | AppraiseRequest | FindDeals,
     reply_type: type[R],
     wait_seconds: float,
 ) -> R:
@@ -521,6 +525,11 @@ async def on_appraisal(ctx: Context, sender: str, msg: Appraisal) -> None:
 
 @market_proto.on_message(ServiceError)
 async def on_service_error(ctx: Context, sender: str, msg: ServiceError) -> None:
+    _resolve(ctx, sender, msg.request_id, msg)
+
+
+@market_proto.on_message(DealsFound)
+async def on_deals_found(ctx: Context, sender: str, msg: DealsFound) -> None:
     _resolve(ctx, sender, msg.request_id, msg)
 
 
@@ -1002,10 +1011,14 @@ def build(
         registration_policy=registration,
         loop=asyncio.get_running_loop(),
     )
+    # The Deal Finder searches other sites and prices the market from the same eBay sold
+    # listings the Researcher finds (`research`).
+    deal_finder = DealFinder(sources or {}, comps=research)
     services = [
         build_identifier(identify, offline),
         build_researcher(research, offline),
         build_appraiser(judge, offline),
+        build_dealfinder(deal_finder, offline),
     ]
     shopper: Shopper = build_shopper(offline, round_timeout)
     store = store or Store()
@@ -1024,13 +1037,20 @@ def build(
         pictures=pictures,
         ebay=ebay,
         sources=sources or {},
-        finder=DealFinder(sources or {}),
     )
     # On Agentverse in live mode, so ASI:One can reach it. Handles messages concurrently, so a
     # photo listing waiting on a service doesn't block other messages.
     market = service_agent(
         "market", "Yardsale Orchestrator", "ys-orchestrator", MARKET_DESCRIPTION, offline
     )
+
+    async def ask_deal_finder(request: FindDeals) -> DealsFound:
+        ctx = market._build_context()
+        return await call_service(ctx, rt.services.dealfinder, request, DealsFound, DEALS_TIMEOUT)
+
+    # The chat and @yardsale's API search other sites through the Deal Finder agent.
+    rt.finder = DealsClient(sources or {}, ask_deal_finder)
+
     market.include(market_proto)
     market.include(market_buyer)
     market.include(build_payment_protocol(rt.checkout), publish_manifest=not offline)

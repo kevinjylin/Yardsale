@@ -16,7 +16,7 @@ Agentverse's allowed packages; this code needs uagents, uagents-core, and the st
 Hosting is on in live mode when AGENTVERSE_API_KEY is set and YARDSALE_HOST_ITEMS is above 0.
 That number caps how many item agents are on Agentverse at once, counting closed listings' agents
 not deleted yet (Agentverse limits agents per account, reportedly 8 free and 25 on Premium, and
-Yardsale's five mailbox agents count too).
+Yardsale's six mailbox agents count too).
 Past the cap, or if hosting fails, the item agent runs in the Bureau and registers on the
 Almanac as before.
 

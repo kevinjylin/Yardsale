@@ -10,7 +10,7 @@ from typing import Any
 import aiohttp
 import pytest
 
-from tests import sim
+from tests import fakes, sim
 from tests.helpers import local_server
 from tests.test_business_api import KEY, PUBLIC, Client
 from tests.test_chat_elsewhere import Site, deal, down
@@ -70,6 +70,28 @@ async def test_other_sites_returns_deals_under_the_max(client: Client, ebay: Sit
     assert "aren't Yardsale listings" in found["next_step"]
     await client.call("GET", "/other-sites", q="road bike", max_usd=300)
     assert ebay.calls == ["road bike"]  # cached
+
+
+async def test_other_sites_explains_each_deal_against_the_market(store: Store, ebay: Site) -> None:
+    async with sim.running_market(
+        store, research=fakes.research_with_comps, sources={"ebay": ebay}
+    ) as market:
+        api = BusinessApi(
+            bureau_server.MarketBackend(bureau_server.runtime()),
+            market.agent._build_context,
+            KEY,
+            PUBLIC,
+        )
+        async with local_server(api.app()) as base, aiohttp.ClientSession() as session:
+            client = Client(base, session)
+            status, found = await client.call("GET", "/other-sites", q="road bike", max_usd=300)
+    assert status == 200 and found["typical_sold_usd"] == 310 and found["comps_used"] == 4
+    assert "typical sold price on eBay, $310" in found["summary"]
+    (bike,) = found["listings"]
+    assert bike["versus_market_pct"] == 23 and bike["flags"] == []
+    assert bike["reason"] == "$210 + $30 shipping on eBay, 23% under the $310 typical sold price"
+    assert isinstance(bike["score"], float)
+    assert "each one's reason" in found["next_step"]
 
 
 async def test_other_sites_checks_its_input(client: Client) -> None:
