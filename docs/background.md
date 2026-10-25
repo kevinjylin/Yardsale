@@ -390,15 +390,19 @@ each is a good deal. Yardsale's own listings still come first when they match.
   says what they were judged against ("typical sold price on eBay: $310, from 4 sales"). A
   carousel card shows their photos with the percentage. The reply says they aren't Yardsale
   listings, so no agent haggles for them; Craigslist sellers take offers by email.
-- The search runs after the conversation's lock is released. If it takes longer than
-  `REPLY_WITHIN`, the first reply says it's searching and the deals follow as a second message.
-  The Market waits up to 240 s for the agent, like the Researcher.
+- The search runs after the conversation's lock is released. A new search goes to the Deal
+  Finder agent (through Agentverse; see "Requests go through Agentverse" below), which answers
+  by its 20-second deadline (`elsewhere.SOURCE_WITHIN`) with the sites that answered by then,
+  listing slower ones as pending; that answer is what the buyer sees first. The chat replies at
+  once that it's searching, and sends the agent's deals as the next message. The agent and the
+  Market share one finder, so slower sites' deals follow from the same running search, and a
+  search already answered or running (asked before, in the chat or the API) is read from it
+  with no message to the agent. The Market waits up to 35 s for the agent; if it refuses or
+  doesn't answer, the Market searches itself.
 - Each run costs about $0.03 to $0.05 per site plus about $0.08 for the comps, so results are
   cached 10 minutes per (search words, budget, ZIP) and comps per search words, and a search
   still running is joined, not started again. A search where no site answered isn't cached,
-  and neither is a failed comps search. The log has counts only, never the words or the max;
-  the Market's client (`DealsClient`) keeps the same interface, so the chat and the API don't
-  know the search runs in another agent.
+  and neither is a failed comps search. The log has counts only, never the words or the max.
 - `uv run python -m yardsale.elsewhere --probe "road bike" --max 300` runs one small paid
   search per source (10 results each, plus 10 comps; about $0.10, $0.16 with Facebook) and
   prints per-source counts, what each parser could read (prices, links, photo counts,
@@ -728,7 +732,8 @@ reason, and the seller sees which sales the price came from.
   instead. [README](../README.md#pricing-rules) has the full rules.
 
 **Agent messages.** The Market tags each request with an ID and waits for the reply with the same
-ID: up to 180 s for the Identifier and 240 s each for the Researcher, Scout, and Appraiser. If
+ID: up to 180 s for the Identifier, 240 s each for the Researcher and Appraiser, and 30 s for
+the Scout. If
 the Identifier, Researcher, or Appraiser fails or times out, the seller gets a `ListingRejected`
 with the reason, for example "APIFY_TOKEN is not set"; a Scout failure only leaves the proposal
 without live asking prices. Agents other than the chat send `ListPhoto`, get `Proposed`, and answer with
@@ -748,6 +753,14 @@ service handles only the first copy of a request ID, so nothing is lost or done 
 Scout is now asked as an agent too (before, the Market ran its search code itself): it answers
 by its own 18-second deadline with the sites that answered by then. `YARDSALE_VIA_AGENTVERSE=0`
 turns this off; offline mode always hands requests over in memory.
+
+Measured on October 25 with one 313 KB photo: the Identifier's request took 4.4 s to reach it
+through Agentverse, the Researcher's 0.9 s, the Scout's 2.2 s (beside the Researcher), and the
+Appraiser's 4.4 s, so a photo takes about 10 seconds longer than in memory. The two requests
+that carry the photo are the slow ones. The photo was priced in 23.3 s, but its eBay search
+found no sales, so that total isn't comparable with earlier runs (25.5 to 31.7 s). On the
+first try every request went in memory (a bug in posting the envelope, since fixed), and the
+photo was still priced, in 28.5 s.
 
 **Cost per photo:** about $0.08 of Apify (about $0.004 per sold listing, 20 listings), with a
 $0.50 cap per search, plus two Claude calls (`claude-opus-5-5` at medium effort by default; change

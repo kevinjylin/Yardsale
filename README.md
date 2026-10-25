@@ -51,11 +51,13 @@ and the pitch.
 
 ## Agents
 
-![The ASI:One chat, @yardsale on Fetch Business, and Craigslist email all lead to the Yardsale Orchestrator, which runs checkout and hands each job to an agent: the Identifier, Researcher, Market Scout, and Appraiser price a photo; an item agent per approved listing haggles with buyers; the Deal Finder scores listings on other sites.](docs/architecture.png)
+![The ASI:One chat, @yardsale on Fetch Business (finding deals, checking prices, starting a Craigslist negotiation), and Craigslist email all lead to the Yardsale Orchestrator, which runs checkout and hands each job to an agent, sending each request through that agent's Agentverse mailbox: the Identifier, Researcher, Market Scout, and Appraiser price a photo, and the Deal Finder scores listings on other sites. An item agent per approved listing haggles with buyers. For a Craigslist post the buyer picks, the orchestrator's email negotiator haggles with the seller by email, never above the buyer's max.](docs/architecture.png)
 
-Every request goes through the orchestrator, which hands each job to an agent. Checkout runs
-inside the orchestrator, not as its own agent. The diagram leaves out the Shopper, the buyer agent
-in the table below.
+Every request goes through the orchestrator, which hands each job to an agent. Requests to the
+photo agents and the Deal Finder go through each agent's Agentverse mailbox, as they would to an
+agent running elsewhere. Checkout and the email negotiator, which haggles with a Craigslist seller
+for a buyer, run inside the orchestrator, not as their own agents. The diagram leaves out the
+Shopper, the buyer agent in the table below.
 
 Yardsale was started during [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/), October 23–25,
 2026. These agents are Agentverse mailbox agents and run in one Bureau server:
@@ -94,7 +96,7 @@ is running.
 - [ASI:One API key](https://asi1.ai/developer) (`ASI_ONE_API_KEY`, recommended): `asi1-mini` reads what
   people type. Without it, a simpler keyword reader is used.
 - [Agentverse API key](https://agentverse.ai/) (`AGENTVERSE_API_KEY`, optional): connects the
-  six agents' mailboxes at startup and uploads their profile READMEs from
+  seven agents' mailboxes at startup and uploads their profile READMEs from
   [yardsale/readmes/](yardsale/readmes/). With `YARDSALE_HOST_ITEMS`, it also hosts item agents.
 - Payment links (optional; without them a deal is an agreed price only): a
   [Visa Acceptance sandbox](https://developer.visaacceptance.com/) account for Pay By Link
@@ -455,7 +457,7 @@ uv run python -m yardsale.hosting --cleanup   # delete the ones whose listing is
 `--cleanup` does the same deletes by hand, for when the server isn't running.
 
 Agentverse's agent limits (reportedly 8 on the free plan and 25 on Premium; not checked against
-our account) count the six mailbox agents too. Hosting was run live on October 24: a hosted
+our account) count the seven mailbox agents too. Hosting was run live on October 24: a hosted
 agent starts in about 3 seconds and answers a haggle round through Agentverse in a few seconds.
 Agentverse shows only 32 characters of a name, so each hosted agent is named after its item.
 

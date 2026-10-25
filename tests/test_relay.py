@@ -278,7 +278,7 @@ class StubResolver:
 def stub_sender(resolver: StubResolver) -> Agent:
     identity = Identity.from_seed(uuid4().hex, 0)
     return cast(
-        Agent, SimpleNamespace(address=identity.address, identity=identity, _resolver=resolver)
+        Agent, SimpleNamespace(address=identity.address, _identity=identity, _resolver=resolver)
     )
 
 
@@ -343,6 +343,18 @@ async def test_post_sends_a_signed_envelope_to_agentverse_only(
     assert envelope.verify()
     decoded = envelope.decode_payload()
     assert Ask.model_validate_json(decoded) == message
+
+
+async def test_post_works_from_a_real_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real Agent, not a stub: the first live run failed because Agent has no public
+    `identity` (only uagents' AgentRepresentation does), and the stub had one."""
+    sent = capture_sends(monkeypatch)
+    service = Identity.from_seed(uuid4().hex, 0).address
+    market = Agent(name="relay-real", seed=uuid4().hex, loop=asyncio.get_running_loop())
+    market._resolver = StubResolver(service, ["https://agentverse.ai/v1/submit"])  # type: ignore[assignment]
+    assert await relay._post(market, service, Ask(request_id="p5")) is None
+    [(envelope, _)] = sent
+    assert envelope.sender == market.address and envelope.verify()
 
 
 async def test_post_refused_by_agentverse_says_why(monkeypatch: pytest.MonkeyPatch) -> None:

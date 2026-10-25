@@ -95,7 +95,7 @@ async def deliver(sender: Agent, address: str, message: Model, request_id: str, 
     try:
         refused = await _post(sender, address, message)
     except Exception as ex:  # an unreachable Almanac or Agentverse
-        refused = type(ex).__name__
+        refused = f"{type(ex).__name__}: {str(ex)[:120]}"
     if refused is None:
         try:
             await asyncio.wait_for(sent.arrived.wait(), ARRIVE_WITHIN)
@@ -151,7 +151,7 @@ async def _post(sender: Agent, address: str, message: Model) -> str | None:
         expires=int(time.time()) + EXPIRES_AFTER,
     )
     envelope.encode_payload(message.model_dump_json())
-    envelope.sign(sender.identity)
+    envelope.sign(sender._identity)  # Agent has no public identity; Bureau uses this too
     status = await send_exchange_envelope(envelope, endpoints)
     if isinstance(status, Envelope) or status.status != DeliveryStatus.FAILED:
         return None
