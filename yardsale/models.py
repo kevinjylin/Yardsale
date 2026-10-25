@@ -426,9 +426,22 @@ class FoundDeal(Model):
     score: float = 0.0  # higher is better; price against the market first, then quality, fit
     versus_market_pct: int | None = None  # positive: under the typical sold price; None: unknown
     why: str = ""  # one line: "35% under the $185 typical sold price, like new, 6 photos"
-    # parts | accessory | missing_words | far_under. uAgents models are pydantic v1, which copies
-    # a default list per instance.
+    # parts | accessory | missing_words | far_under | over_budget | no_price (price_cents is 0
+    # then, meaning not listed). uAgents models are pydantic v1, which copies a default list
+    # per instance.
     flags: list[str] = []  # noqa: RUF012
+
+
+class SiteOutcome(Model):
+    """How one site's search went (elsewhere.SiteResult): "ok" with `raw` listings, `kept` of
+    them fitting; "empty", it answered with none; "failed", with `reason` (timeout, blocked,
+    busy, credit, setup, error). A failed site never counts as having nothing."""
+
+    source: str
+    status: str
+    raw: int = 0
+    kept: int = 0
+    reason: str = ""
 
 
 class DealsFound(Model):
@@ -445,3 +458,5 @@ class DealsFound(Model):
     typical_cents: int | None = None  # the median of matching eBay sales in the last 90 days
     comps_used: int = 0  # how many sales that median is from
     comps_note: str = ""  # why there's no market price, when there isn't
+    sites: list[SiteOutcome] = []  # noqa: RUF012  # per site, in the order searched
+    place: str = ""  # where the local sites searched: "Berkeley (94704)", "the SF Bay Area"

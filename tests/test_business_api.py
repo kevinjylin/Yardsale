@@ -227,7 +227,8 @@ async def test_bad_requests_and_other_buyers_deals(shop: Any, store: Store) -> N
 
     # A chat buyer's deal isn't visible through the API.
     buyer = market.user("chat-buyer")
-    await buyer.say("find me a hybrid bike, haggle for me, max $350")
+    await buyer.say("find me a hybrid bike")
+    await buyer.say("haggle with the seller, max $350")
     assert "Deal!" in await buyer.say("accept")
     (chat_deal,) = store.deals()
     assert (await client.call("GET", f"/deals/{chat_deal.deal_id}"))[0] == 404

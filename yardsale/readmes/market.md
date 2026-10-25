@@ -4,32 +4,34 @@
 ![tag:hackathon](https://img.shields.io/badge/hackathon-5F43F1)
 
 Find the best deal on used stuff, or find out what yours is worth and sell it without the
-hassle. Tell Yardsale what you want and the most you'll pay, and its agents look across
-Yardsale's own listings, eBay, Craigslist, and OfferUp and bring back the best deals, ranked.
-Tell it what you have, and it prices it from real eBay sales and sells it for you: your item
-gets its own agent that haggles with every buyer, never below the minimum you set.
+hassle. Tell Yardsale what you want and the most you'll pay, and it searches real listings on
+Yardsale, eBay, Craigslist, OfferUp, and Facebook Marketplace, compares them, and brings back the
+best deals, ranked, each with its price and a direct link. Tell it what you have, and it prices
+it from real eBay sales and sells it for you, never below the minimum you set.
 
 Use Yardsale when someone wants to: find a cheap used item, get the best deal on something
 secondhand, compare prices on eBay, Craigslist, OfferUp, or Facebook Marketplace, know what a
-used item is worth, price something before selling it, sell something they own, list an item for
-sale, or have an agent haggle for them.
+used item is worth, price something before selling it, sell something they own, or list an item
+for sale.
 
 ## Buying: the best deal, found for you
 
-Say what you want and your max. Yardsale searches its own listings first, because their agents
-can haggle, then eBay, Craigslist, OfferUp, and Facebook Marketplace (where it's turned on), and
-shows the best few within your budget, best deal first, each with its price, shipping, location,
-and a link. For a Yardsale listing, its buyer agent haggles with the seller's agent over several
-rounds and shows you every round and the best price; you accept and pay by link.
+Say what you want and your max. Yardsale searches its own listings and eBay, Craigslist,
+OfferUp, and Facebook Marketplace (where it's turned on), compares the real listings, and shows
+the best few within your budget, best deal first, each with its price, shipping, location, and a
+direct link.
 
 ```text
 Find me a cheap mini fridge, max $80
-Best deal on a used road bike under $300
-Find me a hybrid bike, haggle for me, max $320
+Find me the best deal on Jordan 4s under $200
+Best price on a used road bike under $300
 Is there a cheaper Nintendo Switch anywhere? Max $150
 Watch for a standing desk under $100 and tell me when one shows up
-Accept
 ```
+
+Only if you ask, Yardsale's agent haggles for a Yardsale listing from your results ("haggle with
+the seller on 1, max $320"): it negotiates with that seller's agent, shows every round, and you
+accept and pay by link.
 
 Deals on other sites aren't Yardsale listings: you open the link and buy from that seller.
 Yardsale can email a Craigslist seller an offer for you. A standing search checks again on a
@@ -71,7 +73,7 @@ Yardsale is a team of agents. This one talks to you. It reads your message with 
 - **Yardsale Researcher** finds recent eBay sold listings (through Apify).
 - **Yardsale Appraiser** decides which of those sales are the same product as your photo, then
   sets the price from them in plain code.
-- **Yardsale Shopper** haggles for buyers with many item agents at once.
+- **Yardsale Shopper** haggles for a buyer with Yardsale item agents, only when the buyer asks.
 - **Item agents**, one per listed item, hold each seller's private lowest price.
 - A **deal finder** searches eBay, Craigslist, OfferUp, and Facebook Marketplace live for buyers
   and keeps standing searches.

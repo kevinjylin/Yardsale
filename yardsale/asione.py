@@ -20,7 +20,7 @@ from typing import Literal
 import aiohttp
 from pydantic import BaseModel, ValidationError
 
-from yardsale.commands import AMOUNT, BUDGET, FLOOR, HAGGLE, budget, seller_prices
+from yardsale.commands import AMOUNT, BUDGET, FLOOR, budget, seller_prices
 
 API_URL = "https://api.asi1.ai/v1/chat/completions"
 MODEL = os.getenv("YARDSALE_ASI_MODEL", "asi1-mini")
@@ -31,27 +31,32 @@ Intent = Literal["sell", "buy", "other"]
 
 
 class SellerMessage(BaseModel):
+    """What a message asks for. "buy" always means a search: Yardsale's listings and other
+    sites, compared, with links. Haggling is never read from prose; it's an explicit command
+    (commands.HAGGLE), so no reading of "best deal" or "get me a bargain" starts one."""
+
     intent: Intent
     asking_usd: float | None
     floor_usd: float | None
     note: str
     query: str = ""  # buyers: what they're looking for
     budget_usd: float | None = None  # buyers: the most they want to pay
-    haggle: bool = False  # buyers: they want Yardsale to negotiate for them
 
 
 # (text, has_photo) -> what the message asks for
 ReadMessage = Callable[[str, bool], Awaitable[SellerMessage]]
 
 SYSTEM = """You read messages sent to Yardsale in the ASI:One chat. Sellers attach a photo of \
-something they want to sell; Yardsale prices it from recent eBay sales and starts an agent that \
-haggles with buyers for them. Buyers search what's for sale. Messages may come straight from the \
-user or from the ASI:One planner describing what the user said. Messages can be in any language; \
-answer in English.
+something they want to sell; Yardsale prices it from recent eBay sales and lists it. Buyers want \
+to find something: Yardsale searches its own listings and other marketplaces (eBay, Craigslist, \
+OfferUp, Facebook Marketplace) and compares real listings with prices and links. Messages may \
+come straight from the user or from the ASI:One planner describing what the user said ("The \
+buyer wants ..."). Messages can be in any language; answer in English.
 
 - intent: "sell" if they want to sell, list, price, or get rid of an item, or they attached a \
-photo without saying otherwise; "buy" if they're looking for something to buy; "other" for \
-anything else (greetings, questions about Yardsale).
+photo without saying otherwise; "buy" if they're looking for something to buy, or want the best \
+deal, the best price, or a bargain on something; "other" for anything else (greetings, questions \
+about Yardsale).
 - asking_usd: the price they want to ask, in US dollars, if they gave one ("list it for $120"). \
 Otherwise null.
 - floor_usd: the lowest price they'd accept, if they gave one ("at least 40", "won't go below \
@@ -59,17 +64,16 @@ $90", "minimum 25"). Otherwise null. One price with no other wording ("sell this
 asking_usd, not floor_usd.
 - note: facts about the item a photo might not show (size, age, flaws, what's included, \
 model number), in a few words. Empty if none. Leave out prices and requests.
-- query: for "buy", the item they want in a few words, like "road bike" or "espresso machine". \
-Keep words like "cheap". Empty otherwise.
+- query: for "buy", the item they want in a few words, like "road bike", "Jordan 4", or \
+"espresso machine". Keep words like "cheap" and sizes. Leave out "best deal", "best price", \
+"good deal", and budgets. Empty otherwise.
 - budget_usd: for "buy", the most they want to pay, if they said ("under $300", "my max is \
-250"). Otherwise null.
-- haggle: true if a buyer wants Yardsale to negotiate, haggle, or get them the best deal or price. \
-Otherwise false."""
+250"). Otherwise null."""
 
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["intent", "asking_usd", "floor_usd", "note", "query", "budget_usd", "haggle"],
+    "required": ["intent", "asking_usd", "floor_usd", "note", "query", "budget_usd"],
     "properties": {
         "intent": {"type": "string", "enum": ["sell", "buy", "other"]},
         "asking_usd": {"type": ["number", "null"]},
@@ -77,7 +81,6 @@ SCHEMA = {
         "note": {"type": "string"},
         "query": {"type": "string"},
         "budget_usd": {"type": ["number", "null"]},
-        "haggle": {"type": "boolean"},
     },
 }
 
@@ -88,7 +91,17 @@ class AsiOneError(RuntimeError):
 
 _BUY = re.compile(
     r"\b(?:find|looking\s+for|look\s+for|search|buy|shopping\s+for|show\s+me|got\s+any|"
-    r"do\s+you\s+have|anything|what'?s\s+for\s+sale|for\s+sale)\b",
+    r"do\s+you\s+have|anything|what'?s\s+for\s+sale|for\s+sale|get\s+me|wants|needs|"
+    r"would\s+like\s+(?:a|an|some|to\s+(?:buy|find|get))|deals?\s+on|best\s+(?:deal|price)|good\s+deal|bargain|cheap(?:est)?)\b",
+    re.IGNORECASE,
+)
+# Shopping words that aren't the item: "the best deal on", "get me a good deal on", "the buyer".
+_DEAL_WORDS = re.compile(
+    r"\b(?:(?:the|a)\s+)?(?:best|good|great|cheapest|lowest)\s+(?:deal|price|offer)s?"
+    r"(?:\s+(?:on|for))?|\bdeals?\s+(?:on|for)\b|\bbargains?(?:\s+(?:on|for))?\b|"
+    r"\bdeal\s+for\s+me\b|\bget\s+me\b|\b(?:the\s+)?(?:buyer|user|shopper|customer)\b|"
+    r"\bwould\s+like\b|\bwants?\b|\bneeds?\b|\bthe\b|"
+    r"\b(?:haggle|haggling|negotiate|negotiating)(?:\s+for(?:\s+me)?)?\b",
     re.IGNORECASE,
 )
 _SELL = re.compile(
@@ -102,7 +115,7 @@ _FILLER = re.compile(
 _BUY_WORDS = re.compile(
     r"\b(?:can\s+you|could\s+you|please|find|looking\s+for|look\s+for|search(?:\s+for)?|buy|"
     r"shopping\s+for|show\s+me|got\s+any|do\s+you\s+have|i\s+want|i\s+need|want|need|me|"
-    r"a|an|some|any|for\s+sale)\b",
+    r"a|an|some|any|for\s+sale|sure|ok(?:ay)?|yes|yeah|great|now|also|instead)\b",
     re.IGNORECASE,
 )
 
@@ -135,10 +148,13 @@ def read_locally(text: str, has_photo: bool) -> SellerMessage:
             floor_usd=_dollars(floor),
             note=note[:200],
         )
-    wants_haggle = bool(HAGGLE.search(text.lower()))
-    if _BUY.search(text) or wants_haggle:
+    if _BUY.search(text):
         limit, _ = budget(text)
-        query = _BUY_WORDS.sub(" ", BUDGET.sub(" ", HAGGLE.sub(" ", text.lower())))
+        # The planner adds sentences ("The buyer wants Jordans. Please proceed."): the item is
+        # in the first one that asks for something.
+        sentences = re.split(r"(?<=[.!?;])\s+", text)
+        wanted = next((s for s in sentences if _BUY.search(s)), text)
+        query = _BUY_WORDS.sub(" ", _DEAL_WORDS.sub(" ", BUDGET.sub(" ", wanted.lower())))
         return SellerMessage(
             intent="buy",
             asking_usd=None,
@@ -146,7 +162,6 @@ def read_locally(text: str, has_photo: bool) -> SellerMessage:
             note="",
             query=" ".join(re.sub(r"[^\w\s'-]", " ", query).split())[:100],
             budget_usd=_dollars(limit),
-            haggle=wants_haggle,
         )
     return SellerMessage(intent="other", asking_usd=None, floor_usd=None, note="")
 

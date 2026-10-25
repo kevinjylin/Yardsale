@@ -13,7 +13,10 @@ means; the seller names items by number instead: "lowest 2 $40", "ask 3 $60", "a
 "approve all", "cancel 2". With several proposals waiting, a plain "approve" asks which.
 
 Buying: the buyer says what they want ("find me a cheap road bike"). They can say their max and
-"haggle", and Yardsale's buyer agent (shopper.py) haggles with every matching item agent at once;
+The chat searches Yardsale's listings and other sites (elsewhere.py) and shows prices and links.
+Shopping words ("best deal", "best price", "get me a good deal") are a search, never a haggle.
+Haggling is opt-in: after a search, "haggle with the seller on 1, max $300" has Yardsale's buyer
+agent (shopper.py) haggle with that item's agent (or every result's, "haggle with the sellers");
 the reply shows every round and the best price. Or they pick a result by number and make offers
 themselves ("offer $250"). Item agents agree to an offer or counter it. "accept" (or "accept 2")
 buys at that price. Buyers never see a floor price, and sellers never see a buyer's max.
@@ -86,6 +89,7 @@ from yardsale import (
     craigslist_buyer,
     craigslist_mail,
     deals,
+    elsewhere,
     maps,
     meetup,
     onboarding,
@@ -98,7 +102,16 @@ from yardsale.checkout import Checkout
 from yardsale.common import PipelineError, UnpricedError
 from yardsale.deals import ScoredDeal
 from yardsale.ebay_seller import EbayError, EbaySeller
-from yardsale.elsewhere import DealFinder, Found, search_words, site_name
+from yardsale.elsewhere import (
+    COMPS_LATE,
+    DealFinder,
+    Found,
+    Search,
+    names_of,
+    search_place,
+    search_words,
+    site_name,
+)
 from yardsale.models import (
     AcceptCounter,
     Appraisal,
@@ -208,7 +221,12 @@ _MENTIONS_PHOTO = re.compile(
 HELP = (
     "Hi, I'm Yardsale. To sell, attach a photo (up to "
     f'{MAX_PHOTOS} at once) and say your minimum, like "at least $40". To buy, tell me what you '
-    'want and your max, like "find me a road bike, max $250". Or pick from the menu.'
+    'want and your max, like "find me Jordan 4s under $200", and I\'ll search Yardsale and '
+    "other marketplaces. Or pick from the menu."
+)
+HAGGLE_FIRST = (
+    'Haggling is only for Yardsale listings, so search first, like "find me a road bike under '
+    '$300". Then say "haggle with the seller on 1" and my agent will negotiate for you.'
 )
 NEEDS_PHOTO = "Attach a photo of the item and I'll price it from recent eBay sales."
 PHOTO_MISSING = (
@@ -274,9 +292,10 @@ class Reply(NamedTuple):
     card: MetadataContent | None = None  # an Interactive Card shown with the text
     # Messages sent right after this one, such as the eBay sales behind a proposal's price.
     more: tuple[tuple[str, MetadataContent | None], ...] = ()
-    # (search, budget): search other sites, outside the conversation's lock, and add the best
-    # deals to this text before it's sent.
-    elsewhere: tuple[str, int | None] | None = None
+    # (search, budget, ZIP code or ""): search other sites, outside the conversation's lock,
+    # and add the best deals to this text before it's sent. The ZIP is the place the buyer
+    # named ("in Berkeley"); "" searches the server's default place.
+    elsewhere: tuple[str, int | None, str] | None = None
 
 
 def as_reply(answer: str | Reply) -> Reply:
@@ -653,8 +672,8 @@ def results_text(found: list[Listing], query: str, owner: str) -> str:
         yours = " (yours)" if listing.owner == owner else ""
         lines.append(f"{n}. {listing.title}: {usd(listing.asking_cents)}{condition}{yours}")
     lines.append(
-        'Tap one for details, or say "haggle" with your max (like "haggle $250") and my buyer '
-        'agent negotiates with all of them at once. Or offer yourself: "offer $X on 1".'
+        'Tap one for details, or buy one at its price with "offer $X on 1". (To have my agent '
+        'haggle with a Yardsale seller instead, say "haggle with the seller on 1, max $X".)'
     )
     return "\n".join(lines)
 
@@ -668,8 +687,8 @@ def details_text(listing: Listing, mine: bool) -> str:
     lines.append(
         "This is your own listing."
         if mine
-        else 'Make an offer like "offer $X", say "haggle" with your max, or buy it now with '
-        f'"offer {usd(listing.asking_cents)}".'
+        else f'Buy it at its price with "offer {usd(listing.asking_cents)}", or make a lower '
+        'offer. (To have my agent haggle with the seller, say "haggle with the seller, max $X".)'
     )
     return "\n".join(lines)
 
@@ -775,53 +794,99 @@ def _under(budget_cents: int | None) -> str:
     return f" under {usd(budget_cents)}" if budget_cents else ""
 
 
-def listing_line(n: int, listing: ExternalListing, why: str = "") -> str:
-    """One listing on another site: its link, price, site, `why` it's a good deal when scored
-    (deals.py; a watch's finds aren't), and where it is."""
-    price = usd(listing.price_cents) if listing.price_cents is not None else "no price given"
-    if listing.shipping_cents:
-        price += f" + {usd(listing.shipping_cents)} shipping"
-    notes = [listing.location] if listing.location else []
-    if not why and listing.condition:
-        notes.insert(0, listing.condition)
-    if listing.accepts_offers:
-        notes.append("takes offers")
-    extra = f" ({'; '.join(notes)})" if notes else ""
+def listing_line(
+    n: int, listing: ExternalListing, why: str = "", budget_cents: int | None = None
+) -> str:
+    """One listing on another site: its link, then price, site, shipping, the budget
+    difference, condition, location, age, `why` it's a good deal when scored (deals.py; a
+    watch's finds aren't), and what the site didn't say (deals.describe)."""
     link = _link(listing.title, listing.url)
-    about = f", {why}" if why else ""
-    return f"{n}. {link}: {price} on {site_name(listing.source)}{about}{extra}"
+    about = deals.describe(listing, site_name(listing.source), why, budget_cents)
+    return f"{n}. {link}: {about}"
 
 
-def deal_line(n: int, deal: ScoredDeal) -> str:
-    return listing_line(n, deal.listing, deal.why)
+def deal_line(n: int, deal: ScoredDeal, budget_cents: int | None = None) -> str:
+    return listing_line(n, deal.listing, deal.why, budget_cents)
+
+
+def deals_headline(found: Found) -> str:
+    """The sentence the deals open with (deals.headline). Read defensively: `Found` grows."""
+    return deals.headline(
+        tuple(getattr(found, "deals", ()) or ()),
+        getattr(found, "budget_cents", None),
+        getattr(found, "market", None),
+        site_name,
+    )
 
 
 def market_note(found: Found) -> str:
     """What the deals were judged against: "typical sold price on eBay: $185, from 7 sales"."""
+    if found.comps_late:
+        return COMPS_LATE
     if found.market is None:
         return "no recent eBay sales to compare prices with"
     sales = f"{found.market.sales} sale{'s' if found.market.sales != 1 else ''}"
     return f"typical sold price on eBay: {usd(found.market.typical_cents)}, from {sales}"
 
 
-def elsewhere_text(found: Found, sites: str) -> str:
+def elsewhere_text(found: Found, sites: str, headline: bool = True) -> str:
+    """The deals on other sites, opening with the headline (deals.headline) unless the caller
+    puts it first itself, or why there are none. "I didn't find" is only ever said of the sites
+    that answered; a site that failed is named with why (timed out, blocked, ...), a site still
+    searching is said to be, and a search where every site failed says it couldn't search."""
     about = f'"{found.query}"{_under(found.budget_cents)}'
-    if not found.deals:
-        lines = [f"I didn't find {about} on {sites} either."]
+    answered = [site_name(name) for name in found.searched]
+    failed = elsewhere.failed_sentence(found)
+    around = f", around {found.place}" if found.place else ""
+    if not found.deals and not answered and found.pending:
+        lines = [f"I'm still searching {names_of(found.pending)} for {about}."]
+        if failed:
+            lines.append(f"({failed}.)")
+        lines.append(SEARCHING_ELSEWHERE)
+    elif not found.deals and not answered:
+        lines = [
+            f"I couldn't search other sites for {about}: {failed or 'none of them answered'}. "
+            "That doesn't mean it isn't out there; ask me again in a minute."
+        ]
+    elif not found.deals:
+        lines = [f"I didn't find {about} on {elsewhere.and_list(answered)}{around} either."]
+        if elsewhere.unfit_sentence(found):
+            lines.append(elsewhere.unfit_sentence(found))
+        if failed:
+            lines.append(f"({failed}, so I couldn't check there.)")
     else:
-        lines = [f"Best deals on other sites for {about} ({market_note(found)}):"]
-        lines += [deal_line(n, deal) for n, deal in enumerate(found.deals, 1)]
+        budget = found.budget_cents
+        lines = [deals_headline(found), ""] if headline else []
+        lines.append(f"Best deals on other sites for {about} ({market_note(found)}):")
+        if found.loose:
+            lines.append("Nothing had every word of your search, so these are the closest.")
+        fitting = sum(1 for d in found.deals if not {"over_budget", "no_price"} & set(d.flags))
+        said: set[str] = set()
+        for n, deal in enumerate(found.deals, 1):
+            if "over_budget" in deal.flags and "over_budget" not in said and budget:
+                only = f"only {fitting}" if fitting else "none"
+                lines.append(f"Over your {usd(budget)} budget, since {only} fit:")
+                said.add("over_budget")
+            elif "no_price" in deal.flags and "no_price" not in said:
+                lines.append("No price listed, so ask the seller:")
+                said.add("no_price")
+            lines.append(deal_line(n, deal, budget))
         lines.append(NOT_YARDSALE)
         if any(listing.source == "craigslist" for listing in found.listings):
             lines.append(CRAIGSLIST_OFFERS)
-    if found.failed:
-        names = " and ".join(site_name(name) for name in found.failed)
-        lines.append(f"({names} couldn't be searched just now.)")
+        if found.place:
+            lines.append(f"(Local sites searched around {found.place}.)")
+        if failed:
+            lines.append(f"({failed}, so these are from {elsewhere.and_list(answered)} only.)")
+    if found.pending and (found.deals or answered):
+        lines.append(f"(Still searching {names_of(found.pending)}; I'll send anything better.)")
     lines.append(watch_offer(sites))
     return "\n".join(lines)
 
 
 FLAG_LABELS = {
+    "over_budget": "Over budget",
+    "no_price": "No price",
     "far_under": "Check it's the whole item",
     "parts": "Parts or repair",
     "accessory": "Accessory",
@@ -829,12 +894,22 @@ FLAG_LABELS = {
 }
 
 
-def deal_price(deal: ScoredDeal) -> str:
-    price = usd(deal.total_cents)
-    if deal.listing.shipping_cents:
-        price += " with shipping"
+def deal_price(deal: ScoredDeal, budget_cents: int | None = None) -> str:
+    """A deal's card subtitle: the price, the site, and the budget difference (or how it
+    compares with the typical sold price)."""
+    listing = deal.listing
+    site = site_name(listing.source)
+    if listing.price_cents is None:
+        price = f"Price not listed on {site}"
+    else:
+        price = usd(deal.total_cents)
+        if listing.shipping_cents:
+            price += " with shipping"
+        price += f" on {site}"
     pct = deal.versus_market_pct
-    if pct is not None and pct >= deals.ABOUT_MARKET:
+    if against := deals.budget_phrase(listing, budget_cents, qualify=False):
+        price += f", {against}"
+    elif pct is not None and pct >= deals.ABOUT_MARKET:
         price += f", {pct}% under typical"
     elif pct is not None and pct <= -deals.ABOUT_MARKET:
         price += f", {-pct}% above typical"
@@ -843,16 +918,17 @@ def deal_price(deal: ScoredDeal) -> str:
 
 def saved_deals(found: Found) -> list[dict[str, Any]]:
     """The deals as the conversation keeps them, for their cards and "Get the link"."""
+    budget = getattr(found, "budget_cents", None)
     kept = []
     for deal in found.deals:
         listing = deal.listing
-        flag = next((FLAG_LABELS[f] for f in deal.flags if f in FLAG_LABELS), "")
+        flag = next((label for f, label in FLAG_LABELS.items() if f in deal.flags), "")
         kept.append(
             {
                 "id": f"{listing.source}-{listing.external_id}"[:80],
                 "title": listing.title[:120],
                 "url": listing.url,
-                "price": deal_price(deal),
+                "price": deal_price(deal, budget),
                 "site": site_name(listing.source),
                 "source": listing.source,
                 "why": deal.why,
@@ -863,6 +939,22 @@ def saved_deals(found: Found) -> list[dict[str, Any]]:
             }
         )
     return kept
+
+
+def later_text(early: Found, final: Found, sites: str) -> str | None:
+    """The follow-up once slower sites (or the eBay sold comps) are in, after `early` went out:
+    the whole list again when it changed, a line when it didn't, nothing when only the comps
+    were late and changed nothing."""
+    late = names_of(early.pending)
+    if final.deals != early.deals:
+        lead = f"{late} answered too" if early.pending else "Recent eBay sales came in"
+        return f"{lead}, so here's the updated list.\n\n{elsewhere_text(final, sites)}"
+    if not early.pending:
+        return None
+    answered = [name for name in early.pending if name in final.searched]
+    if answered:
+        return f"{names_of(answered)} had nothing better than the deals above."
+    return f"({late} couldn't be searched just now.)"
 
 
 def deals_subtitle(found: Found) -> str:
@@ -901,7 +993,6 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     follow_ups: set[asyncio.Task[None]] = set()  # keeps background replies from being collected
     fields = {f.name for f in dataclasses.fields(Conversation)} - {"key"}
     finder = backend.finder
-    searching: dict[str, str] = {}  # conversation -> what to say while other sites are searched
 
     def load(key: str) -> Conversation:
         saved = store.load_conversation(key)
@@ -1728,14 +1819,23 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return listings
         return students.listings_for(store, listings, conv.owner)
 
-    def find(conv: Conversation, query: str, budget_cents: int | None) -> str | Reply:
+    def find(
+        conv: Conversation, query: str, budget_cents: int | None, near: str = ""
+    ) -> str | Reply:
+        """Yardsale's listings for a search, then other sites'. `near` is the ZIP code of a
+        place the buyer's message named, when the query (ASI:One's reading) lost it."""
+        near = search_place(query) or near
         found = search(for_sale(conv), query, budget_cents)
+        if conv.awaiting in ("max", "counter"):
+            # A new search ends the haggle: a bare "$300" is now this search's budget, and
+            # prose like "proceed with the purchase" can't take an old price.
+            conv.awaiting = None
         conv.budget = budget_cents or conv.budget
         conv.results = [listing.item_id for listing in found]
         conv.selected = found[0].item_id if len(found) == 1 else None
         conv.last_query = search_words(query) or conv.last_query
         if not found and finder.enabled and search_words(query):
-            return look_elsewhere(conv, query, budget_cents, "Nothing on Yardsale matches")
+            return look_elsewhere(conv, query, budget_cents, "Nothing on Yardsale matches", near)
         if not found:
             under = f" under {usd(budget_cents)}" if budget_cents else ""
             about = f' for "{query}"' if query else ""
@@ -1752,7 +1852,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             words = search_words(query)
             conv.last_query = words
             text = f"{reply.text}\n\nI'm also checking {finder.site_names()} for more."
-            return reply._replace(text=text, elsewhere=(words, budget_cents))
+            return reply._replace(text=text, elsewhere=(words, budget_cents, near))
         return reply
 
     def pick(conv: Conversation, number: int) -> str | Reply:
@@ -1924,7 +2024,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 return (
                     f"Pick a number from 1 to {len(conv.results)}."
                     if conv.results
-                    else ('There\'s nothing to accept yet. Make an offer, or say "haggle".')
+                    else (
+                        "There's nothing to accept yet. Tell me what you're looking for, like "
+                        '"find me a road bike under $300".'
+                    )
                 )
             item_id = conv.results[pick - 1]
             if item_id not in conv.quotes:
@@ -1935,16 +2038,18 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     # --- Haggling for the buyer -------------------------------------------------------------
 
-    def haggle_targets(conv: Conversation, query: str, max_cents: int) -> list[Listing]:
+    # Opt-in only: handle_text calls these for an explicit "haggle with the seller on 1" after a
+    # search, never for shopping words like "best deal".
+
+    def haggle_targets(conv: Conversation, max_cents: int, every: bool) -> list[Listing]:
+        """The item the buyer named or picked, or every result of the last search."""
         reach = max_cents * LOWEST_SHARE_REACH[0] // LOWEST_SHARE_REACH[1]
-        if query:
-            found = search(for_sale(conv), query, reach)
-        else:
-            found = [
-                listing
-                for item_id in conv.results
-                if (listing := store.get(item_id)) is not None and listing.status == ACTIVE
-            ]
+        item_ids = [conv.selected] if conv.selected and not every else conv.results
+        found = [
+            listing
+            for item_id in item_ids
+            if (listing := store.get(item_id)) is not None and listing.status == ACTIVE
+        ]
         return [
             listing
             for listing in found
@@ -1952,39 +2057,30 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         ]
 
     async def haggle(
-        ctx: Context, conv: Conversation, max_cents: int | None, query: str
+        ctx: Context,
+        conv: Conversation,
+        max_cents: int | None,
+        pick: int | None = None,
+        every: bool = False,
     ) -> str | Reply:
+        if not conv.results:
+            return Reply(HAGGLE_FIRST, cards.buy())
+        if pick is not None:
+            if not 1 <= pick <= len(conv.results):
+                return f"Pick a number from 1 to {len(conv.results)}."
+            conv.selected = conv.results[pick - 1]
         if max_cents is None:
             max_cents = conv.budget
-        if query:
-            found = [listing.item_id for listing in search(for_sale(conv), query)]
-            if found or not conv.results:
-                conv.results = found
-            else:
-                query = ""  # the words matched nothing new: haggle over the last results
-
         if max_cents is None:
-            if not conv.results:
-                return Reply(
-                    'What are you looking for? Like "find me a road bike, haggle for me, max '
-                    '$300".',
-                    cards.buy(query),
-                )
             conv.awaiting = "max"
             return Reply(ASK_MAX, cards.max_form(len(conv.results)))
         conv.budget = max_cents
-        conv.last_query = search_words(query) or conv.last_query
-        targets = haggle_targets(conv, query, max_cents)
-        if not targets and finder.enabled and search_words(query):
-            return look_elsewhere(
-                conv, query, max_cents, "Nothing on Yardsale is close enough to haggle over"
-            )
+        targets = haggle_targets(conv, max_cents, every)
         if not targets:
-            about = f' for "{query}"' if query else ""
             return Reply(
-                f"Nothing for sale{about} is close enough to {usd(max_cents)} to haggle over. "
-                "Try a higher max, or other words.",
-                cards.buy(query, max_cents),
+                f"Nothing here is close enough to {usd(max_cents)} to haggle over. Try a higher "
+                "max, or search for something else.",
+                cards.max_form(len(conv.results), budget_cents=max_cents),
             )
         return await haggle_with(ctx, conv, max_cents, targets)
 
@@ -2010,13 +2106,17 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
     # --- Other sites ------------------------------------------------------------------------
 
-    def look_elsewhere(conv: Conversation, query: str, budget: int | None, lead: str) -> Reply:
+    def look_elsewhere(
+        conv: Conversation, query: str, budget: int | None, lead: str, near: str = ""
+    ) -> Reply:
         """Search other sites after this reply's text, outside the lock (handle_safely)."""
         words = search_words(query)
         conv.last_query = words
         conv.budget = budget or conv.budget
-        text = f'{lead} "{words}"{_under(budget)} right now, so I checked {finder.site_names()}.'
-        return Reply(text, elsewhere=(words, budget))
+        text = (
+            f'{lead} "{words}"{_under(budget)} right now, so I\'m checking {finder.site_names()}.'
+        )
+        return Reply(text, elsewhere=(words, budget, near))
 
     def asked_for(conv: Conversation, command: commands.Command) -> tuple[str, int | None]:
         """The search and budget a "search other sites" or "watch" message is about: its own
@@ -2036,36 +2136,86 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         conv.budget = budget or conv.budget
         return Reply(
             f'Checking {finder.site_names()} for "{query}"{_under(budget)}.',
-            elsewhere=(query, budget),
+            elsewhere=(query, budget, search_place(command.text)),
         )
 
-    async def with_deals_elsewhere(key: str, reply: Reply) -> Reply:
-        """The reply with the best deals on other sites added. While the sites are searched,
-        on_chat can say so if the answer is slow."""
-        assert reply.elsewhere is not None
-        query, budget = reply.elsewhere
-        searching[key] = f"{reply.text}\n\n{SEARCHING_ELSEWHERE}"
-        try:
-            found = await finder.find(query, budget)
-        except SourceError as ex:
-            return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
-        finally:
-            searching.pop(key, None)
+    async def deals_card(key: str, found: Found) -> MetadataContent | None:
+        """The deals' carousel. The conversation keeps them, so "Get the link" works later."""
         kept = saved_deals(found)
+        if not kept:
+            return None
         async with locks[key]:
             conv = load(key)
             conv.deals = kept
             save(conv)
-        text = f"{reply.text}\n\n{elsewhere_text(found, finder.site_names())}"
-        card = cards.deals(kept, deals_subtitle(found))
+        return cards.deals(kept, deals_subtitle(found))
+
+    async def with_deals(key: str, reply: Reply, found: Found) -> Reply:
+        """The reply with the best deals on other sites added to it. With Yardsale's own results
+        (and their card), the deals follow as a second message that opens with the headline;
+        otherwise the headline ("Found it: ...") leads the whole reply."""
+        sites = finder.site_names()
+        card = await deals_card(key, found)
         if reply.card is not None and card is not None:
-            # Yardsale's own results keep their card; the deals follow as a second message.
             return Reply(
-                reply.text,
-                reply.card,
-                (*reply.more, (elsewhere_text(found, finder.site_names()), card)),
+                reply.text, reply.card, (*reply.more, (elsewhere_text(found, sites), card))
             )
+        headline = deals_headline(found) if found.deals else ""
+        rest = elsewhere_text(found, sites, headline=not headline)
+        text = f"{headline}\n\n{reply.text}\n\n{rest}" if headline else f"{reply.text}\n\n{rest}"
         return Reply(text, card or reply.card, reply.more)
+
+    async def deals_reply(key: str, found: Found) -> Reply:
+        text = elsewhere_text(found, finder.site_names())
+        card = await deals_card(key, found)
+        return Reply(text, card or cards.notice(text, [cards.BUY, cards.WATCHES]))
+
+    async def send_later(
+        ctx: Context, key: str, running: Search, early: Found | None, deliver: Deliver
+    ) -> None:
+        """The deals once they're in (by the finder's deadline), then slower sites' deals."""
+        try:
+            if early is None:
+                early = await running.early()
+                await deliver(await deals_reply(key, early))
+            if running.done():
+                return
+            final = await running.complete()
+            later = later_text(early, final, finder.site_names())
+            if later is not None:
+                card = await deals_card(key, final) if final.deals != early.deals else None
+                await deliver(Reply(later, card))
+        except Exception:
+            ctx.logger.exception(f"Sending deals from other sites in {key[:8]} failed")
+
+    def in_background(job: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(job)
+        follow_ups.add(task)
+        task.add_done_callback(follow_ups.discard)
+
+    async def with_deals_elsewhere(
+        ctx: Context, key: str, reply: Reply, deliver: Deliver | None
+    ) -> Reply:
+        """The reply at once, and the best deals on other sites as the next message once the
+        sites answer: by the finder's deadline (elsewhere.SOURCE_WITHIN), with slower sites'
+        deals after that. A search that's already answered (asked before) goes in the reply."""
+        assert reply.elsewhere is not None
+        query, budget, near = reply.elsewhere
+        reply = reply._replace(elsewhere=None)
+        try:
+            running = finder.search(query, budget, near)
+        except SourceError as ex:
+            return reply._replace(text=f"{reply.text}\n\nI couldn't search other sites: {ex}.")
+        if running.ready() or deliver is None:
+            found = await running.early()
+            if deliver is not None and not running.done():
+                in_background(send_later(ctx, key, running, found, deliver))
+            return await with_deals(key, reply, found)
+        in_background(send_later(ctx, key, running, None, deliver))
+        return reply._replace(
+            text=f"{reply.text}\n\n{SEARCHING_ELSEWHERE}",
+            card=reply.card or cards.searching(finder.site_names()),
+        )
 
     def watch(conv: Conversation, command: commands.Command | None) -> str | Reply:
         """A standing search over other sites (watches.py), from the message or the last search."""
@@ -2110,7 +2260,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if fresh:
                 found += len(fresh)
                 news.append(f'New for "{standing.query}":')
-                news += [listing_line(i, listing) for i, listing in enumerate(fresh, 1)]
+                news += [
+                    listing_line(i, listing, budget_cents=standing.budget_cents)
+                    for i, listing in enumerate(fresh, 1)
+                ]
             store.mark_told(standing.watch_id)
         if news:
             lines += ["", *news, NOT_YARDSALE]
@@ -2250,13 +2403,6 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         budget = _form_price(choice.get("max"))
         if not query:
             return Reply("What are you looking for?", cards.buy(budget_cents=budget))
-        if str(choice.get("mode") or "") == "haggle":
-            if budget is None:
-                conv.last_query = search_words(query) or conv.last_query
-                found = search(for_sale(conv), query)
-                conv.results = [listing.item_id for listing in found] or conv.results
-                return Reply(ASK_MAX, cards.max_form(max(1, len(found))))
-            return await haggle(ctx, conv, budget, query)
         return find(conv, query, budget)
 
     async def handle_choice(
@@ -2451,7 +2597,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if limit is None:
                 return Reply(ASK_MAX, cards.max_form(max(1, len(conv.results)), item_id))
             if not item_id:
-                return await haggle(ctx, conv, limit, "")
+                return await haggle(ctx, conv, limit, every=True)
             listing_or_why = shown(conv, item_id)
             if isinstance(listing_or_why, str):
                 return listing_or_why
@@ -2522,6 +2668,18 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         proposal = pending[0] if pending else None
         waiting = numbered_waiting(conv)
         selling = proposal is not None or conv.unpriced is not None or bool(waiting)
+        if (
+            command is not None
+            and kind in ("approve", "accept", "cancel")
+            and command.pick is None
+            and not command.picks
+            and not command.every
+            and not selling
+            and commands.shopping(text)
+        ):
+            # "sure, find me Jordans under $200" or "ok, the best price on a bike" is a search,
+            # not a yes to a price on offer.
+            command, kind = None, None
 
         if command is not None and kind in (
             "ebay_connect",
@@ -2552,11 +2710,22 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if command is not None and kind == "offer" and command.amount_cents is not None:
             if selling and not conv.results:
                 return f'Did you mean "ask {usd(command.amount_cents)}" for your listing?'
+            if not conv.results:
+                # "I'd pay $200 for Jordans" with nothing found yet: a search, with that budget.
+                wanted = await read(text, False)
+                if wanted.intent == "buy" and wanted.query:
+                    budget = to_cents(wanted.budget_usd) or command.amount_cents
+                    return find(conv, wanted.query, budget)
             return await make_offer(ctx, conv, command.amount_cents, command.pick)
-        if command is not None and kind == "haggle" and not (selling and not conv.results):
-            wanted = await read(command.text or text, False)
-            limit = command.amount_cents or to_cents(wanted.budget_usd)
-            return await haggle(ctx, conv, limit, wanted.query)
+        # Haggling only on an explicit request ("haggle with the seller on 1"), and only over
+        # Yardsale results this conversation already has.
+        if command is not None and kind == "haggle" and conv.results:
+            return await haggle(ctx, conv, command.amount_cents, command.pick, command.every)
+        if command is not None and kind == "haggle" and not selling:
+            wanted = await read(text, False)
+            if wanted.intent == "buy" and wanted.query:
+                return find(conv, wanted.query, to_cents(wanted.budget_usd))
+            return Reply(HAGGLE_FIRST, cards.buy())
         if command is not None and kind == "accept" and command.pick is not None:
             return await accept_typed(ctx, conv, command.pick)
         if kind == "accept" or (kind == "approve" and conv.awaiting == "counter"):
@@ -2564,7 +2733,10 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 return await accept_typed(ctx, conv, None)
             if proposal is not None:
                 return await approve(ctx, conv, proposal)
-            return "There's no counter-offer to accept. Make an offer first."
+            return (
+                "There's no counter-offer to accept. Tell me what you're looking for, like "
+                '"find me a road bike under $300".'
+            )
         if kind == "approve":
             if proposal is not None:
                 return await approve(ctx, conv, proposal)
@@ -2572,8 +2744,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 return craigslist_post(conv, None)  # "yes" to the Craigslist offer
             if conv.unpriced is not None:
                 return 'Tell me your price first, like "ask $40".'
-            if conv.counter is not None:
-                return await accept_typed(ctx, conv, None)
+            # A "yes" buys only right after a price was offered (awaiting "counter", above); a
+            # stale counter-offer from before a new search isn't taken by an "ok".
             return "There's nothing waiting for approval. Attach a photo of something to sell."
         not_now = _NOT_NOW.match(text.strip().lower()) is not None
         if (kind == "cancel" or not_now) and proposal is None and conv.awaiting == "craigslist":
@@ -2610,13 +2782,22 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return pick(conv, command.pick)
         if kind == "help" or _MENU.match(text.strip().lower()):
             return menu_reply(conv)
-        if command is not None and kind == "amount" and command.amount_cents is not None:
+        if (
+            command is not None
+            and kind in ("amount", "budget")
+            and command.amount_cents is not None
+        ):
             amount = usd(command.amount_cents)
-            if conv.awaiting == "max" and conv.results:
-                return await haggle(ctx, conv, command.amount_cents, "")
-            if selling:
+            if conv.awaiting == "max" and conv.results:  # the max an explicit haggle asked for
+                return await haggle(ctx, conv, command.amount_cents)
+            if selling and kind == "amount":
                 return f'Did you mean "ask {amount}" or "lowest {amount}"?'
-            if conv.results:
+            if conv.awaiting == "counter" and kind == "amount":
+                return f'Did you mean "offer {amount}"?'
+            if conv.last_query and not selling:
+                # "$300" or "max $300" after a search: that search again, under this budget.
+                return find(conv, conv.last_query, command.amount_cents)
+            if conv.results and kind == "amount":
                 return f'Did you mean "offer {amount}"?'
 
         # ASI:One's planner relays "accept" as prose. Take it only while a price is waiting, and
@@ -2631,10 +2812,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
 
         # Not a command, or not one that fits this conversation: ASI:One reads it.
         wanted = await read(text, False)
-        if wanted.intent == "buy" and wanted.haggle:
-            return await haggle(ctx, conv, to_cents(wanted.budget_usd), wanted.query)
-        if wanted.intent == "buy":
-            return find(conv, wanted.query, to_cents(wanted.budget_usd))
+        if wanted.intent == "buy":  # always a search; haggling is only ever an explicit command
+            return find(conv, wanted.query, to_cents(wanted.budget_usd), search_place(text))
         if wanted.intent == "sell":
             asking, floor = to_cents(wanted.asking_usd), to_cents(wanted.floor_usd)
             if selling and (asking or floor):
@@ -2732,7 +2911,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         try:
             reply = await handle(ctx, key, msg, deadline, deliver)
             if reply.elsewhere is not None:
-                reply = await with_deals_elsewhere(key, reply)
+                # Never waits on other sites: their deals follow as later messages.
+                reply = await with_deals_elsewhere(ctx, key, reply, deliver)
             return reply
         except Exception:
             ctx.logger.exception(f"Chat message in {key[:8]} failed")
@@ -2814,9 +2994,6 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             count = len(photos_in(msg))
             if count:
                 reply = Reply(STILL_WORKING, cards.pricing(min(count, MAX_PHOTOS)))
-            elif key in searching:
-                sites = finder.site_names() if finder.enabled else "other sites"
-                reply = Reply(searching[key], cards.searching(sites))
             else:
                 reply = Reply(WORKING, cards.working())
 

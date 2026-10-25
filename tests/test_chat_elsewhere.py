@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -12,7 +13,7 @@ from uagents_core.contrib.protocols.chat import ChatMessage, MetadataContent
 from uagents_core.contrib.protocols.chat.cards import Card, CarouselCardPayload, extract_card
 
 from tests import fakes, sim
-from yardsale import chat, commands
+from yardsale import bureau_server, chat, commands
 from yardsale.sources import ExternalListing, SourceError
 from yardsale.store import Store
 
@@ -88,9 +89,18 @@ async def test_nothing_on_yardsale_shows_the_best_deals_elsewhere(
 ) -> None:
     buyer = shop.user("buyer")
     reply = await buyer.exchange(sim.chat_message("find me a road bike under $300"))
+    # The answer goes out at once, and the deals follow as the next message.
+    (first_reply,) = buyer.interim
+    assert first_reply.startswith('Nothing on Yardsale matches "road bike" under $300')
+    assert "so I'm checking eBay, Craigslist, and OfferUp" in first_reply
     text = reply.text()
-    assert 'Nothing on Yardsale matches "road bike" under $300' in text
-    assert "Best deals on other sites" in text
+    # The deals message opens with the best deal ("Found it: ..."), the headline.
+    assert text.startswith(
+        "Found it: [Trek road bike 54cm](https://craigslist.example.test/Trek-road-bike-54cm) on "
+        "Craigslist for $180, $120 under your $300 budget (Oakland, CA, pickup).\n\n"
+        "Best deals on other sites"
+    )
+    assert text.count("Found it") == 1
     lines = text.splitlines()
     first = next(n for n, line in enumerate(lines) if line.startswith("1. "))
     # Best match, then cheapest total: $180 on Craigslist, then $210 + $30 shipping on eBay.
@@ -120,32 +130,94 @@ async def test_deals_are_scored_against_what_the_item_sells_for(
         reply = await buyer.exchange(sim.chat_message("find me a road bike under $300"))
     text = reply.text()
     assert "(typical sold price on eBay: $310, from 4 sales):" in text
+    assert (
+        "Found it: [Trek road bike 54cm](https://craigslist.example.test/Trek-road-bike-54cm) on "
+        "Craigslist for $180, $120 under your $300 budget (Oakland, CA, pickup)."
+    ) in text
     lines = text.splitlines()
     first = next(n for n, line in enumerate(lines) if line.startswith("1. "))
-    assert "$180 on Craigslist, 42% under the $310 typical sold price (Oakland, CA)" in lines[first]
-    assert "$210 + $30 shipping on eBay, 23% under the $310 typical sold price" in lines[first + 1]
+    assert lines[first].endswith(
+        ": $180 on Craigslist, pickup only, $120 under budget. Oakland, CA. 42% under the $310 "
+        "typical sold price. (no photo, condition not listed)"
+    )
+    assert (
+        "$210 + $30 shipping on eBay, $60 under budget with shipping. Oakland, CA. 23% under "
+        "the $310 typical sold price."
+    ) in lines[first + 1]
     # The $25 helmet is 92% under a $310 bike and an accessory: a part priced as a part, dropped.
-    assert "helmet" not in text and not lines[first + 2].startswith("3. ")
+    assert "helmet" not in text
+    # Only two fit the $300, so the closest over it fills in, marked.
+    assert lines[first + 2] == "Over your $300 budget, since only 2 fit:"
+    assert lines[first + 3].startswith("3. [Road bike](")
+    assert "$400 on Craigslist, pickup only, $100 over budget." in lines[first + 3]
     card = card_in(reply)
     assert card is not None and isinstance(card.payload, CarouselCardPayload)
-    *deals, watch, menu = card.payload.items
-    assert len(deals) == 2 and watch.primary_cta.selection == {"action": "watch"}
+    *items, watch, menu = card.payload.items
+    assert watch.primary_cta.selection == {"action": "watch"}
     assert menu.primary_cta.selection == {"action": "menu"}
-    assert card.payload.items[0].subtitle == "$180, 42% under typical"
-    assert card.payload.items[1].subtitle == "$240 with shipping, 23% under typical"
+    assert [item.subtitle for item in items] == [
+        "$180 on Craigslist, $120 under budget",
+        "$240 with shipping on eBay, $60 under budget",
+        "$400 on Craigslist, $100 over budget",
+    ]
+    assert [b.label for b in items[2].badges or []] == ["Craigslist", "Over budget"]
     assert ebay.calls == ["road bike"]
+
+
+async def test_without_a_budget_the_headline_compares_with_the_typical_sold_price(
+    store: Store, ebay: Site, craigslist: Site
+) -> None:
+    sources = {"ebay": ebay, "craigslist": craigslist}
+    async with sim.running_market(
+        store, research=fakes.research_with_comps, sources=sources
+    ) as market:
+        reply = await market.user("buyer").exchange(sim.chat_message("find me a road bike"))
+    text = reply.text()
+    assert (
+        "Found it: [Trek road bike 54cm](https://craigslist.example.test/Trek-road-bike-54cm) on "
+        "Craigslist for $180, $130 under the typical $310 sold price (Oakland, CA, pickup)."
+    ) in text
+    assert "budget" not in text  # no budget, so nothing is said to be under or over one
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, CarouselCardPayload)
+    assert card.payload.items[0].subtitle == "$180 on Craigslist, 42% under typical"
+
+
+async def test_when_nothing_fits_the_budget_the_closest_are_shown_marked(store: Store) -> None:
+    site = Site([deal("Trek road bike", 18000), deal("Giant road bike", 21000, "ebay")])
+    async with sim.running_market(store, sources={"craigslist": site}) as market:
+        reply = await market.user("buyer").exchange(
+            sim.chat_message("find me a road bike under $150")
+        )
+    text = reply.text()
+    assert (
+        "Nothing fits your $150 budget yet. Closest: [Trek road bike]"
+        "(https://craigslist.example.test/Trek-road-bike) on Craigslist for $180, $30 over it "
+        "(Oakland, CA, pickup)."
+    ) in text
+    assert "Found it" not in text
+    lines = text.splitlines()
+    header = lines.index("Over your $150 budget, since none fit:")
+    assert lines[header + 1].startswith("1. [Trek road bike](")
+    assert "$30 over budget" in lines[header + 1]
+    assert "$90 on eBay" not in text
+    assert "$210 on eBay, shipping unknown, $60 over budget before shipping" in lines[header + 2]
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, CarouselCardPayload)
+    deals = card.payload.items[:-2]  # then "Watch for more" and "Main menu"
+    assert all("Over budget" in [b.label for b in item.badges or []] for item in deals)
 
 
 async def test_yardsale_listings_come_first_then_other_sites(shop: sim.Market, ebay: Site) -> None:
     """A buyer sees Yardsale's own listings and, every time, the best deals elsewhere too."""
     await list_bike(shop, 360, 300)
     buyer = shop.user("buyer")
-    reply = await buyer.say("find me a hybrid bike")
+    deals = await buyer.exchange(sim.chat_message("find me a hybrid bike"))
+    (reply,) = buyer.interim  # Yardsale's own results go out at once
     assert reply.startswith("Here's what's for sale")
     assert "also checking" in reply
     assert ebay.calls  # other sites were searched as well
-    deals = await buyer.next_reply()  # the deals arrive as a second message
-    assert "Best deals on other sites" in deals.text()
+    assert "Best deals on other sites" in deals.text()  # as the next message, after its headline
     assert card_in(deals) is not None  # the deals carousel, after Yardsale's own results card
 
 
@@ -168,23 +240,48 @@ async def test_asking_again_uses_the_cached_search(shop: sim.Market, ebay: Site)
     assert ebay.calls == ["road bike"]  # one paid search for all three
 
 
-async def test_a_slow_search_says_so_first(
-    shop: sim.Market, ebay: Site, monkeypatch: pytest.MonkeyPatch
+async def test_the_first_reply_goes_out_at_once_and_the_deals_follow(
+    shop: sim.Market, ebay: Site, craigslist: Site
 ) -> None:
-    monkeypatch.setattr(chat, "REPLY_WITHIN", 0.2)
-    ebay.delay = 0.6
+    ebay.delay = craigslist.delay = 1.0
     buyer = shop.user("buyer")
-    reply = await buyer.say("find me a road bike under $300")
-    (first,) = buyer.interim
+    started = time.monotonic()
+    await buyer.send(sim.chat_message("find me a road bike under $300"))
+    first = (await buyer.next_reply()).text()
+    assert time.monotonic() - started < 0.5  # not waiting on any site
     assert first.startswith('Nothing on Yardsale matches "road bike"')
     assert first.endswith(chat.SEARCHING_ELSEWHERE)
-    assert "Best deals on other sites" in reply
+    deals = (await buyer.next_reply()).text()
+    assert deals.startswith("Found it:") and "Best deals on other sites" in deals
+    assert "Trek road bike 54cm" in deals
+    assert 1.0 <= time.monotonic() - started < 2.0
 
 
-async def test_nothing_to_haggle_over_looks_elsewhere(shop: sim.Market) -> None:
-    reply = await shop.user("buyer").say("find me a road bike, haggle for me, max $300")
-    assert "Nothing on Yardsale is close enough to haggle over" in reply
-    assert "Trek road bike 54cm" in reply
+async def test_slow_sites_are_marked_pending_and_sent_later(
+    store: Store, ebay: Site, craigslist: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    craigslist.delay = 1.5
+    async with sim.running_market(store, sources={"ebay": ebay, "craigslist": craigslist}) as m:
+        monkeypatch.setattr(bureau_server.runtime().finder, "within", 0.3)
+        buyer = m.user("buyer")
+        started = time.monotonic()
+        deals = (await buyer.exchange(sim.chat_message("find me a road bike under $300"))).text()
+        assert time.monotonic() - started < 1.0  # eBay's deals, by the deadline
+        assert "Giant road bike" in deals and "Trek" not in deals
+        assert "(Still searching Craigslist; I'll send anything better.)" in deals
+        later = (await buyer.next_reply()).text()
+        assert later.startswith("Craigslist answered too, so here's the updated list.")
+        assert "Trek road bike 54cm" in later and "Still searching" not in later
+    assert len(craigslist.calls) == 1
+
+
+async def test_haggle_words_in_a_search_only_search(shop: sim.Market) -> None:
+    """Asking to haggle before there's anything on Yardsale is a search, never a haggle."""
+    buyer = shop.user("buyer")
+    reply = await buyer.say("find me a road bike, haggle for me, max $300")
+    assert 'Nothing on Yardsale matches "road bike" under $300' in buyer.interim[0]
+    assert reply.startswith("Found it:")
+    assert "Trek road bike 54cm" in reply and "haggled" not in reply
 
 
 async def test_watch_list_news_and_stop(shop: sim.Market, store: Store) -> None:
@@ -234,7 +331,9 @@ async def test_the_log_has_no_search_words_or_max(
 ) -> None:
     with caplog.at_level(logging.DEBUG):
         await shop.user("buyer").say("find me a zebra bike under $277")
-    assert "zebra" not in caplog.text and "277" not in caplog.text
+    # The messages, not caplog.text, whose "chat.py:2779" line numbers can carry the digits.
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "zebra" not in logged and "277" not in logged
 
 
 @pytest.mark.parametrize(

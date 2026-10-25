@@ -112,7 +112,7 @@ text plus an Interactive Card, the way ResourcePilot does it:
 - **No dead ends.** Every card except the menu has a Main menu button, and most have the next
   step as buttons: Approve & list, Change prices, Write my Craigslist post, View, Make an offer,
   Haggle for me, Buy at $X, I've paid, Get the link, Watch for more, Stop.
-- **Forms instead of typing.** Finding a deal (what, max, find or haggle), changing prices,
+- **Forms instead of typing.** Finding a deal (what and your max), changing prices,
   making an offer, and setting a haggle max are form cards.
 - **Pictures.** Each screen has a drawing from [assets/cards](../assets/cards) (made by
   [scripts/make_card_art.py](../scripts/make_card_art.py); prompts in
@@ -218,8 +218,11 @@ Code: [chat.py](../yardsale/chat.py), [shopper.py](../yardsale/shopper.py),
 1. The buyer asks for something ("find me a cheap road bike under $300"). The Market searches
    active listings by word ([search.py](../yardsale/search.py)), with no paid service. A budget
    filters on the asking price only, so results never hint at a floor.
-2. With a max and "haggle" ("haggle for me, max $320"), the Market sends up to five matching
-   items asking at most about 1.4 times the max to the Shopper. The Shopper haggles with all of
+2. Only on an explicit request after a search ("haggle with the seller on 1, max $320", or
+   "haggle with the sellers"), the Market sends that item, or the results asking at most about
+   1.4 times the max, to the Shopper. Shopping words ("best deal", "best price", "get me a good
+   deal") and the planner's prose are searches (Yardsale and other sites), never a haggle, and
+   `asi1-mini` doesn't read a haggle request. The Shopper haggles with all of
    them at once, up to 6 rounds each, and the reply lists every round for every item with the
    best price, plus a card with a Buy button for each. Without a max, the Market asks for one.
 3. Or the buyer haggles by hand: picks a result by number and offers (`offer $250 on 2`).
@@ -297,6 +300,36 @@ each is a good deal. Yardsale's own listings still come first when they match.
   What each site gives: Craigslist a photo count (`imageCount`) and a date but no condition;
   eBay a condition and seller rating but no date; Facebook search results only a primary photo
   (condition and date need its paid per-listing details). Unknown signals score as unknown.
+- **Search fixes, October 24 evening** (after "no listings found" for a water bottle, and no
+  Jordans). Checked against 20 live runs, recorded and re-ranked offline:
+  - *Query.* Every number used to be dropped, so "air jordan 4 retro" searched "air jordan
+    retro" and showed Jordan 11s and 12s; model numbers now stay. A place in the message ("in
+    Berkeley", "near 94704", "sf") is read by [places.py](../yardsale/places.py) and taken out
+    of the words instead of being searched for. Sizes, measurements, years, and style codes
+    ("size 10", "32 oz", "FV5029-141") are left out of what the sites get (Craigslist found
+    nothing for the Identifier's full Jordan query) and count as soft words in the score.
+  - *Place.* Every place becomes a ZIP code (`FindDeals.zip`, `?zip=` on `searchOtherSites`).
+    Craigslist then searches within `YARDSALE_CRAIGSLIST_MILES` (10) of it with a search URL
+    (checked live: a 5-mile search around 94704 returned only East Bay posts), OfferUp around
+    it, and Facebook in its city. Without one, `YARDSALE_ZIP`, else each site's default
+    (sfbay, 94103). The reply says where: "Local sites searched around Berkeley (94704)".
+  - *Fit.* A title says a word through a synonym ("Hydro Flask" is a water bottle), a compound
+    ("minifridge"), or "4's" for "4". "box", "only", "light", and "seat" no longer make a whole
+    item an accessory ("new in box", "light blue"); bike parts count only in a bike search; an
+    accessory word after "with" or "+" is an extra. Two posts with the same title and price in
+    different towns are two items (OfferUp's "Air Jordan 4 Retro" posts at the same price in
+    Hayward and American Canyon had been cut to one, and two $60 "Mini Fridge" posts too). When nothing fits, the closest are shown and flagged `loose_match`.
+  - *Parsing.* Craigslist's `images` arrives as a string ("['https://...']"), which hid every
+    photo; it's read back as a list. Its `location` was another post's in about half the
+    results, so the town comes from the post's slug. A post the actor gave no link (6 of 10 in
+    one search) gets a Craigslist search link for its title instead of being dropped.
+  - *Failures.* `SourceError.kind` says why a site failed: timeout, blocked (only error items,
+    or an empty dataset whose run says its page loads failed), busy (Apify's 5-runs-at-once
+    limit on the free plan, hit live by a probe; retried twice first), credit, setup, or error.
+    `Found.sites` (and `DealsFound.sites`) has each site's outcome: ok with listing and fit
+    counts, empty, or failed with the reason. The chat says "I didn't find" only of sites that
+    answered, names each failed site with why, and when every site failed says it couldn't
+    search; the API's `searchOtherSites` returns `sites`, `place`, and `status: "failed"`.
 - `watch for it` turns the last search (or `watch for a road bike under $300`) into a standing
   search that polls every 6 hours for a week. The Market can't message a chat later, so any
   reply mentions new finds, and `my watches` shows them (then they count as told). `stop

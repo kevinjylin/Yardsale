@@ -115,10 +115,20 @@ def test_source_prices_are_quartiles_and_the_closest_have_links() -> None:
     assert scout.source_prices("ebay", "Trek FX 2 Disc hybrid bike", [BIKES[-1]]) is None
 
 
-def test_zip_codes_scope_offerup_only() -> None:
+def test_zip_codes_scope_the_local_sites_only() -> None:
+    """Craigslist searches within a radius of a ZIP code too (craigslist.search_url)."""
     assert scout.scope_for("offerup", "94110") == "94110"
     assert scout.scope_for("offerup", "9411") == ""
-    assert scout.scope_for("craigslist", "94110") == ""
+    assert scout.scope_for("craigslist", "94110") == "94110"
+    assert scout.scope_for("ebay", "94110") == ""
+
+
+def test_the_classifieds_get_the_core_words_and_ebay_the_exact_ones() -> None:
+    """Craigslist found nothing for the Identifier's full query on October 24."""
+    exact = "Air Jordan 4 Military Blue 2024 FV5029-141"
+    assert scout.query_for("ebay", exact) == exact
+    assert scout.query_for("craigslist", exact) == "air jordan 4 military blue"
+    assert scout.query_for("offerup", "Hydro Flask 32 oz") == "hydro flask"
 
 
 def test_seller_zip_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,7 +159,7 @@ async def test_the_scout_answers_with_every_site_at_once(store: Store) -> None:
     assert elapsed < 0.4  # both delays overlap
     assert report.request_id == "r1" and sorted(report.failed) == ["facebook", "offerup"]
     assert [(p.source, p.count) for p in report.sources] == [("craigslist", 5), ("ebay", 2)]
-    assert craigslist.calls == [("Trek FX 2 Disc hybrid bike", "", 20)]
+    assert craigslist.calls == [("trek fx 2 disc hybrid bike", "94110", 20)]
     assert ebay.calls == [("Trek FX 2 Disc hybrid bike", "", 20)]
 
 
@@ -186,7 +196,7 @@ async def test_a_priced_photo_carries_live_asking_prices(store: Store) -> None:
         "right now"
     )
     assert [p.source for p in view.sources] == ["craigslist"]
-    assert site.calls == [("Trek FX 2 Disc hybrid bike medium", "", 20)]
+    assert site.calls == [("trek fx 2 disc hybrid bike medium", "", 20)]
     # A restart reads the same view back.
     again = store.get(proposed.item_id)
     assert again is not None and again.market == view
@@ -235,6 +245,26 @@ async def test_a_failing_or_slow_scout_never_blocks_a_proposal(
         assert (view.sold_median_cents, view.asking_median_cents) == (34000, None)
         assert view.line == "similar ones sold for about $340 on eBay recently"
         assert (view.range_low_cents, view.range_high_cents) == (31000, 37000)
+
+
+async def test_a_slow_site_is_left_out_and_the_rest_still_count(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Market searches the Scout's sites in this process with a deadline, so a fast site's
+    prices make the proposal and a slow one doesn't hold it up."""
+    monkeypatch.setattr(bureau_server, "SCOUT_TIMEOUT", 0.3)
+    slow = Site(BIKES, delay=30.0)
+    async with sim.running_market(
+        store, scout_sources={"craigslist": Site(BIKES), "facebook": slow}
+    ) as m:
+        seller = Peer("seller", *SELLER_KINDS)
+        started = asyncio.get_running_loop().time()
+        await seller.send(m.address, photo())
+        proposed = await seller.receive(Proposed)
+        assert asyncio.get_running_loop().time() - started < 2.0
+    listing = store.get(proposed.item_id)
+    assert listing is not None and listing.market is not None
+    assert listing.market.asking_count == 5 and len(slow.calls) == 1  # Craigslist's alone
 
 
 async def test_without_sources_nothing_is_searched_and_the_sold_side_still_counts(

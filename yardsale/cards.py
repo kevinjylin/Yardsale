@@ -484,11 +484,8 @@ def sell(waiting: int = 0) -> MetadataContent:
     return screen("Sell something", "sell", lead, body, actions)
 
 
-MODES = (("find", "Find the best deals"), ("haggle", "Haggle for me on Yardsale"))
-
-
 def buy(query: str = "", budget_cents: int | None = None) -> MetadataContent:
-    """A form: what they want, their max, and whether to search or haggle."""
+    """A form: what they want and their max."""
     lead: list[Node] = [
         text("Tell me what you want and the most you'd pay.", "emphasis"),
         muted(
@@ -509,7 +506,6 @@ def buy(query: str = "", budget_cents: int | None = None) -> MetadataContent:
             "Your max ($). Sellers never see it.",
             placeholder=f"{budget_cents / 100:.0f}" if budget_cents else "60",
         ),
-        field("mode", "What should I do?", "select", options=MODES),
     ]
     return screen("Find a deal", "buy", lead, body, [("Find it", {"action": "find"})])
 

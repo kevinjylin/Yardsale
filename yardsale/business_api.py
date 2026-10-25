@@ -5,7 +5,8 @@ its own chat. Fetch reads /openapi.json and makes one tool per operation, so the
 below are written for the model that picks between them. The two products come first: deals for
 buyers (Yardsale's listings, then the best deals on other sites) and prices for sellers (what
 something is worth, from real eBay sales). Haggling and buying stay available but are marked
-"advanced", so @yardsale reaches for search and price checks first:
+"advanced" and say to use them only when the buyer explicitly asks to haggle with a Yardsale
+seller, so @yardsale searches (Yardsale and other sites) for "the best deal" or "the best price":
 
     GET  /listings                search what's for sale on Yardsale (asking prices only)
     GET  /other-sites             the best deals on eBay, Craigslist, OfferUp... under a max,
@@ -58,7 +59,15 @@ from yardsale.chat import LOWEST_SHARE_REACH, STATUS_TEXT, Backend, haggle_text
 from yardsale.common import PipelineError
 from yardsale.deals import ScoredDeal
 from yardsale.ebay_seller import EbayError
-from yardsale.elsewhere import Found, search_words, site_name
+from yardsale.elsewhere import (
+    Found,
+    and_list,
+    failed_sentence,
+    failure_words,
+    search_words,
+    site_name,
+    unfit_sentence,
+)
 from yardsale.hosting import profile_url
 from yardsale.models import (
     AcceptCounter,
@@ -201,48 +210,114 @@ def _external_json(listing: ExternalListing) -> dict[str, Any]:
     return data
 
 
-def _deal_json(deal: ScoredDeal) -> dict[str, Any]:
-    """A scored deal: the listing plus why it's a good one (deals.py)."""
-    data = _external_json(deal.listing)
+def _deal_json(deal: ScoredDeal, budget_cents: int | None = None) -> dict[str, Any]:
+    """A scored deal: the listing, how it compares with the budget, what the site didn't say,
+    and why it's a good one (deals.py)."""
+    listing = deal.listing
+    data = _external_json(listing)
+    under = deals.under_budget_cents(listing, budget_cents)
+    data["under_budget_usd"] = dollars(under) if under is not None else None
+    data["shipping_known"] = deals.shipping_known(listing)
+    data["shipping"] = deals.shipping_phrase(listing)
+    data["missing"] = deals.missing_fields(listing)
     data["versus_market_pct"] = deal.versus_market_pct
     data["score"] = deal.score
-    data["reason"] = deals.reason(deal, site_name(deal.listing.source))
+    data["reason"] = deals.reason(deal, site_name(listing.source), budget_cents)
     data["flags"] = list(deal.flags)
     return data
 
 
 def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
+    """The deals, and per site whether it answered: "nothing fits" is only said when some site
+    did, and a search where every site failed says so instead (status "failed")."""
     failed = [site_name(name) for name in found.failed]
+    # Read defensively: Found gains fields as the deal finder grows.
+    budget = getattr(found, "budget_cents", None)
+    pending = [site_name(name) for name in found.pending]
+    answered = [site_name(name) for name in found.searched]
     if found.deals:
         next_step = (
-            "Show the buyer these deals with their links and each one's reason. They aren't "
-            "Yardsale listings: Yardsale's agents can't haggle for them or take payment, so the "
-            "buyer opens the link to buy from the seller. Craigslist sellers usually take offers "
-            "by email."
+            "Start your answer with headline, word for word, keeping its link. Then show each "
+            "listing with its url as a link and its reason, which says the price, shipping, how "
+            "far under or over the budget it is, condition, location, and what the site didn't "
+            "list. Say plainly which are over_budget or have no_price. They aren't Yardsale "
+            "listings: Yardsale's agents can't haggle for them or take payment, so the buyer "
+            "opens the link to buy from the seller. Craigslist sellers usually take offers by "
+            "email."
+        )
+        if found.loose:
+            next_step += " None had every word of the search; say these are the closest."
+    elif answered:
+        next_step = f"Nothing fits on {and_list(answered)}. Try other words or a higher max." + (
+            f" {failed_sentence(found)}, so those weren't checked." if failed else ""
         )
     else:
-        next_step = "Nothing fits on other sites either. Try other words or a higher max."
-    unsearched = f" ({', '.join(failed)} couldn't be searched)" if failed else ""
+        if pending:
+            next_step = (
+                f"No site has answered yet ({and_list(pending)} still searching). Don't tell "
+                "the buyer nothing is out there; call searchOtherSites again with the same q "
+                "and max_usd in about a minute."
+            )
+        else:
+            next_step = (
+                f"The search didn't run: {failed_sentence(found)}. Don't tell the buyer nothing "
+                "is out there; call searchOtherSites again in a minute."
+            )
+    unsearched = f" ({failed_sentence(found)})" if failed else ""
+    if pending:
+        unsearched += f" ({', '.join(pending)} still searching)"
+        if answered:
+            next_step += (
+                f" {', '.join(pending)} hadn't answered yet: call searchOtherSites again with "
+                "the same q and max_usd in about a minute to include them."
+            )
     market = found.market
-    if market is not None:
+    if found.comps_late:
+        against = (
+            "Not compared with recent sales yet: the eBay sold-listings search was still "
+            "running, so prices are compared with each other."
+        )
+    elif market is not None:
         against = (
             f"Each is priced against the typical sold price on eBay, {usd(market.typical_cents)} "
             f"from {market.basis}."
         )
     else:
         against = "No recent eBay sales matched, so prices are compared with each other."
+    where = f" around {found.place}" if found.place else ""
+    if answered:
+        summary = (
+            f"{len(found.deals)} deal(s) on {and_list(answered)}{where}{unsearched}, best "
+            f"first: price against the market, then quality, then fit. {against}"
+        )
+        if not found.deals and unfit_sentence(found):
+            summary += f" {unfit_sentence(found)}"
+    elif pending:
+        summary = f"No site has answered yet: {and_list(pending)} still searching{unsearched}."
+    else:
+        summary = f"No site could be searched: {failed_sentence(found)}."
     return {
-        "status": "done",
+        "status": "done" if answered or pending else "failed",
+        "headline": deals.headline(found.deals, budget, found.market, site_name),
         "count": len(found.deals),
-        "listings": [_deal_json(deal) for deal in found.deals],
-        "searched": [site_name(name) for name in found.searched],
+        "listings": [_deal_json(deal, budget) for deal in found.deals],
+        "searched": answered,
         "failed": failed,
+        "pending": pending,
+        "sites": [
+            {
+                "site": site_name(site.source),
+                "status": site.status,
+                "listings": site.raw,
+                "fit": site.kept,
+                "reason": failure_words(site.reason) if site.status == "failed" else "",
+            }
+            for site in found.sites
+        ],
+        "place": found.place,
         "typical_sold_usd": dollars(market.typical_cents) if market else None,
         "comps_used": market.sales if market else 0,
-        "summary": (
-            f"{len(found.deals)} deal(s) on {sites}{unsearched}, best first: price against the "
-            f"market, then quality, then fit. {against}"
-        ),
+        "summary": summary,
         "next_step": next_step,
     }
 
@@ -482,8 +557,10 @@ class BusinessApi:
                 "count": len(found),
                 "listings": [_listing_json(listing) for listing in found],
                 "next_step": (
-                    "To get a lower price, call startHaggle with what the buyer wants and the most "
-                    "they'll pay."
+                    "Show the buyer these with their asking prices, then call searchOtherSites "
+                    "with the same q and max_usd so they can compare real listings elsewhere. "
+                    "Call startHaggle only if the buyer explicitly asks Yardsale to haggle with "
+                    "a Yardsale seller."
                     if found
                     else "Nothing on Yardsale matches right now. Call searchOtherSites with the "
                     "same q and max_usd to find deals on other sites, or try other words."
@@ -496,8 +573,10 @@ class BusinessApi:
     # --- Other sites ------------------------------------------------------------------------
 
     async def other_sites(self, request: web.Request) -> web.Response:
-        """The best deals on other sites, waiting up to answer_within seconds. A search still
-        running keeps going, and the same q and max_usd pick it up (elsewhere.DealFinder)."""
+        """The best deals on other sites: what's in by the finder's deadline (about 20 seconds),
+        with slower sites in `pending`, waiting at most answer_within seconds. A search still
+        running keeps going, and the same q and max_usd pick it up with whatever has come in
+        since (elsewhere.Search)."""
         finder = self.backend.finder
         if not finder.enabled:
             return _error(503, "Searching other sites is off on this server.", "sources_off")
@@ -509,9 +588,11 @@ class BusinessApi:
             budget = _amount(request.query["max_usd"])
             if budget is None:
                 return _error(400, "max_usd must be a dollar amount, like 300.", "bad_amount")
-        task = finder.start(query, budget)
+        # A place in q ("in Berkeley") or a zip parameter scopes the local sites.
+        near = request.query.get("zip", "").strip()[:5]
+        running = finder.search(query, budget, near if near.isdigit() and len(near) == 5 else "")
         try:
-            found = await asyncio.wait_for(asyncio.shield(task), self.answer_within)
+            found = await asyncio.wait_for(running.early(), self.answer_within)
         except TimeoutError:
             return web.json_response(
                 {
@@ -951,18 +1032,47 @@ _EXTERNAL = {
                 "shipping included; negative means above it; null when no sales matched"
             ),
         },
+        "under_budget_usd": {
+            "type": "number",
+            "nullable": True,
+            "description": (
+                "How far under max_usd the total is; negative means over it; null without a "
+                "max or a price. When shipping_known is false it's the price alone"
+            ),
+        },
+        "shipping_known": {
+            "type": "boolean",
+            "description": (
+                "True when the total is what the buyer pays (shipping given, or pickup on "
+                "Craigslist, OfferUp, Facebook); false means shipping isn't listed: say so"
+            ),
+        },
+        "shipping": {
+            "type": "string",
+            "description": '"+ $12 shipping", "free shipping", "pickup only", "shipping unknown"',
+        },
+        "missing": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["price", "photo", "condition", "location"]},
+            "description": "What the site didn't list; tell the buyer, don't guess it",
+        },
         "score": {"type": "number", "description": "Higher is better; the list is sorted by it"},
         "reason": {
             "type": "string",
             "description": (
-                'One line to show the buyer: "$120 on Craigslist, 35% under the $185 typical '
-                'sold price, like new, 6 photos"'
+                'One line to show the buyer with the link: "$180 on Craigslist, pickup only, '
+                "$120 under budget. Used, Oakland, CA, posted 2 days ago. 42% under the $310 "
+                'typical sold price, 6 photos. (no photo)"'
             ),
         },
         "flags": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "parts, accessory, missing_words, or far_under: reasons for caution",
+            "description": (
+                "parts, accessory, missing_words, or far_under: reasons for caution. "
+                "over_budget: shown because fewer than 3 fit the max. no_price: the seller "
+                "didn't list a price (always last)"
+            ),
         },
     },
 }
@@ -1095,9 +1205,10 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                 "takes no photos. Each listed item has its own agent that holds the seller's "
                 "private lowest price. Advanced: Yardsale's buyer agent can haggle with every "
                 "matching item's agent at once under the buyer's max and buy with a payment "
-                "link (startHaggle, acceptDeal); use those only when the buyer asks to haggle "
-                "or buy. Never invent listings, prices, or sales: every number comes from a "
-                "call. Prices are in US dollars."
+                "link (startHaggle, acceptDeal); use those only when the buyer explicitly asks "
+                "Yardsale to haggle with a Yardsale seller, never for a buyer who just wants a "
+                "good deal or the best price (search for those). Never invent listings, "
+                "prices, or sales: every number comes from a call. Prices are in US dollars."
             ),
         },
         "servers": [{"url": base_url}],
@@ -1113,10 +1224,9 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     "description": (
                         "Start here when a buyer wants something. Searches Yardsale's own "
                         "listings by words, optionally under a budget, and shows asking prices "
-                        "(never a seller's lowest price). Each result has its own agent, so a "
-                        "buyer can haggle (startHaggle) and pay through Yardsale. When count is "
-                        "0, call searchOtherSites with the same words and max for deals on "
-                        "other sites."
+                        "(never a seller's lowest price). Then call searchOtherSites with the "
+                        "same words and max, whatever the count, so the buyer compares real "
+                        "listings with links. Don't haggle unless the buyer asks to."
                     ),
                     "parameters": [
                         {
@@ -1153,17 +1263,27 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     "operationId": "searchOtherSites",
                     "summary": "Find the best deals on eBay, Craigslist, OfferUp and Facebook",
                     "description": (
-                        "Use it when searchListings or startHaggle finds nothing on Yardsale. "
+                        "Use it for every shopping request, with searchListings: a buyer "
+                        "asking for the best deal or price wants these compared. "
                         "Yardsale's Deal Finder agent searches eBay, Craigslist, OfferUp, and "
                         "other sites once, prices each listing against what the item typically "
                         "sold for on eBay in the last 90 days, and returns the best few at or "
-                        "under max_usd (price plus shipping), best first. Each listing has its "
-                        "site, title, price, total with shipping, url, a score (higher is "
-                        "better), and a one-line reason; show the buyer the reasons and links. "
+                        "under max_usd (price plus shipping), best first; when fewer than 3 fit, "
+                        "the closest over it follow, flagged over_budget. Open your answer with "
+                        "headline word for word, with its link. Each listing has its site, "
+                        "title, price, shipping, total, url, how far under the max it is, what "
+                        "the site didn't list, a score (higher is better), and a one-line "
+                        "reason; show the buyer each url as a link with its reason, and never "
+                        "claim a saving the numbers don't show. "
                         "These are NOT Yardsale listings: no haggling or payment through "
-                        "Yardsale. Answers within about "
-                        "25 seconds; if status is running, call it again with the same q and "
-                        "max_usd."
+                        "Yardsale. Answers within about 20 seconds with the sites that answered "
+                        "by then; slower sites are listed in pending. If status is running, or "
+                        "pending isn't empty and the buyer wants more, call it again with the "
+                        'same q, max_usd, and zip. A place in q ("in Berkeley", "near 94704") '
+                        "or zip scopes Craigslist, OfferUp, and Facebook; place says where they "
+                        "searched. sites says, per site, whether it answered and why not: "
+                        "never tell the buyer a site had nothing when it's listed as failed or "
+                        "pending, and if status is failed, no site could be searched."
                     ),
                     "parameters": [
                         {
@@ -1179,17 +1299,62 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                             "schema": {"type": "number"},
                             "description": "The most the buyer will pay, shipping included",
                         },
+                        {
+                            "name": "zip",
+                            "in": "query",
+                            "schema": {"type": "string"},
+                            "description": "A 5-digit ZIP code to search the local sites around",
+                        },
                     ],
                     "responses": {
                         "200": _ok(
                             {
                                 "type": "object",
                                 "properties": {
-                                    "status": {"type": "string", "enum": ["running", "done"]},
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["running", "done", "failed"],
+                                    },
+                                    "headline": {
+                                        "type": "string",
+                                        "description": (
+                                            "One sentence about the best deal with its link, "
+                                            'like "Found it: [Trek FX 2](url) on Craigslist '
+                                            "for $180, $120 under your $300 budget (Oakland, "
+                                            'pickup)." Repeat it to the buyer word for word, '
+                                            "link included"
+                                        ),
+                                    },
+                                    "sites": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "site": {"type": "string"},
+                                                "status": {
+                                                    "type": "string",
+                                                    "enum": ["ok", "empty", "failed", "pending"],
+                                                },
+                                                "listings": {"type": "integer"},
+                                                "fit": {"type": "integer"},
+                                                "reason": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                    "place": {"type": "string"},
                                     "count": {"type": "integer"},
                                     "listings": {"type": "array", "items": _EXTERNAL},
                                     "searched": {"type": "array", "items": {"type": "string"}},
                                     "failed": {"type": "array", "items": {"type": "string"}},
+                                    "pending": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": (
+                                            "Sites still searching when this answer went out; "
+                                            "call again with the same q and max_usd in about a "
+                                            "minute to include them"
+                                        ),
+                                    },
                                     "typical_sold_usd": {
                                         "type": "number",
                                         "nullable": True,
@@ -1263,8 +1428,10 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     "operationId": "startHaggle",
                     "summary": "Advanced: haggle for the buyer with every matching Yardsale seller",
                     "description": (
-                        "Advanced. Use it only when the buyer asks Yardsale to haggle or to get "
-                        "a lower price on a Yardsale listing, after searchListings found some. "
+                        "Advanced. Use it only when the buyer explicitly asks Yardsale to haggle "
+                        "with the seller of a Yardsale listing that searchListings returned. "
+                        'Wanting "the best deal", "the best price", or something cheap is not '
+                        "a request to haggle: search instead. "
                         "Yardsale's buyer agent haggles over several rounds with every matching "
                         "item's agent at once and never offers more than max_usd or tells the "
                         "sellers the max. Answers within about 25 seconds. If status is running, "

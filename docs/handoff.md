@@ -33,15 +33,19 @@ Two products, built on Fetch.ai agents and Apify market data:
   numbers. On approval, the item gets its own agent that holds the minimum and haggles with buyers,
   citing the market but never revealing the floor. The seller can paste a ready-made Craigslist post;
   buyers' emails through Craigslist's relay are answered by the item's agent.
-- **Buyers:** say what you want and your max. Yardsale's own listings come first; when nothing fits,
-  the Deal Finder agent searches eBay, Craigslist, OfferUp, and Facebook Marketplace (Apify), scores
-  each listing against the eBay sold price, and explains why it's a deal. For a Craigslist post, the
-  agent can email the seller and negotiate within the buyer's max.
+- **Buyers:** say what you want and your max ("find me the best deal on Jordan 4s under $200").
+  Every search shows Yardsale's own listings and the Deal Finder agent's search of eBay, Craigslist,
+  OfferUp, and Facebook Marketplace (Apify): real listings with prices and direct links, each scored
+  against the eBay sold price with a reason. "Best deal", "best price", and planner prose are all
+  searches. For a Craigslist post, the agent can email the seller and negotiate within the buyer's
+  max, when the buyer pastes the post's reply address and asks.
 - **Front door:** `@yardsale` on Fetch Business (OpenAPI tools: `searchListings`, `searchOtherSites`,
   `priceCheck`), and `@ys-orchestrator` in ASI:One for sellers with photos.
 
 Agent-to-agent buying on ASI:One (the Shopper haggling with item agents) is built but **not pitched**:
-a Fetch judge found it too ambitious. Leave the code; don't demo it.
+a Fetch judge found it too ambitious. Leave the code; don't demo it. It's out of the default flow:
+it runs only on an explicit request after a search, such as "haggle with the seller on 1, max
+$300", and no shopping words ("best deal", "get me a good deal") or `asi1-mini` reading start it.
 
 ## The agents (all Agentverse mailbox agents)
 
@@ -157,7 +161,8 @@ a deal search about $0.10 ($0.16 with Facebook).
      `YARDSALE_MAIL_LINKS=0` and restart.
 4. **`@yardsale`** (asi1.ai/ai/yardsale), after the Fetch Business re-import:
    - "What's my Breville Bambino Plus worth?" → `priceCheck`.
-   - "Best deal on a road bike under $300" → `searchOtherSites`, with a score and a reason per deal.
+   - "Best deal on a road bike under $300" → `searchListings` and `searchOtherSites`, with a score,
+     a reason, and a link per deal. No `startHaggle`.
 5. **Deal finder in the ASI:One chat:** "find me a mini fridge under $60" → nothing on Yardsale, then
    scored deals from other sites. `watch for it` saves a standing search.
 6. **Negotiate with a Craigslist seller for a buyer:** tap Reply on any Craigslist post, copy its relay

@@ -1,6 +1,12 @@
 """Chat commands read without a model: approve, change prices, cancel, pick a result, offer,
 haggle, accept, and check a payment.
 
+Shopping words ("best deal", "best price", "get me a good deal", "bargain") are a search, never
+a haggle: they reach ASI:One's reader, and the chat searches Yardsale and other sites. Haggling
+is opt-in. It takes an explicit request aimed at Yardsale's sellers ("haggle with the seller on
+1", "negotiate with item 2", "haggle $300"), and the chat only acts on it once the buyer has
+Yardsale results.
+
 A seller with several proposals waiting (one per photo) names them by number: "approve 2",
 "approve 1, 3", "approve all", "lowest 2 $40", "ask 3 $60", "cancel 2", "rules 2".
 
@@ -21,6 +27,7 @@ Kind = Literal[
     "edit",
     "haggle",
     "accept",
+    "budget",
     "paid",
     "orders",
     "rules",
@@ -80,17 +87,54 @@ _OFFER = re.compile(
 )
 # "take it off ebay" isn't taking the price.
 _NOT_TAKING = r"(?!\s+(?:off|down|away|from|back)\b)"
+# "deal" only on its own: "deal on jordans under $200" is a search.
 _ACCEPT = re.compile(
-    r"^(?:i\s+)?(?:accept(?:ed)?|deal|it'?s\s+a\s+deal|i'?ll\s+take\s+it|take\s+it|agreed?)\b"
+    r"^(?:i\s+)?(?:accept(?:ed)?|deal$|it'?s\s+a\s+deal|i'?ll\s+take\s+it|take\s+it|agreed?)\b"
     + _NOT_TAKING
 )
 _ACCEPT_PICK = re.compile(
     r"^(?:i\s+)?(?:accept|buy|take)\s+(?:the\s+)?(?:#|item\s*|number\s*|no\.?\s*|option\s*)?"
     r"(\d{1,2})$"
 )
+# Haggling, asked for in so many words. "best deal" or "bargain" alone is shopping (a search).
+_HAGGLE_VERB = r"(?:haggle|haggling|negotiate|negotiating)"
+_HAGGLE_PICK = r"(?:#|item\s*|number\s*|no\.?\s*|option\s*|listing\s*)?\d{1,2}\b"
+_HAGGLE_TARGET = (
+    r"(?:(?:the|that|this|these|those|their|its|my|your)\s+)?(?:yardsale(?:'?s)?\s+)?"
+    r"(?:sellers?(?:'?s?\s+agents?)?|agents?|listings?|items?|them|it|all(?:\s+of\s+them)?|"
+    r"yardsale)\b|" + _HAGGLE_PICK
+)
 HAGGLE = re.compile(
-    r"\b(?:haggle|haggling|negotiate|negotiating|bargain|best\s+(?:deal|price)|"
-    r"get\s+me\s+a\s+(?:good\s+)?deal|deal\s+for\s+me|talk\s+(?:them|it)\s+down)\b"
+    # "haggle", "haggle $340", "haggle for me, max $320": the whole message, after a search.
+    r"^" + _HAGGLE_VERB + r"(?:\s+for\s+me)?(?:\s*[,:]?\s*(?:(?:my\s+)?max(?:imum)?(?:\s+is)?|"
+    r"up\s+to|at\s+most|under|budget(?:\s+of)?)?\s*" + AMOUNT + r")?$|"
+    # "haggle with the seller", "negotiate with item 2", "haggle for me on 1"
+    r"\b" + _HAGGLE_VERB + r"(?:\s+(?:for\s+me|down|the\s+price))?\s+(?:with|on|over|for)\s+"
+    r"(?:" + _HAGGLE_TARGET + r")|"
+    # "talk the seller down", "have your agent haggle"
+    r"\btalk\s+(?:the\s+sellers?|them|it)\s+down\b|\b(?:your|yardsale'?s?)\s+(?:buyer\s+)?"
+    r"agent\s+(?:to\s+)?" + _HAGGLE_VERB,
+    re.IGNORECASE,
+)
+_HAGGLE_NUMBER = re.compile(
+    r"(?:\b(?:on|for|with|over)\s+(?:the\s+)?(?:#|item\s*|number\s*|no\.?\s*|option\s*|listing\s*)?"
+    r"|(?:#|\bitem\s*|\bnumber\s*|\bno\.?\s*|\boption\s*|\blisting\s*))"
+    r"(?<!\$)(\d{1,2})\b(?!\s*(?:dollars|bucks|usd)|\.\d|,\d{3})"
+)
+_HAGGLE_ALL = re.compile(r"\b(?:sellers|agents|listings|items|them|all)\b")
+# A buyer still shopping: these never accept a price or make an offer, whatever else they say.
+_SHOPPING = re.compile(
+    r"\b(?:find|looking\s+for|look\s+for|search(?:ing)?|shopping|show\s+me|need|needs|"
+    r"wants?\s+(?!to\b)|wants?\s+to\s+(?:find|search|look|shop|get\s+(?:a|an|some))|"
+    r"deals?\s+(?:on|for)|best\s+(?:deal|price)|good\s+deal|cheap(?:er|est)?|bargain|for\s+sale)\b|"
+    r"\b(?:under|below|less\s+than|max(?:imum)?|up\s+to|at\s+most|no\s+more\s+than|budget)\s*"
+    r"\$?\s?\d"
+)
+# "max $300", "under 250": a budget for the last search, never an offer.
+_BARE_BUDGET = re.compile(
+    r"^(?:(?:my\s+)?(?:max(?:imum)?|budget)(?:\s+is)?|under|below|less\s+than|up\s+to|"
+    r"at\s+most|no\s+more\s+than)\s*" + AMOUNT + r"$",
+    re.IGNORECASE,
 )
 _PAID = re.compile(
     r"^(?:i\s+)?(?:(?:have\s+|just\s+|already\s+)?paid|done\s+paying|pay|payment|"
@@ -219,7 +263,10 @@ _UNWATCH = re.compile(
 )
 _NOT_ACCEPTING = re.compile(
     r"\b(?:not|don'?t|doesn'?t|won'?t|never|decline[sd]?|reject(?:s|ed)?|cancel(?:s|led)?|"
-    r"find|search|look(?:ing)?\s+for|show\s+me|another|instead|other)\b|n't\b"
+    r"find|search|look(?:ing)?\s+for|show\s+me|another|instead|other|wants?\s+(?!to\b)|"
+    r"wants?\s+to\s+(?:find|search|look|shop|get\s+(?:a|an|some))|deals?\s+on|for\s+sale|"
+    r"cheap(?:er|est)?|best\s+(?:deal|price)\s+(?:on|for))\b|n't\b|"
+    r"\b(?:under|below|less\s+than)\s*\$?\s?\d"
 )
 
 
@@ -261,10 +308,18 @@ def budget(text: str) -> tuple[int | None, str]:
     return _cents(BUDGET.search(text))
 
 
+def shopping(text: str) -> bool:
+    """True when a message is still shopping: looking for something, a deal on it, or a budget
+    ("find me", "best price on", "the buyer wants Jordans under $200"). The chat searches for
+    these, so they never accept a price, approve, or make an offer."""
+    return bool(_SHOPPING.search(" ".join(text.lower().split())))
+
+
 def accepts_deal(text: str) -> bool:
     """True for a buyer taking the price on offer, written as prose ("The buyer accepts the deal,
     please proceed to complete the purchase"). False if it also says no, or asks for something
-    else, so "don't accept" or "find me another one I'd accept" never buys."""
+    else, so "don't accept", "find me another one I'd accept", or "the buyer wants Jordans under
+    $200" never buys."""
     lowered = " ".join(text.lower().split())
     return bool(_ACCEPTS.search(lowered)) and not _NOT_ACCEPTING.search(lowered)
 
@@ -333,6 +388,21 @@ def _other_sites(text: str, lowered: str) -> Command | None:
     return Command(kind, amount_cents=limit, error=error, text=text)
 
 
+def _haggle(text: str, lowered: str) -> Command:
+    """An explicit request to haggle with Yardsale's sellers: which item (a number), or all of
+    them, and the buyer's max if it's given."""
+    number = _HAGGLE_NUMBER.search(lowered)
+    pick = int(number.group(1)) if number is not None else None
+    rest = lowered if number is None else lowered[: number.start()] + lowered[number.end() :]
+    limit, error = budget(rest)
+    if limit is None and not error:
+        amount = re.search(AMOUNT, re.sub(_HAGGLE_VERB, " ", rest))
+        if amount is not None and ("$" in amount.group(0) or len(amount.group(1)) > 2):
+            limit, error = _cents(amount)
+    every = pick is None and bool(_HAGGLE_ALL.search(rest))
+    return Command("haggle", amount_cents=limit, error=error, text=text, pick=pick, every=every)
+
+
 def parse(text: str) -> Command | None:
     """The command in a chat message, or None for anything else (ASI:One reads that)."""
     lowered = " ".join(text.lower().split()).rstrip(".!?")
@@ -360,7 +430,7 @@ def parse(text: str) -> Command | None:
     if other_sites is not None:
         return other_sites
     offer = _OFFER.search(lowered)
-    if offer is not None:
+    if offer is not None and not _SHOPPING.search(lowered):  # "I'd pay $200 for jordans": a search
         amount, error = _cents(offer)
         pick = int(offer.group(2)) if offer.group(2) else None
         return Command("offer", amount_cents=amount, pick=pick, error=error)
@@ -381,11 +451,7 @@ def parse(text: str) -> Command | None:
     if rules is not None:
         return Command("rules", pick=int(rules.group(1)))
     if HAGGLE.search(lowered):
-        limit, error = budget(lowered)
-        if limit is None and not error:
-            bare = _BARE_AMOUNT.search(HAGGLE.sub("", lowered).strip(" ,.:"))
-            limit, error = _cents(bare)
-        return Command("haggle", amount_cents=limit, error=error, text=text)
+        return _haggle(text, lowered)
     accept_pick = _ACCEPT_PICK.search(lowered)
     if accept_pick is not None:
         return Command("accept", pick=int(accept_pick.group(1)))
@@ -415,4 +481,8 @@ def parse(text: str) -> Command | None:
     if bare is not None:
         amount, error = _cents(bare)
         return Command("amount", amount_cents=amount, error=error)
+    bare = _BARE_BUDGET.search(lowered)
+    if bare is not None:
+        amount, error = _cents(bare)
+        return Command("budget", amount_cents=amount, error=error)
     return None

@@ -1,6 +1,6 @@
 import pytest
 
-from yardsale.commands import Command, accepts_deal, budget, parse, seller_prices
+from yardsale.commands import Command, accepts_deal, budget, parse, seller_prices, shopping
 
 # What ASI:One's planner sent on October 24 when the buyer said "accept that deal and buy it".
 RELAYED_ACCEPT = (
@@ -125,3 +125,70 @@ def test_commands_by_number(text: str, expected: Command) -> None:
 def test_prices_for_two_numbers_at_once_are_refused() -> None:
     command = parse("ask 2 $60, lowest 3 $40")
     assert command is not None and "One item at a time" in command.error
+
+
+# --- Shopping is a search; haggling is opt-in ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "find me the best deal on Jordan 4s under $200",
+        "best price on a hydro flask",
+        "get me a good deal on a bike",
+        "best deal on a road bike",
+        "deal for me on a desk",
+        "bargain hunting for a mini fridge",
+        "deal on jordans",
+        "The buyer wants Jordans under $200",
+        "find me a hybrid bike, haggle for me, max $320",  # names no Yardsale seller or item
+        "negotiate the best price on a bike",
+    ],
+)
+def test_shopping_words_are_not_haggling(text: str) -> None:
+    command = parse(text)
+    assert command is None or command.kind not in ("haggle", "accept", "offer")
+    assert shopping(text) or "haggle for me" in text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("haggle with the seller on 1", Command("haggle", pick=1)),
+        ("haggle with the seller on 1, max $300", Command("haggle", pick=1, amount_cents=30000)),
+        ("negotiate with item 2", Command("haggle", pick=2)),
+        ("haggle for me on 1", Command("haggle", pick=1)),
+        ("haggle with the yardsale seller for item 2", Command("haggle", pick=2)),
+        ("haggle with the sellers, max 300", Command("haggle", amount_cents=30000, every=True)),
+        ("haggle $340", Command("haggle", amount_cents=34000)),
+        ("haggle", Command("haggle")),
+    ],
+)
+def test_explicit_haggling(text: str, expected: Command) -> None:
+    command = parse(text)
+    assert command is not None
+    assert (command.kind, command.pick, command.amount_cents, command.every) == (
+        expected.kind,
+        expected.pick,
+        expected.amount_cents,
+        expected.every,
+    )
+
+
+def test_a_budget_alone_is_not_an_offer() -> None:
+    assert parse("max $300") == Command("budget", amount_cents=30000)
+    assert parse("under 250") == Command("budget", amount_cents=25000)
+    command = parse("I'd pay $200, find me jordans")
+    assert command is None or command.kind != "offer"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The buyer wants Jordans under $200. Please proceed with the purchase.",
+        "The buyer wants to find a cheaper bike; proceed with the purchase later",
+        "Accept and find me the best deal on a hydro flask",
+    ],
+)
+def test_shopping_prose_never_accepts(text: str) -> None:
+    assert not accepts_deal(text)

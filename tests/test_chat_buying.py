@@ -53,7 +53,8 @@ async def test_haggle_for_me_with_several_sellers_at_once(market: sim.Market, st
     await list_bike(market, "ann", 360, 300)
     await list_bike(market, "ben", 340, 290)
     buyer = market.user("buyer")
-    reply = await buyer.exchange(sim.chat_message("find me a hybrid bike, haggle for me, max $320"))
+    await buyer.say("find me a hybrid bike")
+    reply = await buyer.exchange(sim.chat_message("haggle with the sellers, max $320"))
     text = reply.text()
     assert "haggled with 2 seller agent(s) at once" in text
     assert "Best deal: #" in text and "$320" in text  # the buyer's own max is shown back
@@ -72,7 +73,8 @@ async def test_haggle_for_me_with_several_sellers_at_once(market: sim.Market, st
 async def test_an_acceptance_relayed_by_the_planner_buys(market: sim.Market, store: Store) -> None:
     await list_bike(market, "ann", 360, 300)
     buyer = market.user("buyer")
-    reply = await buyer.say("find me a hybrid bike, haggle for me, max $320")
+    await buyer.say("find me a hybrid bike")
+    reply = await buyer.say("haggle with the seller, max $320")
     assert "Yours for" in reply
     # Not a yes: nothing is bought.
     assert "Deal!" not in await buyer.say("The buyer does not accept the deal yet.")
@@ -98,7 +100,8 @@ async def test_a_relayed_acceptance_with_nothing_on_offer_buys_nothing(
 async def test_haggle_asks_for_a_max_first(market: sim.Market) -> None:
     await list_bike(market, "ann", 360, 300)
     buyer = market.user("buyer")
-    assert (await buyer.say("find me a hybrid bike and haggle for me")).startswith(chat.ASK_MAX)
+    await buyer.say("find me a hybrid bike")
+    assert (await buyer.say("haggle with the seller on 1")).startswith(chat.ASK_MAX)
     reply = await buyer.say("$330")
     assert "haggled with 1 seller agent(s)" in reply and "Yours for" in reply
 
@@ -106,13 +109,15 @@ async def test_haggle_asks_for_a_max_first(market: sim.Market) -> None:
 async def test_haggle_with_nothing_near_the_max(market: sim.Market) -> None:
     await list_bike(market, "ann", 360, 300)
     buyer = market.user("buyer")
-    assert "close enough" in await buyer.say("find me a hybrid bike, haggle for me, max $100")
+    await buyer.say("find me a hybrid bike")
+    assert "close enough" in await buyer.say("haggle with the seller, max $100")
 
 
 async def test_haggle_below_every_floor_buys_nothing(market: sim.Market, store: Store) -> None:
     await list_bike(market, "ann", 360, 300)
     buyer = market.user("buyer")
-    reply = await buyer.say("haggle for a hybrid bike, max $260")
+    await buyer.say("find me a hybrid bike")
+    reply = await buyer.say("haggle with the seller, max $260")
     assert "come down to your max" in reply and "Best deal" not in reply
     assert "no counter-offer" in await buyer.say("accept")
     assert all(store.deal_for(listing.item_id) is None for listing in store.active())
@@ -121,7 +126,8 @@ async def test_haggle_below_every_floor_buys_nothing(market: sim.Market, store: 
 async def test_the_haggle_card_buys_the_item(market: sim.Market, store: Store) -> None:
     await list_bike(market, "ann", 360, 300)
     buyer = market.user("buyer")
-    reply = await buyer.exchange(sim.chat_message("haggle for a hybrid bike, max $340"))
+    await buyer.say("find me a hybrid bike")
+    reply = await buyer.exchange(sim.chat_message("haggle with the seller, max $340"))
     card = card_in(reply)
     assert card is not None and isinstance(card.payload, CustomCardPayload)
     selection = re.search(r'"selection":\s*(\{[^}]*\})', card.model_dump_json())
