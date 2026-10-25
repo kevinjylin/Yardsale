@@ -20,20 +20,32 @@ from typing import Literal
 import aiohttp
 from pydantic import BaseModel, ValidationError
 
-from yardsale.commands import AMOUNT, BUDGET, FLOOR, budget, seller_prices
+from yardsale.commands import (
+    AMOUNT,
+    BUDGET,
+    FLOOR,
+    asks_about_buyers,
+    asks_about_status,
+    budget,
+    seller_prices,
+)
 
 API_URL = "https://api.asi1.ai/v1/chat/completions"
 MODEL = os.getenv("YARDSALE_ASI_MODEL", "asi1-mini")
 
 log = logging.getLogger("yardsale.asione")
 
-Intent = Literal["sell", "buy", "other"]
+Intent = Literal["sell", "buy", "buyers", "status", "other"]
 
 
 class SellerMessage(BaseModel):
     """What a message asks for. "buy" always means a search: Yardsale's listings and other
     sites, compared, with links. Haggling is never read from prose; it's an explicit command
-    (commands.HAGGLE), so no reading of "best deal" or "get me a bargain" starts one."""
+    (commands.HAGGLE), so no reading of "best deal" or "get me a bargain" starts one.
+
+    "buyers" and "status" are a seller asking after a listing ("someone messaged me, reply to
+    them", "did it sell?"). Both only show the seller a view: no reading approves, accepts, or
+    changes a price."""
 
     intent: Intent
     asking_usd: float | None
@@ -55,8 +67,11 @@ buyer wants ..."). Messages can be in any language; answer in English.
 
 - intent: "sell" if they want to sell, list, price, or get rid of an item, or they attached a \
 photo without saying otherwise; "buy" if they're looking for something to buy, or want the best \
-deal, the best price, or a bargain on something; "other" for anything else (greetings, questions \
-about Yardsale).
+deal, the best price, or a bargain on something; "buyers" if they're a seller asking about people \
+answering their listing ("someone messaged me about the bottle", "any buyers?", "did anyone \
+reply?", "message them back", "reply to them and haggle"); "status" if they're a seller asking \
+how their listing is doing ("did it sell?", "how's my listing?", "is my lamp still up?"); \
+"other" for anything else (greetings, questions about Yardsale).
 - asking_usd: the price they want to ask, in US dollars, if they gave one ("list it for $120"). \
 Otherwise null.
 - floor_usd: the lowest price they'd accept, if they gave one ("at least 40", "won't go below \
@@ -75,7 +90,7 @@ SCHEMA = {
     "additionalProperties": False,
     "required": ["intent", "asking_usd", "floor_usd", "note", "query", "budget_usd"],
     "properties": {
-        "intent": {"type": "string", "enum": ["sell", "buy", "other"]},
+        "intent": {"type": "string", "enum": ["sell", "buy", "buyers", "status", "other"]},
         "asking_usd": {"type": ["number", "null"]},
         "floor_usd": {"type": ["number", "null"]},
         "note": {"type": "string"},
@@ -129,6 +144,10 @@ def read_locally(text: str, has_photo: bool) -> SellerMessage:
 
     A photo means sell. Prices it can't read are left out, so the appraisal fills them in.
     """
+    if not has_photo and asks_about_buyers(text):
+        return SellerMessage(intent="buyers", asking_usd=None, floor_usd=None, note="")
+    if not has_photo and asks_about_status(text):
+        return SellerMessage(intent="status", asking_usd=None, floor_usd=None, note="")
     if has_photo or (_SELL.search(text) and not _BUY.search(text)):
         asking, floor, _ = seller_prices(text)
         # The note is whatever's left that isn't a price, a request, or filler.
@@ -209,6 +228,6 @@ async def read_seller_message(text: str, has_photo: bool) -> SellerMessage:
     except (AsiOneError, aiohttp.ClientError, TimeoutError) as ex:
         log.warning(f"Couldn't read the message with ASI:One ({ex}); reading it locally")
         return read_locally(text, has_photo)
-    if has_photo and message.intent == "other":
+    if has_photo and message.intent not in ("sell", "buy"):
         message.intent = "sell"
     return message
