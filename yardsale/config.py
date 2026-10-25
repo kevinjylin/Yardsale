@@ -134,6 +134,8 @@ def readiness(mode: str) -> list[Check]:
     checks.append(_business_api_check())
     checks.append(_ebay_check())
     checks.append(_mail_check())
+    checks.append(_campus_check())
+    checks.append(_facebook_check())
     checks.append(
         Check(
             "YARDSALE_ORDERS_WEBHOOK",
@@ -256,6 +258,50 @@ def _mail_check() -> Check:
         "YARDSALE_MAIL_ADDRESS",
         True,
         f"item agents answer Craigslist buyers' emails through {mail.imap_host}",
+        False,
+    )
+
+
+def _campus_check() -> Check:
+    from yardsale.onboarding import campus_mode
+
+    if not campus_mode():
+        return Check(
+            "YARDSALE_CAMPUS",
+            False,
+            "not set: no school sign-in; anyone can buy and sell with anyone",
+            False,
+        )
+    if not _is_set("GOOGLE_MAPS_API_KEY"):
+        return Check(
+            "YARDSALE_CAMPUS",
+            True,
+            "on: new chats start with the school sign-in; GOOGLE_MAPS_API_KEY isn't set, so "
+            "campus meeting spots get no map link",
+            False,
+        )
+    return Check(
+        "YARDSALE_CAMPUS",
+        True,
+        "on: new chats start with the school sign-in; meeting spots get a Google Maps link",
+        False,
+    )
+
+
+def _facebook_check() -> Check:
+    from yardsale.facebook import enabled
+
+    if not enabled():
+        return Check(
+            "YARDSALE_FACEBOOK",
+            False,
+            "not set: buyer searches and the Market Scout skip Facebook Marketplace",
+            False,
+        )
+    return Check(
+        "YARDSALE_FACEBOOK",
+        True,
+        "on: searches include Facebook Marketplace (the priciest site per search)",
         False,
     )
 

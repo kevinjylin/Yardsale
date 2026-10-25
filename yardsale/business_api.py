@@ -115,9 +115,20 @@ ResearchComps = Callable[[Context, str], Awaitable[list[Comp]]]
 ID_LETTERS = "abcdefghjkmnpqrstuvwxyz23456789"
 ID_LENGTH = 8
 NO_SUCH_HAGGLE = (
-    "No haggle has that haggle_id. Copy haggle_id exactly as startHaggle returned it, or start a "
-    "new haggle with startHaggle."
+    "No haggle has that haggle_id. Copy haggle_id exactly as startHaggle returned it. If you no "
+    "longer have it, call startHaggle again with the same looking_for and max_usd: the buyer "
+    "agent haggles the same way each time, so it lands on the same price unless a listing changed."
 )
+
+
+def keep_the_id(haggle_id: str) -> str:
+    """A Fetch Business agent's next turn sees the chat, not earlier tool results (October 24:
+    "lock it in" found no haggle_id), so the ID has to be in its reply."""
+    return (
+        f"Write the line 'Haggle ID: {haggle_id}' in your reply to the buyer. Your next message "
+        "sees only the chat, not this tool result, and acceptDeal needs the ID."
+    )
+
 
 log = logging.getLogger("yardsale.api")
 
@@ -749,7 +760,8 @@ class BusinessApi:
                     "status": "running",
                     "summary": f"Yardsale's buyer agent is haggling with {len(targets)} seller "
                     "agent(s) at once.",
-                    "next_step": "Call getHaggle with this haggle_id. It waits for the result.",
+                    "next_step": "Call getHaggle with this haggle_id. It waits for the result. "
+                    + keep_the_id(haggle_id),
                 },
             )
         except Exception:  # _finish saved the failure for the caller
@@ -788,7 +800,8 @@ class BusinessApi:
                 {
                     "haggle_id": haggle_id,
                     "status": "running",
-                    "next_step": "Call getHaggle again. It waits for the result.",
+                    "next_step": "Call getHaggle again. It waits for the result. "
+                    + keep_the_id(haggle_id),
                 },
             )
         if state.get("status") == "failed":
@@ -816,11 +829,14 @@ class BusinessApi:
         ]
         best = state.get("best") or ""
         if best:
+            summary = haggle_text(result).rsplit("\n", 1)[0] + f"\nHaggle ID: {haggle_id}"
             next_step = (
-                "To buy the best deal, call acceptDeal with this haggle_id. To buy another item "
-                "with a price, also pass its item_id. Prices hold for 24 hours."
+                f"{keep_the_id(haggle_id)} To buy the best deal, call acceptDeal with this "
+                "haggle_id. To buy another item with a price, also pass its item_id. Prices hold "
+                "for 24 hours."
             )
         else:
+            summary = haggle_text(result)
             next_step = "No seller came down to the max. Try a higher max or other words."
         return web.json_response(
             {
@@ -829,7 +845,7 @@ class BusinessApi:
                 "items": items,
                 "best_item_id": best or None,
                 "best_price_usd": dollars(quotes[best]) if best else None,
-                "summary": haggle_text(result).rsplit("\n", 1)[0] if best else haggle_text(result),
+                "summary": summary,
                 "next_step": next_step,
             }
         )
@@ -1436,8 +1452,10 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                         "item's agent at once and never offers more than max_usd or tells the "
                         "sellers the max. Answers within about 25 seconds. If status is running, "
                         "call getHaggle with the haggle_id, which waits for the result. Show the "
-                        "buyer the summary, then ask whether to buy the best deal. It can't "
-                        "haggle for listings on other sites."
+                        "buyer the summary, including its 'Haggle ID' line, then ask whether to "
+                        "buy the best deal: your next message sees only the chat, so acceptDeal "
+                        "needs the ID from your reply. It can't haggle for listings on other "
+                        "sites."
                     ),
                     "requestBody": {
                         "required": True,
@@ -1491,7 +1509,10 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     "summary": "Advanced: buy at the haggled price and get the payment link",
                     "description": (
                         "Advanced. Use it only after the buyer says yes to a price from "
-                        "startHaggle. Without item_id it buys the best deal. Returns a payment "
+                        "startHaggle, with the 'Haggle ID' written earlier in the chat. If it "
+                        "isn't there, call startHaggle again with the same looking_for and "
+                        "max_usd; it lands on the same price. Without item_id it buys the best "
+                        "deal. Returns a payment "
                         "link (test mode) to give the buyer; only the payment provider decides "
                         "that a deal is paid."
                     ),

@@ -1,7 +1,9 @@
 {
   "appraiser": "https://storage.googleapis.com/agentverse-prod-assets/agent-avatars-pub/502684185.jpg",
+  "dealfinder": "https://api.apify.com/v2/key-value-stores/7XlvZEXBKvifUhR3z/records/service-dealfinder-b7373f7a53.jpg",
   "identifier": "https://storage.googleapis.com/agentverse-prod-assets/agent-avatars-pub/2147478191.jpg",
   "market": "https://storage.googleapis.com/agentverse-prod-assets/agent-avatars-pub/1498333904.jpg",
   "researcher": "https://storage.googleapis.com/agentverse-prod-assets/agent-avatars-pub/1972281932.jpg",
+  "scout": "https://api.apify.com/v2/key-value-stores/7XlvZEXBKvifUhR3z/records/service-scout-e4cdb5dac7.jpg",
   "shopper": "https://storage.googleapis.com/agentverse-prod-assets/agent-avatars-pub/1838190019.jpg"
 }

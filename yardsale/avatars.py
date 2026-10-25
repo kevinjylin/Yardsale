@@ -5,11 +5,12 @@ An agent's profile holds only a picture's URL, so each picture has to be somewhe
 Agentverse's own picture upload takes a signed-in browser session, not an API key (it answered
 401 to the key on October 24), so the server can't use it.
 
-- The service agents (the Market, Identifier, Researcher, Appraiser, and Shopper) and @yardsale
-  on Fetch Business: drawn once by the command below and saved in yardsale/readmes/avatars/.
-  Each is uploaded by hand on its agent's Agentverse profile page; --sync then saves the URLs
-  in yardsale/readmes/avatars/urls.json. service_agent() reads that file, so every Agentverse
-  connect sends the same picture.
+- The service agents (the Market, Identifier, Researcher, Appraiser, Shopper, Market Scout, and
+  Deal Finder) and @yardsale on Fetch Business: drawn once by the command below and saved in
+  yardsale/readmes/avatars/. Each is uploaded by hand on its agent's Agentverse profile page
+  (the Scout's and Deal Finder's were instead saved in the Apify picture store below and set
+  through Agentverse's API); --sync then saves the URLs in yardsale/readmes/avatars/urls.json.
+  service_agent() reads that file, so every Agentverse connect sends the same picture.
 - Hosted item agents, with YARDSALE_ITEM_AVATARS=1: when one is created, a picture of the item
   is drawn from its title and saved in a public Apify key-value store, in the background. If
   that fails, the listing is live anyway, with Agentverse's default picture.
@@ -93,6 +94,11 @@ SERVICE_PROMPTS = {
         "A friendly robot with binoculars looking out over a row of neighborhood yard sale "
         "tables, each with a blank price tag, as if comparing their prices."
     ),
+    "dealfinder": (
+        "A friendly robot holding a big magnifying glass over a fan of three listing cards, "
+        "each with a small picture of a secondhand item and a blank price tag, pulling out the "
+        "best one, which glows with a gold star."
+    ),
     "yardsale": (
         "A brand mark for a secondhand marketplace: a paper price tag shaped like a little "
         "house, with a string loop at the top and a small heart in its window."
@@ -107,6 +113,7 @@ SERVICE_NAMES = {
     "appraiser": "yardsale-appraiser",
     "shopper": "yardsale-shopper",
     "scout": "yardsale-scout",
+    "dealfinder": "yardsale-dealfinder",
 }
 
 # prompt -> the picture's bytes, as ASI:One returns them

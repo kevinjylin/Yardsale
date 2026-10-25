@@ -661,7 +661,9 @@ per agent, because agent addresses come from the master seed and don't change.
   `{"data": [{"b64_json": ...}]}`), and a hosted Specialized Sirrus got the handle
   `@specialized-sirrus` through `PUT /v2/agents/{address}` and a drawn picture. Agentverse's
   picture upload (`/api/agent-avatar`) refused the API key, so these pictures were uploaded by
-  hand on each profile page. The first drawing of the bike had made-up numbers and a tag on it,
+  hand on each profile page. The Market Scout and Deal Finder got theirs later that night the
+  way hosted items do: drawn by ASI:One, saved in the public Apify picture store, and set
+  through `PUT /v2/agents/{address}`. The first drawing of the bike had made-up numbers and a tag on it,
   so the item prompt now forbids labels and measurements. Later the same day, with
   `YARDSALE_ITEM_AVATARS=1`, `--items --redraw specialized-sirrus` drew the bike, saved it in a
   public Apify key-value store, and set it in about 8 seconds. Two things were learned. A

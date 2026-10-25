@@ -357,7 +357,7 @@ async def test_drawing_and_syncing_service_pictures(
         {market: "https://pics.example/market.jpg", shopper: "https://pics.example/shopper.jpg"}
     )
     missing = await avatars.sync(client)
-    assert missing == ["identifier", "researcher", "appraiser", "scout"]
+    assert missing == ["identifier", "researcher", "appraiser", "scout", "dealfinder"]
     assert avatars.saved_urls() == {
         "market": "https://pics.example/market.jpg",
         "shopper": "https://pics.example/shopper.jpg",

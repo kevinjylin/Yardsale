@@ -114,6 +114,9 @@ async def test_haggle_accept_and_pay(shop: Any, store: Store) -> None:
             assert r["buyer_offer_usd"] <= 320
             assert r["agreed"] or r["seller_reply_usd"] not in (300, 290)  # never a floor
     assert "haggled with 2 seller agent(s) at once" in haggle["summary"]
+    # @yardsale's next turn sees only the chat, so the ID goes in the text it shows the buyer.
+    assert haggle["summary"].endswith(f"\nHaggle ID: {haggle['haggle_id']}")
+    assert f"'Haggle ID: {haggle['haggle_id']}' in your reply" in haggle["next_step"]
 
     status, deal = await client.call("POST", f"/haggles/{haggle['haggle_id']}/accept")
     assert status == 200
@@ -159,6 +162,24 @@ async def test_haggle_ids_are_short_and_forgive_capitals_and_spaces(
     # Haggles saved before IDs were shortened are mixed case, and still found.
     store.save_conversation("api:OldMixedCaseId", {"buyer_ref": "api-x", "status": "failed"})
     assert (await client.call("GET", "/haggles/OldMixedCaseId"))[1]["code"] == "haggle_failed"
+
+
+async def test_a_lost_haggle_id_is_found_again_by_haggling_again(shop: Any) -> None:
+    market, _, client = shop
+    await list_bike(market, "ann", 360, 300)
+    await list_bike(market, "ben", 340, 290)
+    ask = {"looking_for": "hybrid bike", "max_usd": 320}
+    _, first = await client.call("POST", "/haggles", ask)
+    status, error = await client.call("POST", "/haggles/qqqqqqqq/accept")
+    assert status == 404 and "call startHaggle again" in error["error"]
+
+    # The 404 promises the same price from a new haggle, so it has to hold.
+    _, second = await client.call("POST", "/haggles", ask)
+    assert second["haggle_id"] != first["haggle_id"]
+    assert second["best_item_id"] == first["best_item_id"]
+    assert second["best_price_usd"] == first["best_price_usd"]
+    status, deal = await client.call("POST", f"/haggles/{second['haggle_id']}/accept")
+    assert status == 200 and deal["price_usd"] == first["best_price_usd"]
 
 
 async def test_calls_are_logged_without_ids_or_the_max(
@@ -207,6 +228,7 @@ async def test_a_slow_haggle_answers_later(store: Store) -> None:
             )
             # A plain 200: tool runners can read 202 as a failure.
             assert status == 200 and started["status"] == "running"
+            assert f"Haggle ID: {started['haggle_id']}" in started["next_step"]
             # getHaggle waits for the result, so one call is enough.
             api.answer_within = 5.0
             status, haggle = await client.call("GET", f"/haggles/{started['haggle_id']}")
