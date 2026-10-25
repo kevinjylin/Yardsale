@@ -180,6 +180,15 @@ async def test_calls_are_logged_without_ids_or_the_max(
     assert haggle["haggle_id"] not in text  # only a short prefix, never the whole ID
     assert "317" not in text and "300" not in text
 
+    # An unknown ID logs its first 3 characters and length, to show what the caller sent.
+    caplog.clear()
+    await client.call("POST", "/haggles/xyzmistyped/accept")
+    await client.call("GET", "/haggles/abcdefgh")
+    lines = [r.getMessage() for r in caplog.records if r.name == "yardsale.api"]
+    assert "API haggle 'xyz' not found (11 characters)" in lines
+    assert "API haggle 'abc' not found (8 characters)" in lines
+    assert not any("mistyped" in line or "abcdefgh" in line for line in lines)
+
 
 async def test_a_slow_haggle_answers_later(store: Store) -> None:
     payments = fakes.FakePayments()

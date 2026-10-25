@@ -144,6 +144,12 @@ def _error(status: int, message: str, code: str) -> web.Response:
     return web.json_response({"error": message, "code": code}, status=status)
 
 
+def _no_such_haggle(haggle_id: str) -> web.Response:
+    """Logs the start and length of the unknown ID, so a mistyped one can be told apart."""
+    log.info(f"API haggle {haggle_id[:3]!r} not found ({len(haggle_id)} characters)")
+    return _error(404, NO_SUCH_HAGGLE, "not_found")
+
+
 def _listing_json(listing: Listing) -> dict[str, Any]:
     """What a buyer may see: never the floor, the seller, or the appraisal."""
     data: dict[str, Any] = {
@@ -693,7 +699,7 @@ class BusinessApi:
     def _haggle_response(self, haggle_id: str) -> web.Response:
         state = self._load(haggle_id)
         if not state:
-            return _error(404, NO_SUCH_HAGGLE, "not_found")
+            return _no_such_haggle(haggle_id)
         if state.get("status") == "running":
             if haggle_id not in self.running:
                 return _error(410, "That haggle was interrupted. Start a new one.", "interrupted")
@@ -763,7 +769,7 @@ class BusinessApi:
         haggle_id = self._haggle_id(request)
         state = self._load(haggle_id)
         if not state:
-            return _error(404, NO_SUCH_HAGGLE, "not_found")
+            return _no_such_haggle(haggle_id)
         if state.get("status") != "done":
             return self._haggle_response(haggle_id)
         try:
