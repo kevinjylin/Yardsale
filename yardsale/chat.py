@@ -106,7 +106,6 @@ from yardsale import (
     craigslist_mail,
     deals,
     onboarding,
-    students,
     watches,
 )
 from yardsale.asione import ReadMessage
@@ -131,7 +130,6 @@ from yardsale.models import (
 from yardsale.payments import PaymentError, commission_text
 from yardsale.photos import PhotoError, download_from_storage, download_photo, prepare_photo
 from yardsale.pricing import PriceError, parse_usd, to_cents, usd
-from yardsale.schools import SendCode
 from yardsale.search import search
 from yardsale.sources import ExternalListing, SourceError
 from yardsale.store import (
@@ -1066,12 +1064,7 @@ def _form_price(value: SelectionValue | None) -> int | None:
 # --- The protocol --------------------------------------------------------------------------------
 
 
-def build_chat_protocol(
-    backend: Backend,
-    read: ReadMessage,
-    fetch: FetchPhoto,
-    send_code: SendCode = onboarding.log_code_for_development,
-) -> AgentProtocol:
+def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) -> AgentProtocol:
     proto = AgentProtocol(spec=chat_protocol_spec)
     store = backend.store
     locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -2146,16 +2139,8 @@ def build_chat_protocol(
         if action == "not_student":
             return onboarding.NOT_A_STUDENT_YET
         if action == "student_email":
-            text, card = await onboarding.start_verification(
-                store, conv.owner, str(choice.get("email", "")), send_code
-            )
+            text, card = onboarding.join(store, conv.owner, str(choice.get("email", "")))
             return Reply(text, card)
-        if action == "student_code":
-            try:
-                student = students.confirm(store, conv.owner, str(choice.get("code", "")))
-            except students.StudentError as ex:
-                return Reply(str(ex), onboarding.code_form())
-            return onboarding.verified_text(student.school)
         if action in ("approve", "cancel"):
             listing = store.get(item_id)
             if listing is None or listing.owner != conv.owner or listing.status != PROPOSED:
