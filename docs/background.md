@@ -449,13 +449,37 @@ Craigslist bans automated posting and scraping, so the seller posts by hand. `cr
 ASI:One chat gives a title, price, and description to paste, and the email to post with
 (`YARDSALE_MAIL_ADDRESS`, a Gmail account with an app password). A buyer who answers the post
 writes through Craigslist's relay. Every 10 seconds the Market reads new mail from Craigslist
-addresses, matches its subject to a posted title, and sends the item's agent (in the server or
-hosted on Agentverse) the same `Offer` or `AcceptCounter` a chat buyer's offer becomes, with
+addresses, matches it to a post (by the post link in Craigslist's footer; see below), and sends
+the item's agent (in the server or hosted on Agentverse) the same `Offer` or `AcceptCounter` a chat buyer's offer becomes, with
 `buyer_ref` `email-<hash of the relay address>`. The item agent's counter, agreement, or deal
 becomes the email reply, sent through the relay in the buyer's thread with a payment link once
 they accept. A dollar amount is an offer, and "deal", "I'll take it", or "yes" while a price is
 on the table accepts it; both are read with patterns, not a model. If the item agent doesn't
 answer in time, the buyer gets "let me check" once and the email is tried again.
+
+**What the first live post taught (October 25).** A ThermoFlask was posted with Yardsale's inbox,
+and the buyer's email went unanswered: its subject was "Waterbottle", which the buyer typed, so
+matching by the posted title failed, and the email was skipped until a restart with nothing in
+the log. Now:
+
+- An email is matched by the post ID in the relay's footer ("Original craigslist post: <link>",
+  on every relayed email), then by the link's slug (the city, then the title's first words)
+  when exactly one active post fits best, and only then by a posted title in the subject.
+  The footer is dropped before the buyer's words are read, so nothing in it becomes an offer.
+- Post IDs are saved from Craigslist's posting confirmation (`cl posting: <title>` from
+  `robot@craigslist.org`, then marked read), from the first email matched by slug or subject,
+  or from a link the seller pastes (`record_post_link`).
+- An email that matches nothing stays unread and is read again once a post or post ID is
+  recorded, or every 5 minutes. The log gives the reason ("post link not recorded, subject words
+  1"), never the address, subject, or text.
+- Craigslist's own chat can't be answered: its "new craigslist chat message" emails carry no
+  text, and reading the chat would mean logging in to craigslist.org, which its terms forbid.
+  The notices are counted (`chat_notices_since`) and marked read, and the post text asks the
+  seller to choose email as the contact method and turn chat off.
+- Each answered email keeps what the buyer wrote and what the agent replied (300 characters
+  each, SQLite only, never logged) so the seller can see it (`recent_exchanges`).
+- The post text puts the title, price (`$11`), and description in separate paragraphs, since
+  ASI:One's chat turns single line breaks into spaces.
 
 The Market can't start a message in a seller's ASI:One chat (it keeps only a hash of the
 session), so `my listings` shows Craigslist buyers and sales. Setup steps are in the
