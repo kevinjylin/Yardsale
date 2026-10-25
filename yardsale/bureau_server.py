@@ -53,7 +53,7 @@ from uagents.registration import BatchAlmanacApiRegistrationPolicy
 from uagents_core.registration import BatchRegistrationPolicy
 from uagents_core.types import DeliveryStatus
 
-from yardsale import business_api, config, watches
+from yardsale import business_api, config, students, watches
 from yardsale.agentverse import connect_mailbox, inspector_url, service_agent
 from yardsale.appraiser import Judge, build_appraiser, judge_with_claude
 from yardsale.asione import ReadMessage, read_seller_message
@@ -131,6 +131,9 @@ RETRY_DELETES_EVERY = 60.0  # seconds between tries to delete closed listings' h
 # How often to look for a standing search that's due. Far more often than watches.WATCH_EVERY,
 # so a watch is polled near its due time; finding none due is two cheap queries.
 WATCH_CHECK_EVERY = 900.0
+# How often to map a school that has a student but no campus yet. Rare work: a campus is
+# fetched once, ever, and nothing waits on it.
+CAMPUS_CHECK_EVERY = 1800.0
 
 
 @dataclass
@@ -1028,6 +1031,14 @@ def build(
     @market.on_interval(period=RETRY_DELETES_EVERY)
     async def delete_closed_hosted_agents(ctx: Context) -> None:
         await delete_closed_hosted(rt)
+
+    @market.on_interval(period=CAMPUS_CHECK_EVERY)
+    async def map_new_campuses(ctx: Context) -> None:
+        if rt.offline:
+            return  # OpenStreetMap is a network service; --offline stays off it
+        places = await students.warm_known_campuses(rt.store)
+        if places:
+            ctx.logger.info(f"mapped {places} new campus places")
 
     @market.on_interval(period=WATCH_CHECK_EVERY)
     async def poll_standing_searches(ctx: Context) -> None:

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from yardsale.meetup import Spot
 from yardsale.models import Appraisal, ItemDetails
 from yardsale.pricing import listing_prices
 from yardsale.sources import ExternalListing
@@ -128,6 +129,34 @@ CREATE TABLE IF NOT EXISTS watch_hits (
     PRIMARY KEY (watch_id, source, external_id)
 );
 CREATE INDEX IF NOT EXISTS watch_hits_untold ON watch_hits (watch_id, told);
+CREATE TABLE IF NOT EXISTS students (
+    owner TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    school TEXT NOT NULL,
+    verified_at REAL,
+    building TEXT,
+    latitude REAL,
+    longitude REAL,
+    code_hash TEXT,
+    code_expires_at REAL,
+    code_attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS students_by_school ON students (school, verified_at);
+CREATE TABLE IF NOT EXISTS campus_places (
+    school TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    indoor INTEGER NOT NULL DEFAULT 0,
+    opening_hours TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (school, name, kind)
+);
+CREATE TABLE IF NOT EXISTS campus_loaded (
+    school TEXT PRIMARY KEY,
+    loaded_at REAL NOT NULL,
+    places INTEGER NOT NULL
+);
 """
 
 # Columns added after the first prototype. Older database files get them on open.
@@ -226,6 +255,41 @@ class DealRecord:
 
 
 @dataclass
+class Student:
+    """One chat conversation's student. `school` only counts once `verified_at` is set."""
+
+    owner: str  # the conversation: asi1:<hash>
+    email: str
+    school: str  # the school key from schools.py, e.g. "berkeley.edu"
+    verified_at: float | None = None
+    building: str | None = None  # the dorm or building they named; never shown to anyone else
+    latitude: float | None = None
+    longitude: float | None = None
+    code_hash: str | None = None  # a keyed hash, never the code
+    code_expires_at: float | None = None
+    code_attempts: int = 0
+
+    @property
+    def verified(self) -> bool:
+        return self.verified_at is not None
+
+    @property
+    def placed(self) -> bool:
+        """Whether a meeting point can be worked out for this student."""
+        return self.latitude is not None and self.longitude is not None
+
+    def spot(self) -> Spot | None:
+        if self.latitude is None or self.longitude is None:
+            return None
+        return Spot(
+            name=self.building or "their building",
+            latitude=self.latitude,
+            longitude=self.longitude,
+            kind="dormitory",
+        )
+
+
+@dataclass
 class Watch:
     """A standing search of other sites for one buyer, polled until it expires."""
 
@@ -257,6 +321,16 @@ _DEAL_COLUMNS = (
     "payment_ref, payment_url, commission_cents, payout_cents, paid_at"
 )
 _COUNTER_COLUMNS = "item_id, buyer, offer_cents, counter_cents, expires_at, rounds, agreed"
+_STUDENT_COLUMNS = (
+    "owner, email, school, verified_at, building, latitude, longitude, code_hash, "
+    "code_expires_at, code_attempts"
+)
+
+
+def _student(row: sqlite3.Row) -> Student:
+    return Student(**dict(row))
+
+
 _WATCH_COLUMNS = (
     "watch_id, owner, query, scope, budget_cents, sources, every_seconds, created_at, "
     "expires_at, last_run_at, stopped"
@@ -757,3 +831,126 @@ class Store:
 
     def mark_told(self, watch_id: str) -> None:
         self._db.execute("UPDATE watch_hits SET told = 1 WHERE watch_id = ?", (watch_id,))
+
+    # --- Students and campuses --------------------------------------------------------------
+    # On campus, Yardsale is same-school only: a listing is visible and buyable only to students
+    # with a verified email at the same school. A student's building is kept so meeting points
+    # can be worked out, and is never shown to anybody else.
+
+    def student(self, owner: str) -> Student | None:
+        row = self._db.execute(
+            f"SELECT {_STUDENT_COLUMNS} FROM students WHERE owner = ?", (owner,)
+        ).fetchone()
+        return _student(row) if row else None
+
+    def save_code(
+        self, owner: str, email: str, school: str, code_hash: str, expires_at: float
+    ) -> Student:
+        """Start or restart verification. A fresh code clears any earlier verification, so
+        changing email can't keep the old school."""
+        self._db.execute(
+            "INSERT INTO students (owner, email, school, verified_at, code_hash,"
+            " code_expires_at, code_attempts) VALUES (?, ?, ?, NULL, ?, ?, 0)"
+            " ON CONFLICT (owner) DO UPDATE SET email = excluded.email,"
+            " school = excluded.school, verified_at = NULL, code_hash = excluded.code_hash,"
+            " code_expires_at = excluded.code_expires_at, code_attempts = 0",
+            (owner, email, school, code_hash, expires_at),
+        )
+        student = self.student(owner)
+        assert student is not None
+        return student
+
+    def count_attempt(self, owner: str) -> int:
+        """Record a wrong code and return how many there have been."""
+        self._db.execute(
+            "UPDATE students SET code_attempts = code_attempts + 1 WHERE owner = ?", (owner,)
+        )
+        row = self._db.execute(
+            "SELECT code_attempts AS n FROM students WHERE owner = ?", (owner,)
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def mark_verified(self, owner: str) -> Student | None:
+        """Finish verification and destroy the code, so a hash can never be reused."""
+        changed = self._db.execute(
+            "UPDATE students SET verified_at = ?, code_hash = NULL, code_expires_at = NULL,"
+            " code_attempts = 0 WHERE owner = ? AND verified_at IS NULL",
+            (self.clock(), owner),
+        ).rowcount
+        return self.student(owner) if changed else None
+
+    def clear_code(self, owner: str) -> None:
+        """Throw away a code that's expired or been guessed at too often."""
+        self._db.execute(
+            "UPDATE students SET code_hash = NULL, code_expires_at = NULL WHERE owner = ?",
+            (owner,),
+        )
+
+    def set_building(self, owner: str, name: str, latitude: float, longitude: float) -> None:
+        self._db.execute(
+            "UPDATE students SET building = ?, latitude = ?, longitude = ? WHERE owner = ?",
+            (name, latitude, longitude, owner),
+        )
+
+    def save_campus(self, school: str, places: list[Spot]) -> int:
+        """Replace a school's cached places. Returns how many were kept."""
+        with self._transaction() as db:
+            db.execute("DELETE FROM campus_places WHERE school = ?", (school,))
+            db.executemany(
+                "INSERT OR IGNORE INTO campus_places"
+                " (school, name, kind, latitude, longitude, indoor, opening_hours)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        school,
+                        place.name,
+                        place.kind,
+                        place.latitude,
+                        place.longitude,
+                        int(place.indoor),
+                        place.opening_hours,
+                    )
+                    for place in places
+                ],
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO campus_loaded VALUES (?, ?, ?)",
+                (school, self.clock(), len(places)),
+            )
+        return self.count_campus(school)
+
+    def campus(self, school: str) -> list[Spot]:
+        return [
+            Spot(
+                name=row["name"],
+                latitude=row["latitude"],
+                longitude=row["longitude"],
+                kind=row["kind"],
+                indoor=bool(row["indoor"]),
+                opening_hours=row["opening_hours"],
+            )
+            for row in self._db.execute(
+                "SELECT name, kind, latitude, longitude, indoor, opening_hours"
+                " FROM campus_places WHERE school = ? ORDER BY kind, name",
+                (school,),
+            )
+        ]
+
+    def count_campus(self, school: str) -> int:
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM campus_places WHERE school = ?", (school,)
+        ).fetchone()
+        return int(row["n"])
+
+    def campus_loaded(self, school: str) -> bool:
+        """Whether this school's places have been fetched, so it's only fetched once."""
+        return self.count_campus(school) > 0
+
+    def schools_with_students(self) -> list[str]:
+        """Schools that have a verified student, so their campuses can be warmed."""
+        return [
+            row["school"]
+            for row in self._db.execute(
+                "SELECT DISTINCT school FROM students WHERE verified_at IS NOT NULL"
+            )
+        ]
