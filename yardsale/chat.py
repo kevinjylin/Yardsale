@@ -1837,7 +1837,15 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 f"Nothing is for sale{about}{under} right now. Try other words, or ask "
                 '"what\'s for sale?"'
             )
-        return Reply(results_text(found, query, conv.owner), results_card(found))
+        reply = Reply(results_text(found, query, conv.owner), results_card(found))
+        if finder.enabled and search_words(query):
+            # Yardsale's listings first, then the best deals on other sites, every time: a
+            # buyer should see the whole market, not only what's listed here.
+            words = search_words(query)
+            conv.last_query = words
+            text = f"{reply.text}\n\nI'm also checking {finder.site_names()} for more."
+            return reply._replace(text=text, elsewhere=(words, budget_cents))
+        return reply
 
     def pick(conv: Conversation, number: int) -> str:
         if not 1 <= number <= len(conv.results):
@@ -2084,7 +2092,15 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         finally:
             searching.pop(key, None)
         text = f"{reply.text}\n\n{elsewhere_text(found, finder.site_names())}"
-        return Reply(text, elsewhere_card(found) or reply.card, reply.more)
+        card = elsewhere_card(found)
+        if reply.card is not None and card is not None:
+            # Yardsale's own results keep their card; the deals follow as a second message.
+            return Reply(
+                reply.text,
+                reply.card,
+                (*reply.more, (elsewhere_text(found, finder.site_names()), card)),
+            )
+        return Reply(text, card or reply.card, reply.more)
 
     def watch(conv: Conversation, command: commands.Command | None) -> str:
         """A standing search over other sites (watches.py), from the message or the last search."""

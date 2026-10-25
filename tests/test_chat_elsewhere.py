@@ -133,11 +133,17 @@ async def test_deals_are_scored_against_what_the_item_sells_for(
     assert ebay.calls == ["road bike"]
 
 
-async def test_yardsale_listings_come_first(shop: sim.Market, ebay: Site) -> None:
+async def test_yardsale_listings_come_first_then_other_sites(shop: sim.Market, ebay: Site) -> None:
+    """A buyer sees Yardsale's own listings and, every time, the best deals elsewhere too."""
     await list_bike(shop, 360, 300)
-    reply = await shop.user("buyer").say("find me a hybrid bike")
-    assert "Here's what's for sale" in reply and "other sites" not in reply
-    assert ebay.calls == []  # nothing paid for
+    buyer = shop.user("buyer")
+    reply = await buyer.say("find me a hybrid bike")
+    assert reply.startswith("Here's what's for sale")
+    assert "also checking" in reply
+    assert ebay.calls  # other sites were searched as well
+    deals = await buyer.next_reply()  # the deals arrive as a second message
+    assert "Best deals on other sites" in deals.text()
+    assert card_in(deals) is not None  # the deals carousel, after Yardsale's own results card
 
 
 async def test_without_sources_nothing_is_searched_elsewhere(store: Store) -> None:
