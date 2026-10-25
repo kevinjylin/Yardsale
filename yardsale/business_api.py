@@ -1,19 +1,29 @@
 """Yardsale's HTTP API for @yardsale, its Fetch Business agent.
 
 Fetch Business's "OpenAPI Integration" (a Business Tool) lets @yardsale call an outside API from
-its own chat. With this API, @yardsale can find, haggle for, and sell a listing itself, instead of
-telling buyers to message the Market:
+its own chat. Fetch reads /openapi.json and makes one tool per operation, so the descriptions
+below are written for the model that picks between them. The two products come first: deals for
+buyers (Yardsale's listings, then the best deals on other sites) and prices for sellers (what
+something is worth, from real eBay sales). Haggling and buying stay available but are marked
+"advanced", so @yardsale reaches for search and price checks first:
 
-    GET  /listings                search what's for sale (asking prices only)
-    POST /haggles                 the buyer agent haggles with every match at once, under a max
+    GET  /listings                search what's for sale on Yardsale (asking prices only)
+    GET  /other-sites             the best deals on eBay, Craigslist, OfferUp... under a max,
+                                  with a deal score when the finder gives one (links only)
+    GET  /price-check             what an item is worth: recent eBay sold prices for the words,
+                                  plus local asking prices when a Scout agent is running
+    POST /haggles                 advanced: the buyer agent haggles with every match at once
     GET  /haggles/{id}            a haggle that was still running when POST answered
-    POST /haggles/{id}/accept     buy at the haggled price; returns the payment link
+    POST /haggles/{id}/accept     advanced: buy at the haggled price; returns the payment link
     GET  /deals/{id}              whether a deal is paid
-    GET  /other-sites             the best deals on eBay, Craigslist, OfferUp... under a max, for
-                                  when Yardsale has nothing (not Yardsale listings: links only)
     GET  /openapi.json            this API's description (no key needed)
     GET  /ebay/callback           where eBay sends a seller after connecting their account (no
                                   key; its one-time `state` is checked instead). Not a tool.
+
+Photos can't come through this API. A seller with a photo is sent to the Market agent
+(@ys-orchestrator) in ASI:One, where Claude reads the photo; ASI:One's models read typed text
+only. A price check here matches eBay sales by the seller's words, without Claude's same-product
+judgement, so it says so.
 
 Every call except /openapi.json needs the X-Yardsale-Key header (or "Authorization: Bearer") to
 match YARDSALE_API_KEY. Without that key the API doesn't start. It listens on
@@ -31,12 +41,14 @@ import asyncio
 import contextlib
 import hmac
 import html
+import importlib
 import logging
 import os
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import uuid4
 
 from aiohttp import web
 from uagents import Context
@@ -46,9 +58,28 @@ from yardsale.common import PipelineError
 from yardsale.ebay_seller import EbayError
 from yardsale.elsewhere import Found, search_words, site_name
 from yardsale.hosting import profile_url
-from yardsale.models import AcceptCounter, Counter, Deal, HaggleResult, OfferRejected
+from yardsale.models import (
+    AcceptCounter,
+    Comp,
+    Counter,
+    Deal,
+    HaggleResult,
+    OfferRejected,
+    ResearchRequest,
+    ResearchResult,
+)
 from yardsale.payments import PaymentError
-from yardsale.pricing import PriceError, parse_usd, to_cents, usd, valid_cents
+from yardsale.pricing import (
+    PriceError,
+    median,
+    parse_usd,
+    quartiles,
+    round_cents,
+    round_price,
+    to_cents,
+    usd,
+    valid_cents,
+)
 from yardsale.search import search
 from yardsale.sources import ExternalListing
 from yardsale.store import AGENTVERSE, PENDING, Listing
@@ -59,6 +90,15 @@ EBAY_CALLBACK = "/ebay/callback"  # eBay's redirect after a seller connects (eba
 ANSWER_WITHIN = 25.0  # seconds POST /haggles waits before answering "still haggling"
 QUOTES_LAST = 24 * 3600  # seconds a haggled price can be accepted, like the item agents' counters
 BUYER_PREFIX = "api-"  # buyer_ref of an API buyer; its deals are "chat:api-..."
+PRICE_CHECK_CACHE = 600.0  # seconds a price check's sales are reused (each one is a paid search)
+PRICE_CHECK_SALES = 20  # eBay sales asked for, like a photo listing
+PRICE_CHECK_EXAMPLES = 3  # sales shown, like the proposal's "closest sales"
+PRICE_CHECK_WAIT = 180.0  # seconds to wait for the Researcher, which may queue behind photos
+SCOUT_WAIT = 20.0  # seconds a Scout agent gets before its local block is left out
+MAX_CACHED_CHECKS = 64
+
+# (ctx, query) -> recent eBay sold listings. The default asks the Market's Researcher agent.
+ResearchComps = Callable[[Context, str], Awaitable[list[Comp]]]
 # Short and lowercase, without look-alikes (0/o, 1/l/i), so a model passing it along copies it
 # right. Every call needs the API key, so the ID doesn't have to be hard to guess.
 ID_LETTERS = "abcdefghjkmnpqrstuvwxyz23456789"
@@ -142,6 +182,14 @@ def _external_json(listing: ExternalListing) -> dict[str, Any]:
     }
     if listing.image_url:
         data["image_url"] = listing.image_url
+    # The deal finder may score each listing (elsewhere.py). Older results have neither field,
+    # and the description marks both optional, so a tool runner copes either way.
+    score = getattr(listing, "score", None)
+    if isinstance(score, int | float) and not isinstance(score, bool) and score == score:
+        data["score"] = float(score)
+    reason = getattr(listing, "reason", None)
+    if isinstance(reason, str) and reason.strip():
+        data["reason"] = reason.strip()[:300]
     return data
 
 
@@ -149,25 +197,125 @@ def _other_sites_json(found: Found, sites: str) -> dict[str, Any]:
     failed = [site_name(name) for name in found.failed]
     if found.listings:
         next_step = (
-            "Show the buyer these deals with their links. They aren't Yardsale listings: "
-            "Yardsale's agents can't haggle for them or take payment, so the buyer opens the link "
-            "to buy from the seller. Craigslist sellers usually take offers by email."
+            "Show the buyer each deal with its site, price, score and reason when given, and "
+            "its link. They aren't Yardsale listings: Yardsale's agents can't haggle for them or "
+            "take payment, so the buyer opens the link to buy from the seller. Craigslist sellers "
+            "usually take offers by email."
         )
     else:
         next_step = "Nothing fits on other sites either. Try other words or a higher max."
     unsearched = f" ({', '.join(failed)} couldn't be searched)" if failed else ""
+    listings = [_external_json(listing) for listing in found.listings]
+    scored = any("score" in listing for listing in listings)
+    order = "Best deal first (highest score)." if scored else "Best match first, then cheapest."
     return {
         "status": "done",
         "count": len(found.listings),
-        "listings": [_external_json(listing) for listing in found.listings],
+        "listings": listings,
         "searched": [site_name(name) for name in found.searched],
         "failed": failed,
-        "summary": (
-            f"{len(found.listings)} deal(s) on {sites}{unsearched}. Best match first, then "
-            "cheapest total price."
-        ),
+        "summary": f"{len(found.listings)} deal(s) on {sites}{unsearched}. {order}",
         "next_step": next_step,
     }
+
+
+# --- Price checks ------------------------------------------------------------------------------
+
+
+def _price_cents(comps: list[Comp]) -> list[int]:
+    """The sold prices a summary is made from. An accepted Best Offer shows the list price, not
+    what was paid, so those are left out whenever there are others (as appraise() does)."""
+    paid = [c.price_cents for c in comps if not c.best_offer]
+    return paid or [c.price_cents for c in comps]
+
+
+def comps_summary(query: str, comps: list[Comp]) -> dict[str, Any]:
+    """What recent eBay sales say an item sells for, in plain code (no model sets a price).
+
+    The typical price is the median; the usual range is the lower and upper quartiles; the
+    suggested asking price is the median rounded the way a person would price it. The sales
+    match the words only: without a photo, nobody has checked that each one is the same product.
+    """
+    if not comps:
+        return {
+            "query": query,
+            "count": 0,
+            "typical_usd": None,
+            "low_usd": None,
+            "high_usd": None,
+            "suggested_asking_usd": None,
+            "basis": "No eBay sales in the last 90 days matched those words.",
+            "examples": [],
+        }
+    prices = _price_cents(comps)
+    middle = median(prices)
+    low, high = quartiles(prices)
+    skipped = len(comps) - len(prices)
+    basis = f"{len(prices)} eBay sales in the last 90 days matching the words"
+    if skipped:
+        basis += f" (left out {skipped} accepted Best Offer sale{'s' if skipped != 1 else ''})"
+    basis += (
+        ". Matched by title, not by photo, so some may be a different model or a bundle; a "
+        "photo sent to @ys-orchestrator gets each sale checked."
+    )
+    examples = [
+        {
+            "title": c.title,
+            "sold_usd": dollars(c.price_cents),
+            "sold_at": c.sold_at,
+            "condition": c.condition,
+            "url": c.url,
+        }
+        for c in sorted(comps, key=lambda c: abs(c.price_cents - middle))[:PRICE_CHECK_EXAMPLES]
+    ]
+    return {
+        "query": query,
+        "count": len(prices),
+        "typical_usd": dollars(round_cents(middle)),
+        "low_usd": dollars(round_cents(low)),
+        "high_usd": dollars(round_cents(high)),
+        "suggested_asking_usd": dollars(round_price(middle)),
+        "basis": basis,
+        "examples": examples,
+    }
+
+
+async def research_via_market(ctx: Context, query: str) -> list[Comp]:
+    """Ask the Market's Researcher agent (the same one photo listings use) for recent sales."""
+    from yardsale import bureau_server  # it imports this module, so not at import time
+
+    rt = bureau_server.runtime()
+    result = await bureau_server.call_service(
+        ctx,
+        rt.services.researcher,
+        ResearchRequest(
+            request_id=uuid4().hex, query=query, condition="used", max_results=PRICE_CHECK_SALES
+        ),
+        ResearchResult,
+        PRICE_CHECK_WAIT,
+    )
+    return result.comps
+
+
+async def scout_local(query: str, zip_code: str) -> dict[str, Any] | None:
+    """What a Scout agent (yardsale/scout.py) says things like this are asking for nearby. The
+    module is another agent's work: it's used only if it imports and has `local_prices(query,
+    zip_code)` returning a JSON-able dict; anything else leaves the block out."""
+    try:
+        scout = importlib.import_module("yardsale.scout")
+    except ImportError:
+        return None
+    local_prices = getattr(scout, "local_prices", None)
+    if not callable(local_prices):
+        return None
+    try:
+        answer = local_prices(query, zip_code)
+        if asyncio.iscoroutine(answer):
+            answer = await asyncio.wait_for(answer, SCOUT_WAIT)
+    except Exception as ex:  # a scout failure never fails the price check
+        log.warning(f"Price check: the Scout couldn't answer ({type(ex).__name__})")
+        return None
+    return dict(answer) if isinstance(answer, dict) and answer else None
 
 
 def _amount(value: Any) -> int | None:
@@ -197,6 +345,8 @@ class BusinessApi:
         public_url: str | None = None,
         answer_within: float = ANSWER_WITHIN,
         clock: Callable[[], float] = time.time,
+        research: ResearchComps = research_via_market,
+        cache_for: float = PRICE_CHECK_CACHE,
     ) -> None:
         self.backend = backend
         self.store = backend.store
@@ -205,7 +355,11 @@ class BusinessApi:
         self.public_url = public_url.rstrip("/") if public_url else None
         self.answer_within = answer_within
         self.clock = clock
+        self.research = research
+        self.cache_for = cache_for
         self.running: dict[str, asyncio.Task[HaggleResult]] = {}
+        # (words, zip) -> (started, the check). A running check is joined, a finished one reused.
+        self.checks: dict[tuple[str, str], tuple[float, asyncio.Task[dict[str, Any]]]] = {}
 
     # --- Plumbing ---------------------------------------------------------------------------
 
@@ -213,11 +367,12 @@ class BusinessApi:
         app = web.Application(middlewares=[self._log, self._auth])
         app.router.add_get("/openapi.json", self.openapi)
         app.router.add_get("/listings", self.listings)
+        app.router.add_get("/other-sites", self.other_sites)
+        app.router.add_get("/price-check", self.price_check)
         app.router.add_post("/haggles", self.start_haggle)
         app.router.add_get("/haggles/{haggle_id}", self.get_haggle)
         app.router.add_post("/haggles/{haggle_id}/accept", self.accept)
         app.router.add_get("/deals/{deal_id}", self.get_deal)
-        app.router.add_get("/other-sites", self.other_sites)
         app.router.add_get(EBAY_CALLBACK, self.ebay_callback)
         return app
 
@@ -337,6 +492,90 @@ class BusinessApi:
                 }
             )
         return web.json_response(_other_sites_json(found, finder.site_names()))
+
+    # --- Price checks -----------------------------------------------------------------------
+
+    def _forget_old_checks(self) -> None:
+        now = self.clock()
+        for key, (started, task) in list(self.checks.items()):
+            failed = task.done() and (task.cancelled() or task.exception() is not None)
+            if (task.done() and now - started > self.cache_for) or failed:
+                del self.checks[key]
+        while len(self.checks) > MAX_CACHED_CHECKS:
+            oldest = min(self.checks, key=lambda k: self.checks[k][0])
+            if not self.checks[oldest][1].done():
+                break
+            del self.checks[oldest]
+
+    async def _check(self, query: str, zip_code: str) -> dict[str, Any]:
+        started = time.monotonic()
+        comps, local = await asyncio.gather(
+            self.research(self.context(), query), scout_local(query, zip_code)
+        )
+        summary = comps_summary(query, comps)
+        if local is not None:
+            summary["local"] = local
+        log.info(
+            f"API price check: {summary['count']} sale(s){' and local prices' if local else ''} "
+            f"in {time.monotonic() - started:.1f}s"
+        )
+        return summary
+
+    async def price_check(self, request: web.Request) -> web.Response:
+        """What something is worth, from recent eBay sales (the Researcher) and, when a Scout
+        agent is running, local asking prices. Cached per query; a check still running after
+        answer_within seconds keeps going, and the same q picks it up."""
+        query = " ".join(request.query.get("q", "").split())[:200]
+        if not search_words(query):
+            return _error(
+                400, 'Say what the item is in q, like "Trek FX 2 hybrid bike".', "bad_request"
+            )
+        zip_code = request.query.get("zip", "").strip()[:10]
+        if zip_code and not zip_code.replace("-", "").isalnum():
+            return _error(400, "zip must be a postal code, like 94704.", "bad_request")
+        self._forget_old_checks()
+        key = (query.lower(), zip_code)
+        cached = self.checks.get(key)
+        if cached is None:
+            task = asyncio.ensure_future(self._check(query, zip_code))
+            self.checks[key] = (self.clock(), task)
+        else:
+            task = cached[1]
+        try:
+            summary = await asyncio.wait_for(asyncio.shield(task), self.answer_within)
+        except TimeoutError:
+            return web.json_response(
+                {
+                    "status": "running",
+                    "query": query,
+                    "count": 0,
+                    "summary": "Yardsale is looking up recent eBay sales.",
+                    "next_step": "Call priceCheck again with the same q (and zip). It picks up "
+                    "the same check and waits for the result.",
+                }
+            )
+        except PipelineError as ex:
+            return _error(502, f"Yardsale couldn't look up eBay sales: {ex}", "research_failed")
+        except Exception:
+            log.exception("Price check failed")
+            return _error(502, "Yardsale couldn't look up eBay sales right now.", "research_failed")
+        if summary["count"]:
+            next_step = (
+                "Tell the seller the typical price and the usual range, say they come from real "
+                "eBay sales of the last 90 days matched by title, and show the example sales as "
+                "links. To list the item, they attach a photo in a message to @ys-orchestrator "
+                "in ASI:One (Claude reads the photo and checks each sale against it); the "
+                "minimum they set stays private."
+            )
+        else:
+            next_step = (
+                "Ask for the brand and model, or other words a listing title would have, and "
+                "call priceCheck again. To sell it anyway, the seller attaches a photo in a "
+                "message to @ys-orchestrator in ASI:One and names their price."
+            )
+        if "local" in summary:
+            next_step += " The local block is what similar items are asking for nearby right now."
+        return web.json_response({"status": "done", **summary, "next_step": next_step})
 
     # --- Haggling ---------------------------------------------------------------------------
 
@@ -664,11 +903,70 @@ _EXTERNAL = {
         "price_usd": {"type": "number", "nullable": True},
         "shipping_usd": {"type": "number", "nullable": True, "description": "Unknown: null"},
         "total_usd": {"type": "number", "nullable": True, "description": "Price plus shipping"},
-        "url": {"type": "string", "description": "The listing on its own site"},
+        "url": {
+            "type": "string",
+            "description": "The listing on its own site: give the buyer this",
+        },
         "location": {"type": "string"},
         "condition": {"type": "string"},
         "accepts_offers": {"type": "boolean", "description": "The site lets the buyer offer"},
         "image_url": {"type": "string"},
+        "score": {
+            "type": "number",
+            "description": (
+                "Deal score, higher is better, when Yardsale scored this listing. Missing when "
+                "it didn't; don't make one up."
+            ),
+        },
+        "reason": {
+            "type": "string",
+            "description": (
+                "Why it scored that way, in a sentence (price against recent sales, condition, "
+                "distance). Missing when there's no score."
+            ),
+        },
+    },
+}
+_SALE = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "sold_usd": _MONEY,
+        "sold_at": {"type": "string", "description": "YYYY-MM-DD"},
+        "condition": {"type": "string"},
+        "url": {"type": "string", "description": "The sale on eBay"},
+    },
+}
+_PRICE_CHECK = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["running", "done"]},
+        "query": {"type": "string"},
+        "count": {"type": "integer", "description": "Sales the prices come from"},
+        "typical_usd": {"type": "number", "nullable": True, "description": "Median sold price"},
+        "low_usd": {"type": "number", "nullable": True, "description": "Lower quartile"},
+        "high_usd": {"type": "number", "nullable": True, "description": "Upper quartile"},
+        "suggested_asking_usd": {
+            "type": "number",
+            "nullable": True,
+            "description": "The typical price rounded the way sellers price",
+        },
+        "basis": {"type": "string", "description": "Where the numbers come from, for the seller"},
+        "examples": {
+            "type": "array",
+            "items": _SALE,
+            "description": "Up to 3 sales nearest the typical price, with links",
+        },
+        "local": {
+            "type": "object",
+            "additionalProperties": True,
+            "description": (
+                "Only when Yardsale's Scout agent is running: what similar items are asking "
+                "for nearby (Craigslist, OfferUp, Facebook Marketplace). Missing otherwise."
+            ),
+        },
+        "summary": {"type": "string"},
+        "next_step": {"type": "string"},
     },
 }
 _HAGGLE = {
@@ -746,11 +1044,21 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
             "title": "Yardsale",
             "version": "1.0.0",
             "description": (
-                "Yardsale sells used, one-of-a-kind items. Each item has its own AI agent that "
-                "holds the seller's private lowest price. Yardsale's buyer agent haggles with "
-                "every matching item's agent at once without revealing the buyer's max. Use it "
-                "to find used items, haggle for the buyer, and buy with a payment link. Prices "
-                "are in US dollars."
+                "Yardsale does two things. For buyers: say what you want and the most you'll "
+                "pay, and Yardsale finds the best deals, first among its own listings "
+                "(searchListings), then across eBay, Craigslist, OfferUp and Facebook "
+                "Marketplace with a deal score and a reason for each (searchOtherSites). For "
+                "sellers: say what you have and get what it's worth from real eBay sales of "
+                "the last 90 days, and what similar items are asking nearby (priceCheck). To "
+                "list an item for sale, a seller attaches a photo in a message to Yardsale's "
+                "Market agent, @ys-orchestrator, in ASI:One: Claude reads the photo and prices "
+                "it from matching sales; ASI:One's models read typed text only, and this API "
+                "takes no photos. Each listed item has its own agent that holds the seller's "
+                "private lowest price. Advanced: Yardsale's buyer agent can haggle with every "
+                "matching item's agent at once under the buyer's max and buy with a payment "
+                "link (startHaggle, acceptDeal); use those only when the buyer asks to haggle "
+                "or buy. Never invent listings, prices, or sales: every number comes from a "
+                "call. Prices are in US dollars."
             ),
         },
         "servers": [{"url": base_url}],
@@ -762,10 +1070,14 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
             "/listings": {
                 "get": {
                     "operationId": "searchListings",
-                    "summary": "Find used items for sale",
+                    "summary": "Find used items for sale on Yardsale",
                     "description": (
-                        "Search Yardsale's listings by words, optionally under a budget. Shows "
-                        "asking prices. Use it when a customer asks what's for sale."
+                        "Start here when a buyer wants something. Searches Yardsale's own "
+                        "listings by words, optionally under a budget, and shows asking prices "
+                        "(never a seller's lowest price). Each result has its own agent, so a "
+                        "buyer can haggle (startHaggle) and pay through Yardsale. When count is "
+                        "0, call searchOtherSites with the same words and max for deals on "
+                        "other sites."
                     ),
                     "parameters": [
                         {
@@ -797,125 +1109,20 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                     },
                 }
             },
-            "/haggles": {
-                "post": {
-                    "operationId": "startHaggle",
-                    "summary": "Haggle for the buyer with every matching seller at once",
-                    "description": (
-                        "Use it when a customer wants a used item for less, or says the most "
-                        "they'll pay. Yardsale's buyer agent haggles over several rounds with "
-                        "every matching item's agent at once and never offers more than max_usd "
-                        "or tells the sellers the max. Answers within about 25 seconds. If "
-                        "status is running, call getHaggle with the haggle_id, which waits for "
-                        "the result. Show the buyer the summary, then ask whether to buy the "
-                        "best deal."
-                    ),
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "required": ["looking_for", "max_usd"],
-                                    "properties": {
-                                        "looking_for": {
-                                            "type": "string",
-                                            "description": 'What the buyer wants, like "hybrid '
-                                            'bike"',
-                                        },
-                                        "max_usd": {
-                                            "type": "number",
-                                            "description": "The most the buyer will pay",
-                                        },
-                                    },
-                                }
-                            }
-                        },
-                    },
-                    "responses": {
-                        "200": _ok(_HAGGLE, "The haggle, finished or still running"),
-                        "400": _ERROR,
-                        "401": _ERROR,
-                    },
-                }
-            },
-            "/haggles/{haggle_id}": {
-                "get": {
-                    "operationId": "getHaggle",
-                    "summary": "Get a haggle's result",
-                    "description": (
-                        "Use it when startHaggle answered with status running. Waits up to about "
-                        "25 seconds for the result; if it's still running, call it again."
-                    ),
-                    "parameters": [_haggle_id_param()],
-                    "responses": {
-                        "200": _ok(_HAGGLE, "The haggle, finished or still running"),
-                        "404": _ERROR,
-                        "502": _ERROR,
-                    },
-                }
-            },
-            "/haggles/{haggle_id}/accept": {
-                "post": {
-                    "operationId": "acceptDeal",
-                    "summary": "Buy at the haggled price and get the payment link",
-                    "description": (
-                        "Use it only after the buyer says yes to a price from startHaggle. "
-                        "Without item_id it buys the best deal. Returns a payment link to give "
-                        "the buyer."
-                    ),
-                    "parameters": [_haggle_id_param()],
-                    "requestBody": {
-                        "required": False,
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "item_id": {
-                                            "type": "string",
-                                            "description": "Another item from the haggle; "
-                                            "leave out for the best deal",
-                                        }
-                                    },
-                                }
-                            }
-                        },
-                    },
-                    "responses": {
-                        "200": _ok(_DEAL, "Bought: here's the payment link"),
-                        "404": _ERROR,
-                        "409": _ERROR,
-                        "502": _ERROR,
-                    },
-                }
-            },
-            "/deals/{deal_id}": {
-                "get": {
-                    "operationId": "getDeal",
-                    "summary": "Check whether a purchase is paid",
-                    "parameters": [
-                        {
-                            "name": "deal_id",
-                            "in": "path",
-                            "required": True,
-                            "schema": {"type": "string"},
-                        }
-                    ],
-                    "responses": {"200": _ok(_DEAL, "The deal"), "404": _ERROR},
-                }
-            },
             "/other-sites": {
                 "get": {
                     "operationId": "searchOtherSites",
-                    "summary": "Find the best deals on other sites when Yardsale has none",
+                    "summary": "Find the best deals on eBay, Craigslist, OfferUp and Facebook",
                     "description": (
-                        "Use it when searchListings or startHaggle finds nothing on Yardsale. "
-                        "Searches eBay, Craigslist, OfferUp, and other sites once and returns the "
-                        "best few listings at or under max_usd (price plus shipping), best match "
-                        "first. These are NOT Yardsale listings: no haggling or payment through "
-                        "Yardsale, so give the buyer the links. Answers within about 25 seconds; "
-                        "if status is running, call it again with the same q and max_usd."
+                        "Use it when searchListings finds nothing on Yardsale, or when the buyer "
+                        "asks what's out there. Searches eBay, Craigslist, OfferUp and Facebook "
+                        "Marketplace live, once, and returns the best few listings at or under "
+                        "max_usd (price plus shipping). Each listing has its site, title, price, "
+                        "total with shipping, and url, and when Yardsale scored it, a score "
+                        "(higher is better) and a reason; show those to the buyer. These are "
+                        "NOT Yardsale listings: no haggling or payment through Yardsale, so give "
+                        "the buyer the links. Answers within about 25 seconds; if status is "
+                        "running, call it again with the same q and max_usd."
                     ),
                     "parameters": [
                         {
@@ -952,6 +1159,165 @@ def openapi_spec(base_url: str) -> dict[str, Any]:
                         "401": _ERROR,
                         "503": _ERROR,
                     },
+                }
+            },
+            "/price-check": {
+                "get": {
+                    "operationId": "priceCheck",
+                    "summary": "What a used item is worth, from real eBay sales",
+                    "description": (
+                        "Use it when someone asks what their item is worth or what to ask for it "
+                        '("what\'s my Trek FX 2 worth?"). Looks up eBay sales of the last 90 '
+                        "days matching the words and works out the typical price, the usual "
+                        "range, and a suggested asking price in plain code, with up to 3 example "
+                        "sales as links. The sales are matched by title, not by photo, so say "
+                        "so. With zip, and when Yardsale's Scout agent is running, a local block "
+                        "says what similar items are asking for nearby. Photos can't be sent "
+                        "here: to list the item, or to have each sale checked against a photo, "
+                        "the seller attaches the photo in a message to @ys-orchestrator in "
+                        "ASI:One (Claude reads photos; ASI:One's models read typed text only). "
+                        "Answers within about 25 seconds; if status is running, call it again "
+                        "with the same q."
+                    ),
+                    "parameters": [
+                        {
+                            "name": "q",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": (
+                                "The item as a listing title would name it: brand, model, size, "
+                                'like "Trek FX 2 Disc hybrid bike medium"'
+                            ),
+                        },
+                        {
+                            "name": "zip",
+                            "in": "query",
+                            "schema": {"type": "string"},
+                            "description": "The seller's ZIP code, for local asking prices",
+                        },
+                    ],
+                    "responses": {
+                        "200": _ok(_PRICE_CHECK, "The price check, finished or still running"),
+                        "400": _ERROR,
+                        "401": _ERROR,
+                        "502": _ERROR,
+                    },
+                }
+            },
+            "/haggles": {
+                "post": {
+                    "operationId": "startHaggle",
+                    "summary": "Advanced: haggle for the buyer with every matching Yardsale seller",
+                    "description": (
+                        "Advanced. Use it only when the buyer asks Yardsale to haggle or to get "
+                        "a lower price on a Yardsale listing, after searchListings found some. "
+                        "Yardsale's buyer agent haggles over several rounds with every matching "
+                        "item's agent at once and never offers more than max_usd or tells the "
+                        "sellers the max. Answers within about 25 seconds. If status is running, "
+                        "call getHaggle with the haggle_id, which waits for the result. Show the "
+                        "buyer the summary, then ask whether to buy the best deal. It can't "
+                        "haggle for listings on other sites."
+                    ),
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["looking_for", "max_usd"],
+                                    "properties": {
+                                        "looking_for": {
+                                            "type": "string",
+                                            "description": 'What the buyer wants, like "hybrid '
+                                            'bike"',
+                                        },
+                                        "max_usd": {
+                                            "type": "number",
+                                            "description": "The most the buyer will pay",
+                                        },
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": _ok(_HAGGLE, "The haggle, finished or still running"),
+                        "400": _ERROR,
+                        "401": _ERROR,
+                    },
+                }
+            },
+            "/haggles/{haggle_id}": {
+                "get": {
+                    "operationId": "getHaggle",
+                    "summary": "Advanced: get a haggle's result",
+                    "description": (
+                        "Advanced. Use it only when startHaggle answered with status running. "
+                        "Waits up to about 25 seconds for the result; if it's still running, "
+                        "call it again."
+                    ),
+                    "parameters": [_haggle_id_param()],
+                    "responses": {
+                        "200": _ok(_HAGGLE, "The haggle, finished or still running"),
+                        "404": _ERROR,
+                        "502": _ERROR,
+                    },
+                }
+            },
+            "/haggles/{haggle_id}/accept": {
+                "post": {
+                    "operationId": "acceptDeal",
+                    "summary": "Advanced: buy at the haggled price and get the payment link",
+                    "description": (
+                        "Advanced. Use it only after the buyer says yes to a price from "
+                        "startHaggle. Without item_id it buys the best deal. Returns a payment "
+                        "link (test mode) to give the buyer; only the payment provider decides "
+                        "that a deal is paid."
+                    ),
+                    "parameters": [_haggle_id_param()],
+                    "requestBody": {
+                        "required": False,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "item_id": {
+                                            "type": "string",
+                                            "description": "Another item from the haggle; "
+                                            "leave out for the best deal",
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": _ok(_DEAL, "Bought: here's the payment link"),
+                        "404": _ERROR,
+                        "409": _ERROR,
+                        "502": _ERROR,
+                    },
+                }
+            },
+            "/deals/{deal_id}": {
+                "get": {
+                    "operationId": "getDeal",
+                    "summary": "Advanced: check whether a purchase is paid",
+                    "description": (
+                        "Advanced. Use it only for a deal_id acceptDeal returned, when the buyer "
+                        "asks whether their payment went through."
+                    ),
+                    "parameters": [
+                        {
+                            "name": "deal_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {"200": _ok(_DEAL, "The deal"), "404": _ERROR},
                 }
             },
             "/openapi.json": {
