@@ -313,8 +313,8 @@ From the workbench at `business.fetch.ai/workbench`:
 
 - Brand Studio: a description of Yardsale and five starter prompts (finding a deal, selling,
   paying, haggling, pricing).
-- Business Information: a Plain Text entry explaining how buying and selling work and naming the
-  Market agent, `@ys-orchestrator`, with its address.
+- Business Information: a Plain Text entry explaining that buying happens with `@yardsale`'s
+  tools and that sellers go to the Market agent, `@ys-orchestrator`, with its address.
 - Skills: "Find, haggle for, and buy used items on Yardsale", a playbook that says which
   Yardsale tool to call for browsing, haggling, buying, and checking a payment, never to make
   up listings, and to send sellers (who need to attach a photo) to `@ys-orchestrator`.
@@ -341,7 +341,21 @@ before November 7 unless it's kept), and the OpenAPI Integration was added. Test
 - The first try failed. Agentverse briefly dropped the buyer agent's mailbox, the haggle ran past
   the 25 seconds `startHaggle` waits, and `@yardsale`'s follow-up checks failed; it told the
   buyer Yardsale's "status service" had an error. Since then a running haggle answers with a
-  plain 200 (not 202), and `getHaggle` waits up to 25 seconds for the result.
+  plain 200 (not 202), and `getHaggle` waits for the result.
+- That evening haggles failed again: item agents' replies went to a second server sharing our
+  seed (see "Only one live server per master seed" below). Before that was found, the waits
+  were cut to 10 seconds on a guess that Fetch drops slow tool calls. That made things worse:
+  haggles took just over 10 seconds, and `@yardsale` doesn't reliably follow a `running` answer
+  with `getHaggle` (it called `startHaggle` again, sent IDs that didn't exist, or checked its
+  memory instead). The waits are back at 25 seconds, so most haggles finish in one call.
+- Once a haggle agreed at $270, "lock it in" sent the buyer to `@ys-orchestrator`, which can't
+  see haggles made through the API and answered "Make an offer first". The Business Information
+  entry still said buying happens with `@ys-orchestrator`, and the skill's internal name was
+  `send-buyers-and-sellers-to-yardsale-s-market-agent`. Both were rewritten: buying happens with
+  `@yardsale`'s tools and only sellers go to `@ys-orchestrator`. The skill (now
+  `find-haggle-and-buy-used-items-on-yardsale`) says to call `acceptDeal` on a yes and never
+  send a buyer elsewhere to pay, and to follow `running` with `getHaggle` using the exact ID,
+  never `startHaggle` again.
 
 So `@yardsale` is now a working front door for buyers. Sellers still go to `@ys-orchestrator`,
 because a photo has to reach Claude.
@@ -349,6 +363,25 @@ because a photo has to reach Claude.
 Orders: with the trial, the apps (Stripe, Square, SumUp, SumUp POS, E-commerce, Google
 Calendar) became toggles that connect an outside account, and orders come from Square or SumUp
 POS. Nothing lets an outside API add orders, so Yardsale's sales don't reach the Orders page.
+
+Looked at more closely later on October 24, on the trial of the highest plan:
+
+- The Orders page reads Fetch's own order list (`GET /v2/agents/<agent id>/orders`). The
+  workbench can list orders and change an order's status, but nothing in it creates one.
+- Fetch's text for the Square app calls it Food Ordering: the agent browses the Square catalog,
+  places an order, and the buyer pays through Square. So an order most likely appears when
+  `@yardsale` itself orders through its Square tool. An order that Yardsale's server makes in
+  Square directly probably wouldn't appear; that's untested.
+- The Square toggle always connects a live Square account (it sends `is_sandbox: false`).
+  Asked directly with `is_sandbox: true`, Fetch's server returned a Square sandbox sign-in link
+  asking for catalog, order, and payment access. Square's sandbox answered that the seller test
+  account has to be launched from the Square Developer Console first. Nothing was connected.
+- With a sandbox seller test account launched, the same link failed: Square's sandbox answered
+  "Unable to find client by that `client_id`". Fetch's sandbox link carries its live Square app
+  ID (`sq0idp-...`), and sandbox app IDs look like `sandbox-sq0idb-...`, so Fetch's sandbox
+  option isn't set up. Only a live Square account connects, which would mean real payments, and
+  Yardsale stays in test mode. The Square route is dropped unless Fetch fixes this. Worth
+  telling the Fetch team: their Square sandbox sign-in uses the live app ID.
 
 Still to ask the Fetch team: how an outside agent or API adds orders, and whether a Business Tool
 can point at a URL that changes (each quick tunnel gets a new one).
@@ -464,8 +497,25 @@ read.
   Tool then has to be pointed at the new URL. Keep the tunnel running from before the demo to
   after it, and check `curl <tunnel>/openapi.json` first. Every new tool (`priceCheck`) means
   re-importing the OpenAPI description in the workbench.
+  - A quick tunnel that stays disconnected for a while is deleted by Cloudflare ("Tunnel not
+    found"). On October 24 the Wi-Fi dropped at 5:07 PM, and by 5:32 PM the tunnel was gone.
+    `cloudflared` kept running and retrying, so restart it by hand.
+  - Fetch Business can't change an integration's URL: the workbench has no field for it, and
+    its update call accepts only the name, description, and on/off switch. Delete the
+    integration and create it again with the new spec URL (Integrations, Create Business Tool,
+    with YardSale selected at the top), then paste `YARDSALE_API_KEY`. Re-created with the name
+    Yardsale Market, the tools keep their names (`YardsaleMarket_...`) and the skill still works.
 - **The Orders page can't show our sales.** On the Plus trial, orders come only from a connected
-  Square or SumUp POS account.
+  Square or SumUp POS account. A Square sandbox account can't get around it: Fetch's sandbox
+  sign-in uses its live Square app ID, which Square's sandbox rejects (see "What we set up on
+  October 24").
+- **Only one live server per master seed.** Every agent's address comes from the master seed,
+  so two live servers with the same seed run the same agents, and each mailbox message goes to
+  whichever server reads it first. On the evening of October 24, a second server running
+  `seller-channels` with the same seed took the buyer agent's mail: item agents' replies never
+  reached the server that sent the offers, and every haggle ended "the item's agent didn't
+  answer". Once it stopped, a haggle agreed in 6 seconds. Run a second copy with `--offline`, or
+  with its own `.agent-data/` and no `YARDSALE_MASTER_SEED`.
 - **The Plus trial ends November 7.** Started October 24; it's $75 a month after that.
 
 ## Build order
