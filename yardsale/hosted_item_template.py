@@ -61,6 +61,13 @@ def _limits(ctx: Context) -> tuple[int, int] | None:
         return None
 
 
+def _market_line(ctx: Context) -> str:
+    """The market evidence this agent cites in counters, set in its storage by the Market. It
+    comes from sold and asking prices, never from the floor, so it's fine to say to buyers."""
+    line = ctx.storage.get("market_line")
+    return line if isinstance(line, str) else ""
+
+
 def _buyer(sender: str, buyer_ref: str) -> str:
     """Only Yardsale's Market and buyer agent may haggle for a chat buyer."""
     if buyer_ref and sender in (CONFIG["market"], CONFIG["shopper"]):
@@ -101,7 +108,9 @@ async def on_offer(ctx: Context, sender: str, msg: Offer) -> None:
     state = SellerState()
     if saved and saved.get("expires", 0) > time.time():
         state = SellerState(saved["rounds"], saved["price"], saved["agreed"])
-    move = seller_move(CONFIG["asking_cents"], floor_cents, gap_cents, msg.offer_cents, state)
+    move = seller_move(
+        CONFIG["asking_cents"], floor_cents, gap_cents, msg.offer_cents, state, _market_line(ctx)
+    )
     expires = time.time() + COUNTER_TTL
     ctx.storage.set(
         f"buyer:{buyer}",

@@ -61,7 +61,12 @@ def answer_offer(
     if earlier is not None and earlier.expires_at > store.clock():
         state = haggle.SellerState(earlier.rounds, earlier.counter_cents, earlier.agreed)
     move = haggle.seller_move(
-        listing.asking_cents, listing.floor_cents, gap_cents(listing), offer_cents, state
+        listing.asking_cents,
+        listing.floor_cents,
+        gap_cents(listing),
+        offer_cents,
+        state,
+        listing.market_line,
     )
     saved = store.save_counter(
         item_id,

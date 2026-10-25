@@ -89,10 +89,25 @@ def counter_cents(asking_cents: int, floor_cents: int, gap_cents: int, rounds: i
     return min(asking_cents, max(lowest, round_up(asking_cents - given, step(asking_cents))))
 
 
+def with_reason(note: str, market_line: str) -> str:
+    """A counter's note with the market evidence behind it. The line comes from sold and asking
+    prices the Market worked out (pricing.market_line), never from the floor."""
+    line = " ".join(market_line.split()).rstrip(".")
+    if not line:
+        return note
+    return f"{note} {line[0].upper()}{line[1:]}."
+
+
 def seller_move(
-    asking_cents: int, floor_cents: int, gap_cents: int, offer_cents: int, state: SellerState
+    asking_cents: int,
+    floor_cents: int,
+    gap_cents: int,
+    offer_cents: int,
+    state: SellerState,
+    market_line: str = "",
 ) -> SellerMove:
-    """The item agent's answer to one offer: agree, or counter."""
+    """The item agent's answer to one offer: agree, or counter. A counter gives its reasons when
+    there's a `market_line` to cite ("Similar ones sold for about $340 on eBay recently")."""
     if state.agreed and state.price_cents is not None:
         return SellerMove(
             state.price_cents,
@@ -118,7 +133,9 @@ def seller_move(
         note = f"That's well under what it's worth. I'm at {usd(price)}."
     else:
         note = f"I can come down to {usd(price)}."
-    return SellerMove(price, False, note, SellerState(rounds=rounds, price_cents=price))
+    return SellerMove(
+        price, False, with_reason(note, market_line), SellerState(rounds=rounds, price_cents=price)
+    )
 
 
 # --- The buyer agent -------------------------------------------------------------------------
