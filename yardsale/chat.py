@@ -286,6 +286,11 @@ _MENU = re.compile(
 _NOT_NOW = re.compile(
     r"(?:not\s+(?:now|yet|today)|later|maybe\s+later|skip(?:\s+it)?|no\s+thanks)\b"
 )
+MEETUP_NOT_ON_CAMPUS = (
+    "Meeting spots are a campus feature: students at one school get a public place on their "
+    "campus to hand items over. This chat isn't signed in with a school email, so agree a "
+    "place with the other side here in the chat."
+)
 CRAIGSLIST_NOT_NOW = (
     "OK. It's listed on Yardsale, where buyers in ASI:One and @yardsale can find it, and its agent "
     'answers them for you. Say "craigslist" any time for a ready-to-paste post.'
@@ -2006,14 +2011,49 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         link = maps.map_url(meeting.spot, campus.school_label_for(school))
         return f"\n\nMeet at [{meetup.describe(meeting)}]({link}) to hand it over."
 
+    def meetup_reply(conv: Conversation) -> str | Reply:
+        """Where to meet on campus, on demand: "where should we meet", "meetup spot", or the
+        Where to meet button. The best spot first, then two more, each with a map link.
+
+        Works for any conversation that has given a school, whether or not campus mode is on,
+        so meetups can be shown without locking the rest of the product to students. Without
+        a school: the email form in campus mode, or a plain explanation otherwise.
+        """
+        school = students.school_of(store, conv.owner)
+        if not school:
+            if onboarding.campus_mode():
+                return Reply(
+                    "I can suggest a public spot on your campus once I know your school. "
+                    + onboarding.ASK_FOR_EMAIL,
+                    onboarding.email_form(),
+                )
+            return Reply(MEETUP_NOT_ON_CAMPUS, cards.notice(MEETUP_NOT_ON_CAMPUS, [cards.BUY]))
+        places = students.other_places(store, school, limit=3)
+        if not places:
+            return Reply(students.NO_CAMPUS, cards.notice(students.NO_CAMPUS, [cards.BUY]))
+        label = schools.school_label(school)
+        university = campus.school_label_for(school)
+        lines = [f"Meet on campus at {label}. Best spot first:"]
+        for n, place in enumerate(places, 1):
+            lines.append(f"{n}. [{meetup.describe(place)}]({maps.map_url(place.spot, university)})")
+        lines.append(
+            "Pick one and agree a time in the chat. Nobody has to say where they live, and the "
+            "first one there won't be waiting alone."
+        )
+        card = cards.meetup(
+            label, [(meetup.describe(place), place.spot.kind.replace("_", " ")) for place in places]
+        )
+        return Reply("\n".join(lines), card)
+
     async def settle(conv: Conversation, listing: Listing, deal: Deal) -> str | Reply:
         """A deal closed: make the payment link and show it."""
         conv.quotes.pop(listing.item_id, None)
         where = meeting_line(conv)
+        after: list[cards.Action] = [cards.ORDERS, *([cards.MEET] if where else []), cards.BUY]
         record = await backend.checkout.start(deal.deal_id) or store.deal(deal.deal_id)
         if record is None:
             text = f"Deal! The {listing.title} is yours for {usd(deal.price_cents)}.{where}"
-            return Reply(text, cards.notice(text, [cards.ORDERS, cards.BUY], "It's yours"))
+            return Reply(text, cards.notice(text, after, "It's yours"))
         label = provider_label()
         text = deal_text(record, listing.title, label) + where
         if record.payment_status == PENDING and label is not None:
@@ -2027,7 +2067,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 meet,
             )
             return Reply(text, card)
-        return Reply(text, cards.notice(text, [cards.ORDERS, cards.BUY], "It's yours"))
+        return Reply(text, cards.notice(text, after, "It's yours"))
 
     async def answer(
         conv: Conversation, listing: Listing, reply: Counter | Deal | OfferRejected
@@ -2439,10 +2479,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
     def menu_card(conv: Conversation) -> MetadataContent:
         """The home screen, with counts of what this conversation has going."""
         bought = store.deals(buyer=f"chat:{conv.key}")
-        school = ""
-        if onboarding.campus_mode():
-            found = students.school_of(store, conv.owner)
-            school = schools.school_label(found) if found else ""
+        found = students.school_of(store, conv.owner)
+        school = schools.school_label(found) if found and onboarding.campus_mode() else ""
         return cards.menu(
             live=len(store.owned(conv.owner, ACTIVE)),
             waiting=len(numbered_waiting(conv)) or (1 if conv.unpriced else 0),
@@ -2451,6 +2489,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             watching=len(store.watches_for(conv.owner)),
             ebay=backend.ebay is not None,
             school=school,
+            meet=bool(found),
         )
 
     def menu_reply(conv: Conversation, text: str | None = None) -> Reply:
@@ -2709,6 +2748,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         # Getting around.
         if action == "menu":
             return menu_reply(conv)
+        if action == "meet":
+            return meetup_reply(conv)
         if action == "sell":
             return Reply(NEEDS_PHOTO, cards.sell(len(numbered_waiting(conv))))
         if action == "buy":
@@ -3026,6 +3067,8 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             return watch(conv, command)
         if kind == "watches":
             return my_watches(conv)
+        if kind == "meetup":
+            return meetup_reply(conv)
         if command is not None and kind == "unwatch":
             return unwatch(conv, command.pick)
         if command is not None and kind == "edit" and selling:

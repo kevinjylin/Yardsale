@@ -96,6 +96,7 @@ SELL: Action = ("Sell something", {"action": "sell"})
 BUY: Action = ("Find a deal", {"action": "buy"})
 LISTINGS: Action = ("My listings", {"action": "listings"})
 ORDERS: Action = ("My orders", {"action": "orders"})
+MEET: Action = ("Where to meet", {"action": "meet"})
 WATCHES: Action = ("My watches", {"action": "watches"})
 
 _MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\((https?://[^\s)]+)\)")
@@ -395,8 +396,10 @@ def menu(
     watching: int = 0,
     ebay: bool = False,
     school: str = "",
+    meet: bool = False,
 ) -> MetadataContent:
-    """The home screen: what Yardsale does, and a tile for everything it can do."""
+    """The home screen: what Yardsale does, and a tile for everything it can do. `meet` adds
+    the campus meeting spots, for a conversation that has given a school."""
     intro: list[Node] = [
         text(
             "Sell your stuff or find a deal. Agents do the pricing, the listing, and the haggling."
@@ -461,6 +464,15 @@ def menu(
                 "Connect your own eBay, and what you list here goes up there too.",
                 None,
                 ("Connect eBay", {"action": "ebay_connect"}),
+            )
+        )
+    if meet:
+        tiles.append(
+            _tile(
+                "Where to meet",
+                "Public spots on your campus to hand an item over. Nobody says where they live.",
+                ("On campus", "info"),
+                MEET,
             )
         )
     children = beside(picture(art("menu"), "Yardsale"), intro)
@@ -1079,14 +1091,40 @@ def payment(
             ("Meet at", meet),
         ]
     )
+    actions: list[Action] = [("I've paid", {"action": "paid", "deal_id": deal_id}), ORDERS]
+    if meet:
+        actions.append(MEET)
     return screen(
         f"Pay {usd(price_cents)} for the {title}",
         "pay",
         lead,
         body,
-        [("I've paid", {"action": "paid", "deal_id": deal_id}), ORDERS],
+        actions,
         picture_url=image or art("pay"),
     )
+
+
+def meetup(school: str, places: Sequence[tuple[str, str]]) -> MetadataContent:
+    """Where two students at one school can hand an item over: the best spot first, then a
+    couple of others. `places` are (name with hours, kind). The map links are in the message
+    text, since a card row can't hold a link."""
+    lead: list[Node] = [
+        badge("On campus", "info"),
+        text(f"Public spots at {school} to hand an item over, best first.", "emphasis"),
+    ]
+    body: list[Node] = [
+        steps(
+            [
+                f"{n}. {name}" + (f" ({kind})" if kind else "")
+                for n, (name, kind) in enumerate(places, 1)
+            ]
+        ),
+        muted(
+            "Map links are in the message above. Agree a time in the chat; nobody has to say "
+            "where they live."
+        ),
+    ]
+    return screen("Where to meet", "info", lead, body, [BUY, ORDERS])
 
 
 def payment_status(
