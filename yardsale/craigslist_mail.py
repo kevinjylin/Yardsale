@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from uagents import Context
 
+from yardsale.advice import listing_description
 from yardsale.checkout import Checkout
 from yardsale.common import PipelineError
 from yardsale.models import AcceptCounter, Counter, Deal, Offer, OfferRejected
@@ -265,16 +266,9 @@ def post_command(text: str) -> PostCommand | None:
 
 
 def description(listing: Listing) -> str:
-    lines = [f"{listing.title}."]
-    item = listing.item
-    if item is not None:
-        lines.append(f"Condition: {item.condition}.")
-        if item.details:
-            lines.append("Details: " + "; ".join(item.details) + ".")
-    if listing.appraisal is not None and listing.appraisal.matches:
-        lines.append("Priced from recent sales of the same item.")
-    lines.append("Email me an offer through Craigslist. I reply fast.")
-    return "\n".join(lines)
+    """What Claude saw (brand, model, condition, details) and what the market says
+    (advice.listing_description), then how to make an offer. Never the floor."""
+    return listing_description(listing) + "\nEmail me an offer through Craigslist. I reply fast."
 
 
 def post_text(listing: Listing, title: str, settings: MailSettings | None) -> str:
