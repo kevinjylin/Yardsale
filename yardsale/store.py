@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from yardsale.models import Appraisal, ItemDetails
+from yardsale.models import Appraisal, ItemDetails, MarketView
 from yardsale.pricing import listing_prices
 from yardsale.sources import ExternalListing
 
@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS listings (
     host TEXT NOT NULL DEFAULT 'bureau',
     handle TEXT,
     agent_deleted_at REAL,
+    market_json TEXT,
     UNIQUE (owner, listing_ref)
 );
 CREATE INDEX IF NOT EXISTS listings_by_status ON listings (status);
@@ -174,6 +175,7 @@ ADDED_COLUMNS = {
         "host": "TEXT NOT NULL DEFAULT 'bureau'",
         "handle": "TEXT",
         "agent_deleted_at": "REAL",
+        "market_json": "TEXT",
     },
     "counters": {
         "rounds": "INTEGER NOT NULL DEFAULT 0",
@@ -206,6 +208,7 @@ class Listing:
     suggested_floor_cents: int | None = None
     item: ItemDetails | None = None
     appraisal: Appraisal | None = None  # seller-only: includes the suggested floor
+    market: MarketView | None = None  # sold prices beside live asking prices; nothing private
     address: str | None = None  # the item agent's, once approved
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -223,6 +226,12 @@ class Listing:
         if self.seller_floor_cents is not None:
             return "seller"
         return "appraisal" if self.floor_cents == self.suggested_floor_cents else "default"
+
+    @property
+    def market_line(self) -> str:
+        """Market evidence the item agent cites while haggling (pricing.market_line). Built from
+        sold and asking prices only, never from the floor."""
+        return self.market.line if self.market is not None else ""
 
     def searchable_text(self) -> str:
         """Public words a buyer's search can match. Never includes prices."""
@@ -315,7 +324,7 @@ class Watch:
 _LISTING_COLUMNS = (
     "item_id, owner, seller_id, listing_ref, status, title, asking_cents, floor_cents, "
     "seller_asking_cents, seller_floor_cents, suggested_asking_cents, suggested_floor_cents, "
-    "item_json, appraisal_json, address, created_at, updated_at, host, handle"
+    "item_json, appraisal_json, address, created_at, updated_at, host, handle, market_json"
 )
 _DEAL_COLUMNS = (
     "deal_id, item_id, buyer, price_cents, payment_status, created_at, payment_provider, "
@@ -342,10 +351,12 @@ def _watch(row: sqlite3.Row) -> Watch:
 def _listing(row: sqlite3.Row) -> Listing:
     data = dict(row)
     item_json, appraisal_json = data.pop("item_json"), data.pop("appraisal_json")
+    market_json = data.pop("market_json")
     return Listing(
         **data,
         item=ItemDetails.model_validate_json(item_json) if item_json else None,
         appraisal=Appraisal.model_validate_json(appraisal_json) if appraisal_json else None,
+        market=MarketView.model_validate_json(market_json) if market_json else None,
     )
 
 
@@ -401,7 +412,7 @@ class Store:
         listing.created_at = listing.updated_at = now
         try:
             self._db.execute(
-                f"INSERT INTO listings ({_LISTING_COLUMNS}) VALUES ({', '.join('?' * 19)})",
+                f"INSERT INTO listings ({_LISTING_COLUMNS}) VALUES ({', '.join('?' * 20)})",
                 (
                     listing.item_id,
                     listing.owner,
@@ -422,6 +433,7 @@ class Store:
                     now,
                     listing.host,
                     listing.handle,
+                    listing.market.model_dump_json() if listing.market else None,
                 ),
             )
         except sqlite3.IntegrityError:

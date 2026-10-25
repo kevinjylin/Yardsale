@@ -2,6 +2,12 @@
 
 Prices are integer cents everywhere. Amounts people type are parsed with Decimal, and the
 appraisal statistics use Fraction, so no float ever decides a price.
+
+The market view (market_view) puts two things side by side: what the item sold for (the
+Appraiser's matched eBay sales) and what competitors are asking for it right now (the Market
+Scout's live listings). Sold prices set the asking price; asking prices only inform the range,
+the market line buyers hear while haggling, and the warning a seller gets when their own price
+is far off (price_verdict).
 """
 
 from __future__ import annotations
@@ -10,8 +16,12 @@ import math
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from fractions import Fraction
 
+from yardsale.models import Appraisal, MarketView, ScoutReport
+
 MAX_CENTS = 100_000_000  # $1,000,000. Anything above is a typo.
 FLOOR_SHARE = Fraction(7, 10)  # the lowest price is never below 70% of the typical price
+FAR_SHARE = Fraction(7, 20)  # a seller's price 35% or more off the market gets a plain warning
+LOCAL_SOURCES = frozenset({"craigslist", "offerup", "facebook"})  # in-person sites
 
 
 class PriceError(ValueError):
@@ -145,3 +155,112 @@ def listing_prices(
     if suggested_asking is None or suggested_floor is None:
         raise NoSuggestedPrice("No recent sales were close enough to suggest a price.")
     return suggested_asking, suggested_floor
+
+
+# --- The market view: sold prices beside live asking prices ------------------------------------
+
+
+def price_range(prices: list[int]) -> tuple[int, int, int]:
+    """(low, median, high) in whole cents: the quartiles around the median. With fewer than 4
+    prices the quartiles are the lowest and highest."""
+    low, high = quartiles(prices)
+    return round_cents(low), round_cents(median(prices)), round_cents(high)
+
+
+def _span(low: int, high: int) -> str:
+    return usd(low) if low == high else f"{usd(low)} to {usd(high)}"
+
+
+def market_line(view: MarketView) -> str:
+    """One sentence of evidence an item agent can give while haggling, built only from the
+    sold prices and the live asking prices: it never mentions a floor or the seller's prices.
+    Empty when there's nothing to cite."""
+    parts: list[str] = []
+    if view.sold_median_cents is not None:
+        parts.append(f"similar ones sold for about {usd(view.sold_median_cents)} on eBay recently")
+    if view.asking_median_cents is not None:
+        low = (
+            view.asking_low_cents if view.asking_low_cents is not None else view.asking_median_cents
+        )
+        high = (
+            view.asking_high_cents
+            if view.asking_high_cents is not None
+            else view.asking_median_cents
+        )
+        who = "locals" if any(s.source in LOCAL_SOURCES for s in view.sources) else "other sellers"
+        parts.append(f"{who} are asking {_span(low, high)} right now")
+    return ", and ".join(parts)
+
+
+def market_view(appraisal: Appraisal | None, report: ScoutReport | None) -> MarketView | None:
+    """Both sides of the market, or None when neither side has a price.
+
+    - The sold side is the appraisal: its rounded median is what the item sells for, and its
+      quartiles are the usual spread.
+    - The asking side pools every live listing the Scout kept, across sites, and takes the
+      median and quartiles of their asking prices.
+    - The suggested range runs from the lower of the two medians to the higher: list between
+      what it sells for and what competitors ask. With only sold prices it's their quartiles;
+      with only asking prices it's from their lower quartile to their median, since an item
+      priced at or under the typical ask is the one that sells.
+
+    Everything is rounded the way a person would price (round_price).
+    """
+    sold_count = len(appraisal.matches) if appraisal is not None else 0
+    sold_median = appraisal.asking_cents if appraisal is not None else None
+    sold_low = appraisal.low_cents if appraisal is not None else None
+    sold_high = appraisal.high_cents if appraisal is not None else None
+    sources = list(report.sources) if report is not None else []
+    asks = [price for source in sources for price in source.prices_cents if price > 0]
+    asking_low = asking_median = asking_high = None
+    if asks:
+        asking_low, asking_median, asking_high = price_range(asks)
+    if sold_median is None and asking_median is None:
+        return None
+    if sold_median is not None and asking_median is not None:
+        range_low = round_price(min(sold_median, asking_median))
+        range_high = round_price(max(sold_median, asking_median))
+    elif sold_median is not None:
+        range_low = round_price(sold_low if sold_low is not None else sold_median)
+        range_high = round_price(sold_high if sold_high is not None else sold_median)
+    else:
+        assert asking_median is not None and asking_low is not None
+        range_low, range_high = round_price(asking_low), round_price(asking_median)
+    view = MarketView(
+        sold_count=sold_count,
+        sold_median_cents=sold_median,
+        sold_low_cents=sold_low,
+        sold_high_cents=sold_high,
+        asking_count=len(asks),
+        asking_median_cents=asking_median,
+        asking_low_cents=asking_low,
+        asking_high_cents=asking_high,
+        range_low_cents=range_low,
+        range_high_cents=min(range_high, MAX_CENTS),
+        sources=sources,
+    )
+    view.line = market_line(view)
+    return view
+
+
+def reference_cents(view: MarketView | None) -> int | None:
+    """The price a seller's own price is judged against: what it sells for, or failing that
+    what others ask."""
+    if view is None:
+        return None
+    return (
+        view.sold_median_cents if view.sold_median_cents is not None else view.asking_median_cents
+    )
+
+
+def price_verdict(price_cents: int, view: MarketView | None) -> str:
+    """ "under" when the price is more than FAR_SHARE below the reference, "over" when it's more
+    than FAR_SHARE above, "fine" in between, and "" when there's nothing to compare with."""
+    reference = reference_cents(view)
+    if reference is None:
+        return ""
+    if price_cents < reference * (1 - FAR_SHARE):
+        return "under"
+    if price_cents > reference * (1 + FAR_SHARE):
+        return "over"
+    return "fine"
