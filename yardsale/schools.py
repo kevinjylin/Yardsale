@@ -1,28 +1,19 @@
-"""Students: which school an email belongs to, and proving the student owns that email.
+"""Which school an email belongs to.
 
-Yardsale on campus is same-school only. A listing is visible, searchable, and buyable only by
-students with a verified email at the same school. That's the whole trust story: you're meeting
-someone from your own university, not a stranger from the internet.
+Yardsale on campus is same-school only: a listing is visible and buyable only to students whose
+email is at the same school. The school comes from the end of the address and nothing else, so
+this works offline and needs no dataset. `rahul@berkeley.edu` and `sam@cs.berkeley.edu` both
+land on `berkeley.edu`; a friendly name is cosmetic, the key does the work.
 
-Matching a school needs no dataset. Two students are at the same school when their emails share
-a registrable academic domain, so `rahul@berkeley.edu` and `sam@cs.berkeley.edu` match on
-`berkeley.edu`. A friendly name is cosmetic; the key does the work, and it works offline.
-
-Owning the address has to be proved, or "verified student" means nothing: anyone can type
-someone else's address. `start_verification` makes a six-digit code and hands it to a sender
-that the server injects, so tests and offline runs never send mail. Codes are stored as a keyed
-hash, never in the clear, and they expire.
+Nothing is proved here. A student says which school they're at by the address they give, and
+that's taken at face value, so "same school" is a claim rather than a verified fact. It keeps
+signing up to one step. Anything that depends on really being at a school needs a check this
+module deliberately doesn't do.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import re
-import secrets
-from collections.abc import Awaitable, Callable
-
-from yardsale.common import derive_seed
 
 # Suffixes that mean "a school". A domain ending in one of these is academic, and the school key
 # is the label before it, so sub-departments land on the same school.
@@ -44,12 +35,6 @@ ACADEMIC_SUFFIXES = (
     ".ac.il",
 )
 
-CODE_LENGTH = 6
-CODE_TTL = 15 * 60.0  # seconds a code can be used
-MAX_ATTEMPTS = 5  # wrong guesses before a code is dead
-
-# (email, code) -> sent. Injected, so nothing here sends mail on its own.
-SendCode = Callable[[str, str], Awaitable[None]]
 
 _EMAIL = re.compile(r"^[^@\s]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})$")
 
@@ -109,24 +94,3 @@ def school_label(key: str) -> str:
     suffix = academic_suffix(key)
     name = key[: -len(suffix)] if suffix else key
     return name.replace("-", " ").replace(".", " ").title()
-
-
-def new_code() -> str:
-    """A six-digit code. secrets, not random: it's the only thing standing between someone and
-    another student's identity."""
-    return "".join(secrets.choice("0123456789") for _ in range(CODE_LENGTH))
-
-
-def hash_code(email: str, code: str) -> str:
-    """A keyed hash of a code, so the database never holds one that could be used.
-
-    The email is part of the message, so a hash stolen from one row can't verify another.
-    """
-    key = derive_seed("student-verification").encode()
-    message = f"{normalise_email(email)}:{code.strip()}".encode()
-    return hmac.new(key, message, hashlib.sha256).hexdigest()
-
-
-def code_matches(email: str, code: str, stored_hash: str) -> bool:
-    """Constant-time comparison, so a wrong guess leaks nothing about how wrong it was."""
-    return hmac.compare_digest(hash_code(email, code), stored_hash)

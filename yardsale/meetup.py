@@ -1,18 +1,18 @@
-"""Where two students should meet: a public place between their two buildings.
+"""Where two students should meet: one good public place on their campus.
 
-Both sides give a building, never an address, and neither is ever told the other's. Only the
-meeting place is shared. A dorm is close enough to a home address that telling a stranger which
-one you're in is the thing to avoid, even when the stranger goes to your university.
+Neither student is asked where they live. The meeting place is picked from the campus itself:
+somewhere central, public, and busy, which on a campus is a short walk from anywhere anyway.
+That keeps signing up to one step, and it means nobody has to say which building they're in to
+a stranger.
 
-Picking a place is one objective: make the longer of the two walks as short as possible, then
-prefer somewhere public. For two people the plain midpoint already minimises the longer walk,
-but the midpoint is usually a lawn or the inside of a building, so real places near it are
-scored and the best one wins.
+Central means near the middle of where students actually are, so the centre is the average of
+the campus's dormitories when it has any, and of everything when it doesn't. A place's kind is
+then worth a detour, in metres: a busy cafe you can wait inside beats a closer patch of grass,
+because whoever arrives first needs somewhere to stand. "Public and busy" is the property that
+matters when two people who haven't met are meeting.
 
-A place's kind is worth a detour, in metres: a busy cafe you can wait inside is better than a
-closer patch of grass, and "public and busy" is the safety property that matters when two people
-who haven't met are meeting. Distances are straight-line times a detour factor, which is close
-enough on a campus and needs no routing service.
+Distances are straight-line times a detour factor, which is close enough on a campus and needs
+no routing service.
 """
 
 from __future__ import annotations
@@ -26,26 +26,40 @@ EARTH_RADIUS_M = 6_371_000.0
 DETOUR = 1.3
 WALK_METRES_PER_MINUTE = 80.0  # an unhurried walk
 
-# What each kind of place is worth going further for, in metres of the longer walk. Indoors,
-# staffed, and busy beat open ground, because someone arriving first has somewhere to stand.
+# What each kind of place is worth going further from the centre for, in metres. Indoors,
+# staffed, and busy beat open ground.
 KIND_BONUS = {
-    "student_union": 200.0,
-    "cafe": 180.0,
-    "library": 170.0,
-    "food_court": 150.0,
-    "plaza": 90.0,
-    "landmark": 80.0,
-    "park": 60.0,
-    "bench": 20.0,
+    "student_union": 400.0,
+    "cafe": 360.0,
+    "library": 340.0,
+    "food_court": 300.0,
+    "plaza": 180.0,
+    "landmark": 160.0,
+    "park": 120.0,
+    "bench": 40.0,
 }
 # Never proposed as a meeting place: somewhere someone lives.
 PRIVATE_KINDS = frozenset({"dormitory", "residential", "house", "apartments"})
-DEFAULT_RADIUS_M = 1200.0  # campus-sized: how far from the midpoint to consider places
+# OpenStreetMap tags a departmental reading room, a herbarium, and a map collection all as
+# libraries. They're real, and they're the wrong answer: a stranger can't find them, they're
+# often inside a building that needs a card, and nobody waits in an archive. A real run on
+# Berkeley put "Anthropology Reading Room" and "Environmental Design Archives" in the top five.
+NOT_A_MEETING_PLACE = (
+    "archive",
+    "reading room",
+    "collection",
+    "herbarium",
+    "storage",
+    "annex",
+    "stacks",
+    "lab",
+    "office",
+)
 
 
 @dataclass(frozen=True)
 class Spot:
-    """A point on a campus: a building a student names, or a place they could meet."""
+    """A point on a campus: a building, or a place two students could meet."""
 
     name: str
     latitude: float
@@ -61,25 +75,14 @@ class Spot:
 
 @dataclass(frozen=True)
 class Meetup:
-    """A chosen place and what it costs each side. The walks are what each student is told."""
+    """A place to meet, and how far it is from the middle of campus."""
 
     spot: Spot
-    metres_from_first: float
-    metres_from_second: float
+    metres_from_centre: float
 
     @property
-    def longer_walk_metres(self) -> float:
-        return max(self.metres_from_first, self.metres_from_second)
-
-    @property
-    def longer_walk_minutes(self) -> int:
-        return max(1, round(self.longer_walk_metres / WALK_METRES_PER_MINUTE))
-
-    @property
-    def fair(self) -> bool:
-        """Neither side walks more than twice as far as the other."""
-        shorter = min(self.metres_from_first, self.metres_from_second)
-        return self.longer_walk_metres <= max(100.0, shorter * 2)
+    def walk_minutes(self) -> int:
+        return max(1, round(self.metres_from_centre * DETOUR / WALK_METRES_PER_MINUTE))
 
 
 def metres_between(one: Spot, two: Spot) -> float:
@@ -92,73 +95,74 @@ def metres_between(one: Spot, two: Spot) -> float:
 
 
 def walk_metres(one: Spot, two: Spot) -> float:
-    """What someone actually walks, allowing for not being able to walk through buildings."""
+    """What someone actually walks, allowing for not walking through buildings."""
     return metres_between(one, two) * DETOUR
 
 
-def midpoint(one: Spot, two: Spot) -> Spot:
-    """The point halfway between two spots. For two people this already minimises the longer
-    walk, so it's the right thing to look for real places around."""
-    lat1, lon1 = math.radians(one.latitude), math.radians(one.longitude)
-    lat2, lon2 = math.radians(two.latitude), math.radians(two.longitude)
-    x = math.cos(lat1) * math.cos(lon1) + math.cos(lat2) * math.cos(lon2)
-    y = math.cos(lat1) * math.sin(lon1) + math.cos(lat2) * math.sin(lon2)
-    z = math.sin(lat1) + math.sin(lat2)
+def centre_of(places: list[Spot]) -> Spot | None:
+    """The middle of where students are: the average of the dorms, or of everything if a campus
+    has none mapped. Averaged on the sphere, so it doesn't drift near the poles or the meridian.
+    """
+    if not places:
+        return None
+    dorms = [place for place in places if place.kind == "dormitory"]
+    using = dorms or places
+    x = sum(math.cos(math.radians(p.latitude)) * math.cos(math.radians(p.longitude)) for p in using)
+    y = sum(math.cos(math.radians(p.latitude)) * math.sin(math.radians(p.longitude)) for p in using)
+    z = sum(math.sin(math.radians(p.latitude)) for p in using)
+    count = len(using)
+    x, y, z = x / count, y / count, z / count
     return Spot(
-        name="midpoint",
+        name="campus centre",
         latitude=math.degrees(math.atan2(z, math.hypot(x, y))),
         longitude=math.degrees(math.atan2(y, x)),
     )
 
 
+def findable(place: Spot) -> bool:
+    """Whether a stranger could be told to meet here and actually find it."""
+    name = place.name.lower()
+    return not any(word in name for word in NOT_A_MEETING_PLACE)
+
+
 def meetable(places: list[Spot]) -> list[Spot]:
-    """Places two students could actually meet: nowhere anyone lives."""
-    return [place for place in places if not place.private]
+    """Places two students could actually meet: nowhere anyone lives, and nowhere a stranger
+    couldn't find."""
+    return [place for place in places if not place.private and findable(place)]
 
 
 def score(meetup: Meetup) -> float:
-    """Lower is better: the longer walk, less what this kind of place is worth going further
-    for. So a cafe 180 m further than a bare lawn still wins."""
-    return meetup.longer_walk_metres - KIND_BONUS.get(meetup.spot.kind, 0.0)
+    """Lower is better: distance from the centre of campus, less what this kind of place is
+    worth going further for. So a cafe 360 m further out still beats a central lawn."""
+    return meetup.metres_from_centre - KIND_BONUS.get(meetup.spot.kind, 0.0)
 
 
-def measure(spot: Spot, first: Spot, second: Spot) -> Meetup:
-    return Meetup(
-        spot=spot,
-        metres_from_first=walk_metres(first, spot),
-        metres_from_second=walk_metres(second, spot),
-    )
+def rank(places: list[Spot]) -> list[Meetup]:
+    """Every place two students could meet, best first."""
+    centre = centre_of(places)
+    if centre is None:
+        return []
+    scored = [
+        Meetup(spot=place, metres_from_centre=metres_between(centre, place))
+        for place in meetable(places)
+    ]
+    return sorted(scored, key=score)
 
 
-def choose(
-    first: Spot, second: Spot, places: list[Spot], radius_m: float = DEFAULT_RADIUS_M
-) -> Meetup | None:
-    """The best place to meet between two buildings, or None when nothing is close enough.
-
-    Only places within `radius_m` of the midpoint are considered, so a great cafe on the far
-    side of campus doesn't win on its bonus alone.
-    """
-    centre = midpoint(first, second)
-    nearby = [place for place in meetable(places) if metres_between(centre, place) <= radius_m]
-    if not nearby:
-        return None
-    return min((measure(place, first, second) for place in nearby), key=score)
+def choose(places: list[Spot]) -> Meetup | None:
+    """The one place to send two students, or None when a campus has nowhere public."""
+    best = rank(places)
+    return best[0] if best else None
 
 
-def options(
-    first: Spot,
-    second: Spot,
-    places: list[Spot],
-    limit: int = 3,
-    radius_m: float = DEFAULT_RADIUS_M,
-) -> list[Meetup]:
-    """The best few places, so a student can pick another one."""
-    centre = midpoint(first, second)
-    nearby = [place for place in meetable(places) if metres_between(centre, place) <= radius_m]
-    return sorted((measure(place, first, second) for place in nearby), key=score)[:limit]
+def options(places: list[Spot], limit: int = 3) -> list[Meetup]:
+    """A few places, so a student can pick another one."""
+    return rank(places)[:limit]
 
 
 def describe(meetup: Meetup) -> str:
-    """How a meetup reads in the chat. Never mentions either student's building."""
-    minutes = meetup.longer_walk_minutes
-    return f"{meetup.spot.name}, about a {minutes}-minute walk for each of you"
+    """How a meetup reads in the chat."""
+    where = meetup.spot.name
+    if meetup.spot.opening_hours:
+        return f"{where} (open {meetup.spot.opening_hours})"
+    return where

@@ -49,12 +49,8 @@ def db(clock: Clock):
     store.close()
 
 
-def enrol(db: Store, owner: str, email: str, building: str | None = None):
-    _, code = students.begin(db, owner, email)
-    students.confirm(db, owner, code)
-    if building:
-        students.set_building(db, owner, building)
-    return db.student(owner)
+def enrol(db: Store, owner: str, email: str):
+    return students.join(db, owner, email)
 
 
 def listing_of(owner: str, item_id: str = "item1") -> Listing:
@@ -119,76 +115,6 @@ def test_the_school_reads_nicely() -> None:
     assert schools.school_label("ox.ac.uk") == "Ox"
 
 
-# --- Proving the address --------------------------------------------------------------------
-
-
-def test_a_code_verifies_a_student(db: Store) -> None:
-    student, code = students.begin(db, ALICE, "alice@berkeley.edu")
-    assert not student.verified and len(code) == schools.CODE_LENGTH and code.isdigit()
-    verified = students.confirm(db, ALICE, code)
-    assert verified.verified and verified.school == "berkeley.edu"
-
-
-def test_the_code_is_never_stored_in_the_clear(db: Store) -> None:
-    _, code = students.begin(db, ALICE, "alice@berkeley.edu")
-    student = db.student(ALICE)
-    assert student is not None and student.code_hash is not None
-    assert code not in student.code_hash
-
-
-def test_a_wrong_code_does_not_verify(db: Store) -> None:
-    students.begin(db, ALICE, "alice@berkeley.edu")
-    with pytest.raises(StudentError, match="isn't right"):
-        students.confirm(db, ALICE, "000000")
-    student = db.student(ALICE)
-    assert student is not None and not student.verified
-
-
-def test_a_code_cannot_be_guessed_forever(db: Store) -> None:
-    students.begin(db, ALICE, "alice@berkeley.edu")
-    for _ in range(schools.MAX_ATTEMPTS - 1):
-        with pytest.raises(StudentError, match="isn't right"):
-            students.confirm(db, ALICE, "000000")
-    with pytest.raises(StudentError, match="Too many wrong codes"):
-        students.confirm(db, ALICE, "000000")
-    with pytest.raises(StudentError, match="expired"):  # the code is gone, not just locked
-        students.confirm(db, ALICE, "000000")
-
-
-def test_a_code_expires(db: Store, clock: Clock) -> None:
-    _, code = students.begin(db, ALICE, "alice@berkeley.edu")
-    clock.advance(schools.CODE_TTL + 1)
-    with pytest.raises(StudentError, match="expired"):
-        students.confirm(db, ALICE, code)
-
-
-def test_a_code_for_one_student_does_not_work_for_another(db: Store) -> None:
-    """The hash binds the code to the address, so a stolen row can't verify someone else."""
-    _, alice_code = students.begin(db, ALICE, "alice@berkeley.edu")
-    students.begin(db, BOB, "bob@berkeley.edu")
-    with pytest.raises(StudentError, match="isn't right"):
-        students.confirm(db, BOB, alice_code)
-
-
-def test_changing_email_drops_the_old_verification(db: Store) -> None:
-    enrol(db, ALICE, "alice@berkeley.edu")
-    students.begin(db, ALICE, "alice@stanford.edu")
-    student = db.student(ALICE)
-    assert student is not None
-    assert not student.verified and student.school == "stanford.edu"
-
-
-def test_confirming_twice_is_harmless(db: Store) -> None:
-    _, code = students.begin(db, ALICE, "alice@berkeley.edu")
-    students.confirm(db, ALICE, code)
-    assert students.confirm(db, ALICE, code).verified
-
-
-def test_an_unknown_conversation_is_asked_for_an_email(db: Store) -> None:
-    with pytest.raises(StudentError, match="school email"):
-        students.confirm(db, "asi1:nobody", "123456")
-
-
 # --- Same school only ----------------------------------------------------------------------
 
 
@@ -207,12 +133,11 @@ def test_another_university_cannot_see_the_listing(db: Store) -> None:
         students.check_may_trade(db, listing_of(ALICE), CARL)
 
 
-def test_an_unverified_student_sees_nothing(db: Store) -> None:
-    """Skipping verification must not be a way around the same-school rule."""
+def test_somebody_with_no_school_email_sees_nothing(db: Store) -> None:
+    """Not giving a school must not be a way around the same-school rule."""
     enrol(db, ALICE, "alice@berkeley.edu")
-    students.begin(db, BOB, "bob@berkeley.edu")  # started, never confirmed
     assert not students.visible_to(db, listing_of(ALICE), BOB)
-    with pytest.raises(StudentError, match="six-digit code"):
+    with pytest.raises(StudentError, match="school email"):
         students.check_may_trade(db, listing_of(ALICE), BOB)
 
 
@@ -222,7 +147,7 @@ def test_a_stranger_with_no_email_sees_nothing(db: Store) -> None:
 
 
 def test_a_seller_always_sees_their_own_listing(db: Store) -> None:
-    """Even before verifying, so they aren't locked out of something they posted."""
+    """Even before giving an email, so they aren't locked out of something they posted."""
     assert students.visible_to(db, listing_of(ALICE), ALICE)
 
 
@@ -240,100 +165,6 @@ def test_search_results_are_filtered_to_one_school(db: Store) -> None:
     everything = [listing_of(ALICE, "a"), listing_of(CARL, "c")]
     assert [x.item_id for x in students.listings_for(db, everything, BOB)] == ["a"]
     assert [x.item_id for x in students.listings_for(db, everything, CARL)] == ["c"]
-
-
-# --- Placing a student ----------------------------------------------------------------------
-
-
-def test_a_building_is_matched_by_part_of_its_name(db: Store) -> None:
-    enrol(db, ALICE, "alice@berkeley.edu")
-    spot = students.set_building(db, ALICE, "Unit 1")
-    assert spot.name == "Unit 1 Residence Hall"
-    student = db.student(ALICE)
-    assert student is not None and student.placed
-
-
-def test_an_unknown_building_is_refused_rather_than_guessed(db: Store) -> None:
-    enrol(db, ALICE, "alice@berkeley.edu")
-    with pytest.raises(StudentError, match="couldn't find"):
-        students.set_building(db, ALICE, "Hogwarts")
-
-
-def test_a_student_must_be_verified_before_being_placed(db: Store) -> None:
-    students.begin(db, ALICE, "alice@berkeley.edu")
-    with pytest.raises(StudentError, match="six-digit code"):
-        students.set_building(db, ALICE, "Unit 1")
-
-
-def test_a_campus_with_no_map_says_so(clock: Clock) -> None:
-    store = Store(clock=clock)
-    try:
-        enrol(store, ALICE, "alice@berkeley.edu")
-        with pytest.raises(StudentError, match="map of your campus"):
-            students.set_building(store, ALICE, "Unit 1")
-    finally:
-        store.close()
-
-
-# --- Meeting points -------------------------------------------------------------------------
-
-
-def test_the_meetup_lands_between_the_two_students(db: Store) -> None:
-    enrol(db, ALICE, "alice@berkeley.edu", "Unit 1")
-    enrol(db, BOB, "bob@berkeley.edu", "Foothill")
-    meeting = students.where_to_meet(db, ALICE, BOB)
-    assert meeting.spot.name in {"Free Speech Movement Cafe", "Doe Library", "Memorial Glade"}
-    assert meeting.fair
-
-
-def test_no_meetup_is_ever_somebody_s_dorm(db: Store) -> None:
-    """The point of the feature: never send a student to where the other one lives."""
-    enrol(db, ALICE, "alice@berkeley.edu", "Unit 1")
-    enrol(db, BOB, "bob@berkeley.edu", "Foothill")
-    for meeting in students.other_places(db, ALICE, BOB, limit=10):
-        assert not meeting.spot.private
-        assert meeting.spot.name not in {"Unit 1 Residence Hall", "Foothill Residence Hall"}
-
-
-def test_a_far_away_place_does_not_win_on_its_bonus(db: Store) -> None:
-    enrol(db, ALICE, "alice@berkeley.edu", "Unit 1")
-    enrol(db, BOB, "bob@berkeley.edu", "Foothill")
-    assert students.where_to_meet(db, ALICE, BOB).spot.name != "Far Side Cafe"
-
-
-def test_a_cafe_beats_a_lawn_that_is_slightly_closer(db: Store) -> None:
-    """A place you can wait inside is worth a short detour."""
-    enrol(db, ALICE, "alice@berkeley.edu", "Unit 1")
-    enrol(db, BOB, "bob@berkeley.edu", "Foothill")
-    best = students.where_to_meet(db, ALICE, BOB)
-    assert best.spot.kind in ("cafe", "library")
-
-
-def test_an_unplaced_student_is_asked_for_their_building(db: Store) -> None:
-    enrol(db, ALICE, "alice@berkeley.edu", "Unit 1")
-    enrol(db, BOB, "bob@berkeley.edu")  # no building
-    with pytest.raises(StudentError, match="which building"):
-        students.where_to_meet(db, ALICE, BOB)
-    assert students.other_places(db, ALICE, BOB) == []
-
-
-def test_the_meetup_text_never_names_either_dorm(db: Store) -> None:
-    from yardsale.meetup import describe
-
-    enrol(db, ALICE, "alice@berkeley.edu", "Unit 1")
-    enrol(db, BOB, "bob@berkeley.edu", "Foothill")
-    text = describe(students.where_to_meet(db, ALICE, BOB))
-    assert "Unit 1" not in text and "Foothill" not in text
-    assert "minute walk" in text
-
-
-def test_several_places_are_offered_best_first(db: Store) -> None:
-    enrol(db, ALICE, "alice@berkeley.edu", "Unit 1")
-    enrol(db, BOB, "bob@berkeley.edu", "Foothill")
-    offered = students.other_places(db, ALICE, BOB, limit=3)
-    assert 2 <= len(offered) <= 3
-    walks = [m.longer_walk_metres for m in offered]
-    assert walks == sorted(walks) or offered[0].spot.kind in ("cafe", "library")
 
 
 # --- The campus cache -----------------------------------------------------------------------
@@ -354,23 +185,22 @@ def test_reloading_a_campus_replaces_it(db: Store) -> None:
     assert [s.name for s in db.campus("berkeley.edu")] == ["Free Speech Movement Cafe"]
 
 
-def test_only_schools_with_verified_students_are_warmed(db: Store) -> None:
-    students.begin(db, BOB, "bob@stanford.edu")  # never confirmed
+def test_schools_people_signed_up_from_are_warmed(db: Store) -> None:
     enrol(db, ALICE, "alice@berkeley.edu")
     assert db.schools_with_students() == ["berkeley.edu"]
 
 
-def test_a_campus_survives_a_restart(clock: Clock, tmp_path) -> None:
+def test_a_campus_and_a_student_survive_a_restart(clock: Clock, tmp_path) -> None:
     path = tmp_path / "campus.sqlite3"
     first = Store(path, clock=clock)
     first.save_campus("berkeley.edu", CAMPUS)
-    enrol(first, ALICE, "alice@berkeley.edu", "Unit 1")
+    enrol(first, ALICE, "alice@berkeley.edu")
     first.close()
 
     again = Store(path, clock=clock)
     try:
         student = again.student(ALICE)
-        assert student is not None and student.verified and student.placed
+        assert student is not None and student.school == "berkeley.edu"
         assert again.count_campus("berkeley.edu") == len(CAMPUS)
     finally:
         again.close()
@@ -518,7 +348,7 @@ async def test_warming_an_unmappable_campus_does_not_cache_emptiness(db: Store) 
     assert not db.campus_loaded("nowhere.edu")  # so it can be retried later
 
 
-async def test_only_schools_with_a_verified_student_are_warmed(db: Store) -> None:
+async def test_a_cached_campus_is_not_fetched_again(db: Store) -> None:
     asked: list[str] = []
 
     async def find(school: str):
@@ -527,7 +357,6 @@ async def test_only_schools_with_a_verified_student_are_warmed(db: Store) -> Non
 
     enrol(db, ALICE, "alice@berkeley.edu")  # berkeley is already cached by the fixture
     enrol(db, CARL, "carl@stanford.edu")
-    students.begin(db, BOB, "bob@mit.edu")  # never confirmed
     await students.warm_known_campuses(db, find)
     assert asked == ["stanford.edu"]
 
@@ -564,3 +393,75 @@ async def test_load_drops_places_from_another_campus() -> None:
 
     spots = await campus.load("berkeley.edu", "Berkeley", 37.8719, -122.2585, mixed)
     assert [s.name for s in spots] == ["Free Speech Movement Cafe"]
+
+
+# --- One meeting point on campus ------------------------------------------------------------
+
+
+def test_the_meetup_is_a_public_place_on_campus(db: Store) -> None:
+    meeting = students.where_to_meet(db, "berkeley.edu")
+    assert not meeting.spot.private
+    assert meeting.spot.kind in ("cafe", "library", "student_union", "food_court")
+
+
+def test_a_meetup_is_never_somebody_s_dorm(db: Store) -> None:
+    """The point of the feature: never send a student to where anyone lives."""
+    for meeting in students.other_places(db, "berkeley.edu", limit=10):
+        assert not meeting.spot.private
+        assert meeting.spot.name not in {"Unit 1 Residence Hall", "Foothill Residence Hall"}
+
+
+def test_a_far_away_place_does_not_win(db: Store) -> None:
+    assert students.where_to_meet(db, "berkeley.edu").spot.name != "Far Side Cafe"
+
+
+def test_an_unmapped_campus_says_so(db: Store) -> None:
+    with pytest.raises(StudentError, match="map of your campus"):
+        students.where_to_meet(db, "stanford.edu")
+    assert students.other_places(db, "stanford.edu") == []
+
+
+def test_nobody_is_asked_where_they_live(db: Store) -> None:
+    """A Student holds an email and a school, and nothing about where they are."""
+    enrol(db, ALICE, "alice@berkeley.edu")
+    student = db.student(ALICE)
+    assert student is not None
+    fields = set(vars(student))
+    assert fields == {"owner", "email", "school", "joined_at"}
+
+
+def test_the_centre_is_where_the_dorms_are() -> None:
+    from yardsale.meetup import centre_of
+
+    centre = centre_of(CAMPUS)
+    assert centre is not None
+    # Both dorms are near 37.87, so the centre of campus should be too.
+    assert 37.86 < centre.latitude < 37.88
+    assert -122.26 < centre.longitude < -122.25
+
+
+def test_a_campus_with_no_places_has_no_centre() -> None:
+    from yardsale.meetup import centre_of, choose
+
+    assert centre_of([]) is None
+    assert choose([]) is None
+
+
+def test_a_campus_of_only_dorms_has_nowhere_to_meet() -> None:
+    from yardsale.meetup import choose
+
+    assert choose([UNIT_1, FOOTHILL]) is None
+
+
+def test_an_archive_is_not_a_meeting_place() -> None:
+    """OpenStreetMap tags departmental reading rooms and archives as libraries. A real Berkeley
+    run put "Anthropology Reading Room" and "Environmental Design Archives" in the top five."""
+    from yardsale.meetup import choose, findable
+
+    assert not findable(Spot("Environmental Design Archives", 37.8723, -122.2600, "library"))
+    assert not findable(Spot("Anthropology Reading Room", 37.8723, -122.2600, "library"))
+    assert not findable(Spot("Chemistry Lab", 37.8723, -122.2600, "library"))
+    assert findable(Spot("Doe Library", 37.8723, -122.2600, "library"))
+    assert findable(Spot("Free Speech Movement Cafe", 37.8723, -122.2600, "cafe"))
+    # and a campus of nothing but archives has nowhere to meet
+    assert choose([UNIT_1, Spot("Map Collection", 37.8723, -122.2600, "library")]) is None
