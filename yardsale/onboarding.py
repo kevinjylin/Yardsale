@@ -26,19 +26,13 @@ from uuid import uuid4
 
 from uagents_core.contrib.protocols.chat import MetadataContent
 from uagents_core.contrib.protocols.chat.cards import (
-    ButtonAction,
-    ButtonNode,
     CtaAction,
-    CustomCardPayload,
     FormCardPayload,
     FormField,
-    GroupNode,
-    HeadingNode,
-    TextNode,
     create_card_content,
 )
 
-from yardsale import campus, schools, students
+from yardsale import campus, cards, schools, students
 from yardsale.schools import SchoolError
 from yardsale.store import Store
 
@@ -82,41 +76,22 @@ def signing_up(choice: Mapping[str, object] | None) -> bool:
 
 
 def student_welcome() -> MetadataContent:
-    """The first card a conversation sees: are you a student?"""
-    return create_card_content(
-        CustomCardPayload(
-            root=GroupNode(
-                type="group",
-                direction="column",
-                children=[
-                    HeadingNode(type="heading", value="Yardsale on campus"),
-                    TextNode(
-                        type="text",
-                        value="I connect students at the same university, so you're always "
-                        "trading with your own classmates.",
-                    ),
-                    GroupNode(
-                        type="group",
-                        direction="row",
-                        children=[
-                            ButtonNode(
-                                type="button",
-                                label="Yes, I'm a student",
-                                primary=True,
-                                action=ButtonAction(selection={"action": "student"}),
-                            ),
-                            ButtonNode(
-                                type="button",
-                                label="No",
-                                action=ButtonAction(selection={"action": "not_student"}),
-                            ),
-                        ],
-                    ),
-                ],
-            )
+    """The first card a conversation sees: are you a student? It has no Main menu button,
+    since nothing else opens until the student signs up."""
+    children = [
+        *cards.picture(cards.art("campus"), "Yardsale on campus"),
+        cards.text(
+            "I connect students at the same university, so you're always trading with your own "
+            "classmates."
         ),
-        card_id=uuid4(),
-    )
+        *cards.buttons(
+            [
+                ("Yes, I'm a student", {"action": "student"}),
+                ("No", {"action": "not_student"}),
+            ]
+        ),
+    ]
+    return cards.custom("Yardsale on campus", children)
 
 
 def email_form() -> MetadataContent:

@@ -2041,7 +2041,15 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             "first one there won't be waiting alone."
         )
         card = cards.meetup(
-            label, [(meetup.describe(place), place.spot.kind.replace("_", " ")) for place in places]
+            label,
+            [
+                (
+                    meetup.describe(place),
+                    place.spot.kind.replace("_", " "),
+                    maps.map_url(place.spot, university),
+                )
+                for place in places
+            ],
         )
         return Reply("\n".join(lines), card)
 
@@ -2065,6 +2073,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
                 label,
                 cards.listing_picture(listing),
                 meet,
+                url=record.payment_url,
             )
             return Reply(text, card)
         return Reply(text, cards.notice(text, after, "It's yours"))
@@ -2225,8 +2234,7 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
         if best is not None:
             conv.counter = {"item_id": result.best_item_id, "cents": best}
             conv.awaiting = "counter"
-        pictures = {listing.item_id: cards.listing_picture(listing) for listing in targets}
-        return Reply(haggle_text(result), cards.haggle(result, pictures))
+        return Reply(haggle_text(result), cards.haggle(result))
 
     # --- Other sites ------------------------------------------------------------------------
 
@@ -2447,7 +2455,14 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             label = provider_label()
             text = deal_text(started, title, label)
             if started.payment_status == PENDING and label is not None:
-                card = cards.payment(started.deal_id, started.price_cents, title, label, picture)
+                card = cards.payment(
+                    started.deal_id,
+                    started.price_cents,
+                    title,
+                    label,
+                    picture,
+                    url=started.payment_url,
+                )
                 return Reply(text, card)
             return Reply(text, payment_status_card(started, title))
         if deal.payment_status == PENDING:
@@ -2938,6 +2953,12 @@ def build_chat_protocol(backend: Backend, read: ReadMessage, fetch: FetchPhoto) 
             if n is None or not 0 <= n < len(conv.deals):
                 return "That list is out of date. Search again."
             deal = conv.deals[n]
+            if choice.get("id") and str(deal.get("id")) != str(choice.get("id")):
+                # A card from an earlier search: find that deal, if it's still in the list.
+                found = [d for d in conv.deals if str(d.get("id")) == str(choice.get("id"))]
+                if not found:
+                    return "That list is out of date. Search again."
+                deal = found[0]
             text = (
                 f"{_link(str(deal['title']), str(deal['url']))}: {deal['price']} on {deal['site']}."
             )

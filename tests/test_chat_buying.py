@@ -9,15 +9,10 @@ from collections.abc import AsyncIterator
 
 import pytest
 from uagents_core.contrib.protocols.chat import ChatMessage, MetadataContent
-from uagents_core.contrib.protocols.chat.cards import (
-    Card,
-    CarouselCardPayload,
-    CustomCardPayload,
-    extract_card,
-)
 
 from tests import fakes, sim
 from yardsale import chat
+from yardsale.card_schema import Card, CarouselCardPayload, CustomCardPayload, extract_card
 from yardsale.store import PAID, PENDING, PROPOSED, Store
 
 BIKE = fakes.photo_url("bike")

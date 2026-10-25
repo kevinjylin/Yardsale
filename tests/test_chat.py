@@ -18,14 +18,10 @@ from uagents_core.contrib.protocols.chat import (
     Resource,
     ResourceContent,
 )
-from uagents_core.contrib.protocols.chat.cards import (
-    Card,
-    CarouselCardPayload,
-    extract_card,
-)
 
 from tests import fakes, sim
 from yardsale import bureau_server, chat, photos
+from yardsale.card_schema import Card, CarouselCardPayload, extract_card
 from yardsale.models import Comp
 from yardsale.store import ACTIVE, CANCELED, PROPOSED, Store
 
@@ -378,7 +374,9 @@ async def test_search_and_counter_cards(market: sim.Market, store: Store) -> Non
     carousel = card_in(results)
     assert carousel is not None and isinstance(carousel.payload, CarouselCardPayload)
     item, *others = carousel.payload.items
-    assert [other.id for other in others] == ["haggle", "main-menu"]
+    assert [other.id for other in others] == ["haggle"]
+    menu = carousel.payload.root_cta  # Main menu is the button under the carousel
+    assert menu is not None and menu.selection == {"action": "menu"}
     assert "$300" not in carousel.payload.model_dump_json()  # no floor in cards either
     assert "Its agent:" in await buyer.tap(item.primary_cta.selection)
 
@@ -532,11 +530,13 @@ async def test_a_minimum_far_under_the_market_gets_a_plain_warning(market: sim.M
     reply = await seller.say("ask $900")
     assert "Your $900 asking price is far over what these sell for" in reply
     assert 'Buyers will likely pass at $900. Keep it, or say "ask $340".' in reply
+    assert "Check your price" in reply and "Price looks right" not in reply  # the card's badge
     reply = await seller.say("ask $360, lowest $300")
     assert (
         "Your $360 asking price and $300 minimum are in line with the market: the last 6 sales "
         "were around $340."
     ) in reply
+    assert "Price looks right" in reply and "Check your price" not in reply
     assert "is for sale at $360" in await seller.say("approve")  # the seller's price still wins
 
 

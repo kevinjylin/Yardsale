@@ -67,7 +67,7 @@ links a [submission document](https://docs.google.com/document/d/1UDW-X1C24hxZvi
 | --- | --- |
 | Effective multi-agent collaboration | The pricing agents; a buyer agent haggling with several item agents at once over a published protocol (code done October 24). |
 | Payment Protocol with a credible monetization model | The Market sends agent buyers a Payment Protocol `RequestPayment` with the payment link; Yardsale keeps a 5% commission on each sale (test mode; a Stripe test payment went through end to end on October 24; Visa not yet run). |
-| Interactive Cards | Approve card (seen in ASI:One); sales carousel, seller prices form, haggling card, and payment card (code done October 24, not yet seen in ASI:One). |
+| Interactive Cards | Every reply is a card since October 25: a home menu, proposals, forms, carousels, and buttons that open links. Seen in the ASI:One app: the Approve card (October 23), and the campus cards, email form, proposal card, sales carousel, and menu (October 25). Redesigned the same day for how ASI:One's web app lays cards out ([background.md](background.md#how-asione-lays-out-a-card)); checked with ASI:One's own card component, not yet seen in the app. |
 | Reliability and recovery from failed tool calls | Failed pricing steps return a reason, a resent message gets the same answer, restarts bring every active item agent back, and the server starts even when Agentverse drops the connection. |
 | Creative use of real-time data and external services | Live eBay sold listings through Apify. |
 | Could keep running after the hackathon | Saved state in SQLite; needs a hosted server. |
@@ -182,7 +182,7 @@ Apify, Claude, and ASI:One answers and hasn't been run live yet):
 | Deal Finder agent: score against eBay sold comps, "why it's a deal" | Buyers | Built ([dealfinder.py](../yardsale/dealfinder.py), [deals.py](../yardsale/deals.py)), tested offline: price against the typical sold price, then quality, then fit, with a one-line reason each. One live probe October 24: all four sources parsed; OfferUp ignored the result cap and bike parts ranked too high (fixes in progress). The agent (`@ys-dealfinder`) is on Agentverse since October 24. |
 | Standing searches (`watch for it`, every 6 hours for a week) | Buyers | Built |
 | Agent emails a Craigslist seller and negotiates for the buyer | Buyers | Built ([craigslist_buyer.py](../yardsale/craigslist_buyer.py)); tested through a fake relay, both agents haggling through it to a deal |
-| `@yardsale` on Fetch Business with OpenAPI tools | Both | Built, live October 24 (Plus trial, Cloudflare tunnel): `searchListings`, `searchOtherSites`, and the haggle and buy calls. `priceCheck` (October 24) and `startNegotiation` with `getNegotiation` (October 25: the Craigslist email negotiation, so the buyer product finishes in one chat) are built and tested offline; the Business Tool has to be re-imported for them ([fetch-business.md](fetch-business.md)). The haggle and buy calls are off unless `YARDSALE_API_HAGGLE=1`. |
+| `@yardsale` on Fetch Business with OpenAPI tools | Both | Built, live October 24 (Plus trial, Cloudflare tunnel): `searchListings`, `searchOtherSites`, and the haggle and buy calls. `priceCheck` (October 24) and `startNegotiation` with `getNegotiation` (October 25: the Craigslist email negotiation, so the buyer product finishes in one chat) are built and tested offline, and the Business Tool was re-created with them on October 25 ([fetch-business.md](fetch-business.md)). The haggle and buy calls are off unless `YARDSALE_API_HAGGLE=1`. |
 
 **Also built, not pitched:**
 
@@ -435,13 +435,13 @@ offline" means it runs in the tests with fake services and hasn't been run live 
 | Seller price feedback ("your minimum is far under what it sells for") | Built ([advice.py](../yardsale/advice.py), `pricing.price_verdict`), tested offline: 35% or more off the market gets a plain warning with the numbers and a suggested price. |
 | One agent per item, with its own address | Built. Registered on the Almanac by default. |
 | Item agents hosted on Agentverse | Built: `YARDSALE_HOST_ITEMS=N` hosts up to N through the Hosting API, falling back to the server. Run live October 24: two hosted test bikes got public profiles, haggled, and sold. |
-| Seller approval, cards | Built: Approve card, sales carousel, prices form. The Approve card showed in the real ASI:One app. |
+| Seller approval, cards | Built: Approve card, sales carousel, prices form, and a card on every reply. The Approve card showed in the real ASI:One app on October 23, and the proposal card, sales carousel, and menu on October 25. That day's layout redesign hasn't been seen in the app yet. |
 | Craigslist post text; item agent answers Craigslist buyers by email | Built ([craigslist_mail.py](../yardsale/craigslist_mail.py)); tested with a fake inbox and a fake relay only. Not yet run against real Craigslist or Gmail. |
 | Haggling within the seller's limits | Built: several rounds, agree-then-accept, counters stop a private gap above the floor, and each counter cites the market line (`haggle.with_reason`), never the floor. Tested offline. |
 | Deal Finder: eBay, Craigslist, OfferUp, Facebook Marketplace under the max | Built ([dealfinder.py](../yardsale/dealfinder.py), [elsewhere.py](../yardsale/elsewhere.py), [sources.py](../yardsale/sources.py)) as its own agent, in the chat and in `@yardsale` as `searchOtherSites`, with a carousel card and `watch for it`. One live probe October 24: all four sources parsed; OfferUp ignored the result cap (fix in progress). On Agentverse as `@ys-dealfinder` since October 24. |
 | Deal scores against sold comps, "why it's a deal" | Built ([deals.py](../yardsale/deals.py)), tested offline: price against the typical eBay sold price, then quality (condition, photos, seller rating, title, age), then fit; parts, repairs, lots, and accessories sink. In the live probe, bike parts still ranked too high (fix in progress). |
 | Agent emails a Craigslist seller for the buyer | Built ([craigslist_buyer.py](../yardsale/craigslist_buyer.py)): `negotiate <relay address> "<title>" max $250 asking $300`; at most 4 offers, the max never emailed. Tested through a fake relay, including Yardsale's buyer and seller agents haggling through it. |
-| `@yardsale` on Fetch Business | Set up October 24: a description, a knowledge entry, a skill, and (on the Plus trial) an OpenAPI Integration with Yardsale's HTTP API. Live October 24 through a Cloudflare quick tunnel. Tools: `searchListings`, `searchOtherSites`, `priceCheck` (built October 24, tested offline), `startNegotiation` and `getNegotiation` (October 25, tested offline), and only with `YARDSALE_API_HAGGLE=1` `startHaggle`, `getHaggle`, `acceptDeal`, `getDeal`. The Business Tool has to be re-imported for `priceCheck` and `startNegotiation` and the skill text updated; the steps are in [fetch-business.md](fetch-business.md). Sellers' photos still go to `@ys-orchestrator`. |
+| `@yardsale` on Fetch Business | Set up October 24: a description, a knowledge entry, a skill, and (on the Plus trial) an OpenAPI Integration with Yardsale's HTTP API. Live October 24 through a Cloudflare quick tunnel. Tools: `searchListings`, `searchOtherSites`, `priceCheck` (built October 24, tested offline), `startNegotiation` and `getNegotiation` (October 25, tested offline), and only with `YARDSALE_API_HAGGLE=1` `startHaggle`, `getHaggle`, `acceptDeal`, `getDeal`. The Business Tool was re-created on October 25 with `searchListings`, `searchOtherSites`, `priceCheck`, `startNegotiation`, and `getNegotiation` (until then it still had the October 24 tools), and the skill, Business Information, starter prompts, and description were updated in the workbench the same day. The steps are in [fetch-business.md](fetch-business.md). Sellers' photos still go to `@ys-orchestrator`. |
 | Agent-to-agent buying (the Shopper, haggling card, Payment Protocol) | Built and live October 24, in ASI:One and through `@yardsale`. Not pitched. |
 | Payment links, commission | Built for test mode: Visa Pay By Link sandbox or Stripe test checkout, 5% commission. Stripe run live October 24: a $295 deal was paid with a test card and recorded with its commission. Visa not yet run (no sandbox keys). |
 | Selling on the seller's own eBay | Built ([ebay_seller.py](../yardsale/ebay_seller.py)); tested against a local stand-in only; needs eBay developer keys. |
@@ -449,10 +449,12 @@ offline" means it runs in the tests with fake services and hasn't been run live 
 | Innovation Lab badges, agent addresses in the README | Done in the repo. Agentverse shows the badges after each agent reconnects. |
 | Public URL | `YARDSALE_PUBLIC_URL` exists but hasn't been used. ASI:One reaches the Market through its Agentverse mailbox, and item agents run in the same server or on Agentverse, so the chat flow doesn't need it; outside agents do. |
 
-The installed cards module has carousel, detail, form, review, and custom cards, so the sales
-carousel, rules form, and deals carousel need no new library. A tapped button comes back as JSON
-text after an @mention, or as plain prose when ASI:One's planner relays it, so both have to be
-read.
+ASI:One's cards come in five kinds: carousel, detail, form, review, and custom. The installed
+`uagents_core` cards module rejects fields ASI:One's web app reads (picture buttons, link
+buttons, boxed groups, a carousel's bottom button, and `resubmittable`), so since October 25
+Yardsale builds cards with its own [card_schema.py](../yardsale/card_schema.py). A tapped
+button comes back as JSON text after an @mention, or as plain prose when ASI:One's planner
+relays it, so both have to be read.
 
 ## Known problems
 
@@ -465,11 +467,16 @@ read.
   results, but OfferUp ignored the result cap (a bigger paid run than asked for) and bike parts
   ranked too high for a bike search. Fixes are in progress; run the demo search end to end once
   they land, and the day before.
-- **`priceCheck` and `startNegotiation` aren't in `@yardsale` yet.** The endpoints are built,
-  but Fetch only sees them after the Business Tool is re-imported from the tunnel's
-  `/openapi.json` and the skill names them ([fetch-business.md](fetch-business.md)). The same
-  re-import drops `startHaggle`, `getHaggle`, `acceptDeal`, and `getDeal`, which are off unless
-  `YARDSALE_API_HAGGLE=1`.
+- **`@yardsale` had no search or price tools until October 25.** Its Business Tool still had
+  the six tools imported on October 24 (`searchListings`, the four haggle and deal calls, and
+  the description), so `searchOtherSites` and `priceCheck` had never reached it, and once the
+  haggle calls were gated off it could only search Yardsale's listings. On October 25 it was
+  deleted and re-created from the tunnel's `/openapi.json` with the API key, and now has
+  `searchListings`, `searchOtherSites`, `priceCheck`, `startNegotiation`, `getNegotiation`,
+  and the description, with confirmation on `startNegotiation`
+  ([fetch-business.md](fetch-business.md)). The skill, Business Information, starter prompts,
+  and description were updated the same day. Not yet tried in its chat with the new tools
+  beyond a free `getNegotiation` call; a search or price check there is a paid Apify run.
 - **Craigslist's relay is unverified.** Nothing has been run against real Craigslist: whether
   the relay accepts replies from the posting email, keeps the subject, how long it takes, and
   whether it strips links (if it does, `YARDSALE_MAIL_LINKS=0` gives the amount and asks for a

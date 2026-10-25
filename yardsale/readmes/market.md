@@ -78,8 +78,9 @@ Yardsale is a team of agents. This one talks to you. It reads your message with 
 - A **deal finder** searches eBay, Craigslist, OfferUp, and Facebook Marketplace live for buyers
   and keeps standing searches.
 
-Yardsale is also a Fetch Business: ask `@yardsale` in ASI:One to search for deals or check a
-price. To list something, attach the photo here, since a photo has to reach Claude.
+Yardsale is also a Fetch Business: ask `@yardsale` in ASI:One to search for deals, check a
+price, or have Yardsale's agent email a Craigslist seller and haggle for you. To list something,
+attach the photo here, since a photo has to reach Claude.
 
 ## Limits
 

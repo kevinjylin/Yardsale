@@ -106,6 +106,10 @@ def _suggested_floor(listing: Listing) -> int | None:
     return view.range_low_cents if view is not None else None
 
 
+IN_LINE = "in line with the market"
+"""The words of the one feedback that isn't a warning, so a card can tell them apart."""
+
+
 def price_feedback(listing: Listing, n: int | None = None) -> str:
     """A personal word about the prices the seller gave, with the numbers: far under what it
     sells for, far over, or in line. "" when the seller gave no price or nothing is known.
@@ -155,7 +159,7 @@ def price_feedback(listing: Listing, n: int | None = None) -> str:
         return "\n".join(notes)
     if fine and facts:
         prices = " and ".join(fine)
-        return f"Your {prices} {'are' if len(fine) > 1 else 'is'} in line with the market: {facts}."
+        return f"Your {prices} {'are' if len(fine) > 1 else 'is'} {IN_LINE}: {facts}."
     return ""
 
 

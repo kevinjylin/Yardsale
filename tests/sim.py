@@ -28,10 +28,8 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 from uagents_core.contrib.protocols.chat.cards import (
-    Card,
     SelectionValue,
     create_card_response_content,
-    extract_card,
 )
 
 from tests import fakes
@@ -39,6 +37,27 @@ from yardsale import bureau_server, chat
 from yardsale.appraiser import Judge
 from yardsale.asione import ReadMessage
 from yardsale.avatars import ItemPictures
+from yardsale.card_schema import (
+    AccordionNode,
+    BadgeNode,
+    ButtonAction,
+    ButtonNode,
+    Card,
+    CarouselCardPayload,
+    ChoiceGridNode,
+    CtaAction,
+    CustomCardPayload,
+    DetailCardPayload,
+    FormCardPayload,
+    GroupNode,
+    HeadingNode,
+    InputNode,
+    LabelIcon,
+    ListNode,
+    SectionNode,
+    TextNode,
+    extract_card,
+)
 from yardsale.chat import FetchPhoto
 from yardsale.craigslist_mail import Mailbox, MailSettings
 from yardsale.ebay_seller import EbaySeller
@@ -71,58 +90,134 @@ def cards_of(msg: ChatMessage) -> list[Card]:
 
 def card_text(card: Card) -> str:
     """Everything a card shows, one piece per line: titles, text, "label: value" rows, badges,
-    carousel items, and button labels. What a person reading the card would see."""
+    carousel items, choices, accordion items, and button labels. What a person reading the card
+    would see; pictures add nothing."""
     lines: list[str] = []
 
-    def walk(node: Any) -> None:
-        if isinstance(node, list):
-            for child in node:
-                walk(child)
-            return
-        if not isinstance(node, dict):
-            return
-        for key in ("title", "subtitle", "value", "label", "secondary_text", "placeholder"):
-            if isinstance(node.get(key), str) and node.get("type") != "image":
-                if key == "value" and "label" in node and node.get("type") is None:
-                    continue
-                lines.append(node[key])
-        if "label" in node and isinstance(node.get("value"), str) and node.get("type") is None:
-            lines.pop() if lines and lines[-1] == node["label"] else None
-            lines.append(f"{node['label']}: {node['value']}")
-        for key in ("primary_cta", "submit_cta", "approve_cta", "reject_cta", "badges"):
-            walk(node.get(key))
-        for key in ("root", "children", "items", "summary_rows", "ctas", "fields"):
-            walk(node.get(key))
+    def add(*texts: str | None) -> None:
+        lines.extend(text for text in texts if text)
 
-    walk(card.payload.model_dump(exclude_none=True))
+    def node(element: Any) -> None:
+        if isinstance(element, TextNode | HeadingNode):
+            add(element.value)
+        elif isinstance(element, BadgeNode):
+            add(element.label)
+        elif isinstance(element, ButtonNode):
+            add(_label(element, alt=False))  # a picture shows no words
+        elif isinstance(element, SectionNode):
+            add(element.title, element.subtitle)
+            nodes(element.children)
+        elif isinstance(element, GroupNode):
+            nodes(element.children)
+        elif isinstance(element, InputNode):
+            add(element.label, element.description, element.placeholder)
+        elif isinstance(element, ListNode):
+            for item in element.items:
+                nodes(item.children)
+        elif isinstance(element, ChoiceGridNode):
+            for choice in element.choices:
+                add(
+                    choice.label,
+                    choice.secondary_text,
+                    choice.badge.label if choice.badge else None,
+                )
+        elif isinstance(element, AccordionNode):
+            for fold in element.items:
+                add(fold.label, fold.subtitle, fold.badge.label if fold.badge else None)
+                nodes(fold.children)
+
+    def nodes(elements: list[Any]) -> None:
+        for element in elements:
+            node(element)
+
+    payload = card.payload
+    if isinstance(payload, CarouselCardPayload):
+        add(payload.title, payload.subtitle)
+        for item in payload.items:
+            add(item.title, item.subtitle, item.secondary_text, item.primary_cta.label)
+            add(*(badge.label for badge in item.badges or []))
+        add(payload.root_cta.label if payload.root_cta else None)
+    elif isinstance(payload, DetailCardPayload):
+        add(payload.title)
+        add(*(f"{row.label}: {row.value}" for row in payload.summary_rows or []))
+        if payload.sub_options is not None:
+            add(payload.sub_options.label)
+            for option in payload.sub_options.choices:
+                add(option.label, option.secondary_text)
+        add(*(cta.label for cta in payload.ctas))
+    elif isinstance(payload, FormCardPayload):
+        add(payload.title)
+        for form_field in payload.fields:
+            add(form_field.label, form_field.description, form_field.placeholder)
+        add(payload.submit_cta.label, payload.cancel_cta.label if payload.cancel_cta else None)
+    else:
+        node(payload.root)
     return "\n".join(lines)
 
 
-def card_buttons(card: Card) -> list[tuple[str, dict[str, Any]]]:
-    """Every (label, selection) a person can tap on a card, in order."""
-    found: list[tuple[str, dict[str, Any]]] = []
+def _label(button: ButtonNode, alt: bool = True) -> str:
+    """A button's label: its words, or (with `alt`) a picture-only button's alt text."""
+    if isinstance(button.label, LabelIcon):
+        return button.label.label
+    if button.label is not None:
+        return button.label
+    return (alt and button.image and button.image.alt) or ""
 
-    def walk(node: Any) -> None:
-        if isinstance(node, list):
-            for child in node:
-                walk(child)
-            return
-        if not isinstance(node, dict):
-            return
-        if node.get("type") == "button":
-            found.append((node["label"], dict(node["action"]["selection"])))
-        if isinstance(node.get("action"), dict) and node.get("type") is None:
-            found.append(("", dict(node["action"]["selection"])))
-        for key in ("primary_cta", "submit_cta", "approve_cta", "reject_cta"):
-            if isinstance(node.get(key), dict):
-                found.append((node[key]["label"], dict(node[key]["selection"])))
-        for cta in node.get("ctas") or []:
-            found.append((cta["label"], dict(cta["selection"])))
-        for key in ("root", "children", "items"):
-            walk(node.get(key))
 
-    walk(card.payload.model_dump(exclude_none=True))
+def _actions(card: Card) -> list[tuple[str, CtaAction | ButtonAction]]:
+    """Every (label, action) on a card, in the order a person sees them. A list item's action
+    has no label."""
+    found: list[tuple[str, CtaAction | ButtonAction]] = []
+
+    def nodes(elements: list[Any]) -> None:
+        for element in elements:
+            if isinstance(element, ButtonNode):
+                found.append((_label(element), element.action))
+            elif isinstance(element, SectionNode | GroupNode):
+                nodes(element.children)
+            elif isinstance(element, ListNode):
+                for item in element.items:
+                    if item.action is not None:
+                        found.append(("", item.action))
+                    nodes(item.children)
+            elif isinstance(element, AccordionNode):
+                for fold in element.items:
+                    nodes(fold.children)
+
+    payload = card.payload
+    if isinstance(payload, CarouselCardPayload):
+        found += [(item.primary_cta.label, item.primary_cta) for item in payload.items]
+        if payload.root_cta is not None:
+            found.append((payload.root_cta.label, payload.root_cta))
+    elif isinstance(payload, DetailCardPayload):
+        found += [(cta.label, cta) for cta in payload.ctas]
+    elif isinstance(payload, FormCardPayload):
+        found.append((payload.submit_cta.label, payload.submit_cta))
+        if payload.cancel_cta is not None:
+            found.append((payload.cancel_cta.label, payload.cancel_cta))
+    else:
+        assert isinstance(payload, CustomCardPayload)
+        nodes([payload.root])
     return found
+
+
+def card_buttons(card: Card) -> list[tuple[str, dict[str, Any]]]:
+    """Every (label, selection) a person can tap on a card, in order. Link-only buttons are
+    left out: they open a page and never reach the agent."""
+    return [
+        (label, dict(action.selection))
+        for label, action in _actions(card)
+        if action.selection is not None
+    ]
+
+
+def card_links(card: Card) -> list[tuple[str, str]]:
+    """Every (label, URL) a button on a card opens."""
+    return [
+        (label, action.redirect)
+        for label, action in _actions(card)
+        if isinstance(action, ButtonAction) and action.redirect is not None
+    ]
 
 
 def button(msg: ChatMessage, action: str, **match: Any) -> dict[str, Any]:

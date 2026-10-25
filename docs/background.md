@@ -81,7 +81,7 @@ That's the visual proof judges will remember.
 
 | Agent                       | Runs where                                  | Agentverse slots       |
 | --------------------------- | ------------------------------------------- | ---------------------- |
-| `@yardsale`                 | Fetch Business (a personal agent, Plus trial). Calls Yardsale's HTTP API to search, haggle, and buy; sends sellers to the Market. | Unknown (mentor Q) |
+| `@yardsale`                 | Fetch Business (a personal agent, Plus trial). Calls Yardsale's HTTP API to search, check prices, and have the buyer agent email Craigslist sellers (haggling and buying only with `YARDSALE_API_HAGGLE=1`); sends sellers to the Market. | Unknown (mentor Q) |
 | Market agent ("Yardsale Orchestrator", `@ys-orchestrator`) | Our Bureau server, Agentverse mailbox so ASI:One can reach it. Speaks the Chat Protocol. | 1 |
 | Identifier                  | Our Bureau server, Agentverse mailbox       | 1                      |
 | Researcher                  | Our Bureau server, Agentverse mailbox       | 1                      |
@@ -102,29 +102,61 @@ sections cover it.
 
 ## Every reply is a card
 
-Code: [yardsale/cards.py](../yardsale/cards.py) (layout) and [yardsale/chat.py](../yardsale/chat.py)
-(what each card says). Since October 25, every Market reply in the ASI:One chat is one line of
-text plus an Interactive Card, the way ResourcePilot does it:
+Code: [yardsale/cards.py](../yardsale/cards.py) (layout),
+[yardsale/card_schema.py](../yardsale/card_schema.py) (what ASI:One's web app accepts), and
+[yardsale/chat.py](../yardsale/chat.py) (what each card says). Since October 25, every Market
+reply in the ASI:One chat is one line of text plus an Interactive Card, the way ResourcePilot
+does it. The layout was redesigned later that day, after the real app showed the home menu as
+one long column (see [How ASI:One lays out a card](#how-asione-lays-out-a-card)):
 
-- **A home menu.** "menu", "help", a first hello, or the Main menu button shows tiles: Sell
-  something, Find a deal, My listings, My orders, Watches, Haggle on Craigslist (and Your eBay
-  when eBay selling is on), with badges such as "2 for sale" or "1 to pay".
+- **A home menu.** "menu", "help", a first hello, or the Main menu button shows the two
+  products as picture tiles side by side (Sell something, Find a deal), then the rest as
+  buttons two to a row: Approve when proposals are waiting, My listings, My orders, Watches,
+  Haggle on Craigslist, Your eBay when eBay selling is on, and Where to meet once the
+  conversation has given its school. Each label
+  carries its status ("My listings · 2 for sale", "My orders · 1 to pay"). The menu can be
+  tapped again after a tap.
 - **No dead ends.** Every card except the menu has a Main menu button, and most have the next
   step as buttons: Approve & list, Change prices, Write my Craigslist post, View, Make an offer,
-  Haggle for me, Buy at $X, I've paid, Get the link, Watch for more, Stop.
+  Haggle for me, Buy at $X, I've paid, Get the link, Watch for more, Stop. Buttons come two to a
+  row, the main one first and Main menu last.
 - **Forms instead of typing.** Finding a deal (what and your max), changing prices,
-  making an offer, and setting a haggle max are form cards.
+  making an offer, and setting a haggle max are form cards. Two price fields sit side by side.
+- **Facts in boxes.** Badges sit in one row. Facts (an item's agent, its price, an order
+  number) are a boxed list of labels and values, and steps are a boxed numbered list. The
+  haggle result shows each seller in its own box, with the rounds on one line and no picture
+  per seller. An item's own page (its photo, its facts, its buttons) is built the same way
+  rather than as ASI:One's detail card, which puts every button on one line: with five, they
+  ran past the edge of a 380 px phone screen. A proposal's note on the seller's price has a
+  "Check your price" badge when the price is far off, and "Price looks right" when it isn't.
 - **Pictures.** Each screen has a drawing from [assets/cards](../assets/cards) (made by
   [scripts/make_card_art.py](../scripts/make_card_art.py); prompts in
   [assets/PROMPTS.md](../assets/PROMPTS.md)), served from the repository's public raw GitHub
-  URL. A listing shows the closest same-product eBay sale's photo, labeled as such on buyer
-  cards. `YARDSALE_CARD_ART` sets the base URL; set it empty to send cards without pictures.
-  New drawings only show once they're pushed to `main`.
-- **Text still works.** Links stay in the text line, since card text can't be clicked, and the
-  text names the typed command for every button ("Tap Approve, or reply "approve""), because
-  ASI:One's planner relays taps as prose and some clients show no cards. A tap does exactly
-  what the typed command does, with the same checks. Floors appear only on the seller's own
-  cards, never a buyer's.
+  URL and shown as a short 3:1 banner above the text. A listing shows the closest same-product
+  eBay sale's photo at 16:9, labeled as such on buyer cards. `YARDSALE_CARD_ART` sets the base
+  URL; set it empty to send cards without pictures. New drawings only show once they're pushed
+  to `main`.
+- **Links open from buttons.** "Pay $X" opens the payment link, a deal's card has "Open on
+  eBay" (or its own site), a hosted item's live card has "See its agent" (its Agentverse
+  profile), and the Craigslist post card has "Open Craigslist". A link button sends nothing to
+  the agent. Each meeting spot on campus opens its map.
+- **Carousels stay tappable.** Search results, deals, your listings, orders, and the eBay sales
+  can be tapped again after a tap, so opening one deal doesn't hide the others. Main menu is a
+  button under the carousel, not its last item. With three or more items, a carousel shows one
+  at a time, with arrows and "1 / 6" (`style: "slide"`); otherwise ASI:One stacks them, and six
+  eBay sales with a photo each came to about 2,000 px. A deal's button carries the deal's ID,
+  so a tap on a card from an earlier search opens that deal or says the list is out of date,
+  never another deal.
+- **Text still works.** Links also stay in the text line, since card text can't be clicked and
+  some clients show no cards, and the text names the typed command for every button ("Tap
+  Approve, or reply "approve""), because ASI:One's planner relays taps as prose. A tap does
+  exactly what the typed command does, with the same checks. Floors appear only on the seller's
+  own cards, never a buyer's.
+
+The redesigned cards are built and checked two ways: each one is rendered with ASI:One's own
+card component (loaded from asi1.ai), and the tests check every card against
+`card_schema.py`. They haven't been seen in the real ASI:One app yet; that needs the new code on
+the server and a chat.
 
 **One message per answer.** On October 25 the real ASI:One app showed every card of a turn
 twice, a stale "Pricing your stuff" card and the home menu beside a finished proposal, and
@@ -137,8 +169,37 @@ then the sales carousel), with no card twice for one message. Only slow work sti
 "still working" with the progress card, then the result without it. Several photos and other
 sites' deals still follow as their own messages.
 
-Seen in the real ASI:One app on October 25, before that fix: the campus cards, the email form,
-the proposal card, the sales carousel, and the menu.
+Seen in the real ASI:One app on October 25, before that fix and before the layout redesign: the
+campus cards, the email form, the proposal card, the sales carousel, and the menu.
+
+### How ASI:One lays out a card
+
+On October 25 the real ASI:One app showed the home menu as one long column: every tile,
+picture, and button stacked, though the code put tiles two to a row. So we read asi1.ai's own
+JavaScript (its card schemas and its renderer) the same day. What it showed:
+
+- **Only buttons, pictures, and fields share a line.** In a `row` group, buttons, images, and
+  inputs split the line equally, and short text and badges sit beside them. Any group, list, or
+  section takes a whole line. Each menu tile was a column group, so each got its own line, and
+  the "picture beside the text" layout put a full-width 16:9 picture (about 290 px tall) on top
+  of every card.
+- **A carousel stacks its items** one under another unless it sets `style: "slide"`, which
+  shows one item at a time with arrows. ASI:One's detail card puts all its buttons in one
+  line, however many there are.
+- **A card locks after its first tap** unless its metadata sets `resubmittable`: every button
+  and field is disabled, and in a carousel every other item's button disappears. So after
+  opening one deal, another couldn't be opened.
+- **The app accepts more than the Python package lets you send.** `uagents_core` 0.4.12 (the
+  newest on PyPI) rejects buttons with a picture (a tile), buttons that open a link
+  (`redirect`), boxed groups (`style: "inset"`), a button under a carousel (`root_cta`),
+  accordions, and the `resubmittable` flag, all of which the web app reads. So Yardsale builds
+  cards with its own module, `card_schema.py`, which mirrors what the app reads.
+- **A card the app rejects isn't shown at all**; the message's text still is. The app checks
+  each card strictly (an unknown field fails it), which is why the tests check every card
+  against `card_schema.py`.
+- **A tap sends a chat message**: `@<agent address>` followed by the button's selection as JSON,
+  with the card's field values merged in. A link-only button opens the link in a new tab and
+  sends nothing.
 
 ## Selling in the ASI:One chat
 
@@ -457,9 +518,10 @@ Since October 24 the description leads with the two products (deals for buyers, 
 sellers), and since October 25 the haggle and deal operations are left out unless
 `YARDSALE_API_HAGGLE=1` (marked "advanced" when they're in), so `@yardsale` searches, checks
 prices, and negotiates by email; it also says, wherever photos come up, that Claude reads them and ASI:One's models
-read typed text only. The Business Tool has to be re-imported for `@yardsale` to see new
-operations; [fetch-business.md](fetch-business.md) has the workbench steps, the Skill text, and
-what Fetch Business can and can't link to our agents.
+read typed text only. The Business Tool has to be re-created for `@yardsale` to see new
+operations (done October 25, so it has the five above and the description);
+[fetch-business.md](fetch-business.md) has the workbench steps, the Skill text, and what Fetch
+Business can and can't link to our agents.
 
 Each haggle is its own buyer (`buyer_ref` `api-<haggle id>`), so its prices and deals are
 separate from chat buyers', and the API only shows deals made through it. Negotiations started
@@ -755,11 +817,15 @@ per agent, because agent addresses come from the master seed and don't change.
 - **Telling sellers about a sale.** The seller sees a sale under "my listings"; Yardsale doesn't
   message them when it happens.
 - **Interactive Cards in the real app.** Every reply carries a card (see "Every reply is a
-  card"), built with the installed `uagents_core.contrib.protocols.chat.cards` module
-  (metadata only, no protocol digest change). Only the Approve card has been seen in ASI:One's
-  web app, before the October 25 redesign; ASI:One's planner API received the haggling card as
-  a card for the buyer to act on. Every reply also works as plain text, and typed commands do
-  the same things.
+  card"), built with Yardsale's own [card_schema.py](../yardsale/card_schema.py), which mirrors
+  what ASI:One's web app reads, since the installed `uagents_core` cards module rejects some of
+  those fields (metadata only, no protocol digest change). Seen in ASI:One's web app: the
+  Approve card on October 23, and on October 25 the campus cards, the email form, the proposal
+  card, the sales carousel, and the menu, all before that day's layout redesign. The redesigned
+  cards have been rendered with ASI:One's own card component and checked against its schema,
+  but not yet seen in the app. ASI:One's planner API received the haggling card as a card for
+  the buyer to act on. Every reply also works as plain text, and typed commands do the same
+  things.
 - **Payments.** Built for test mode. On October 24, a hosted test bike was haggled to $295 from a chat, and the Stripe test checkout was paid with Stripe's test card. Within a minute the server's Stripe check marked the deal paid, recorded a $14.75 commission and a $280.25 payout, and marked the listing sold. Visa hasn't been run (no sandbox keys):
   its "paid" check searches transactions for the deal ID, and whether Pay By Link payments are
   filed under it is unverified. Payouts to sellers aren't automated.

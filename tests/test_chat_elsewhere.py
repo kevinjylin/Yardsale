@@ -10,10 +10,10 @@ from collections.abc import AsyncIterator
 
 import pytest
 from uagents_core.contrib.protocols.chat import ChatMessage, MetadataContent
-from uagents_core.contrib.protocols.chat.cards import Card, CarouselCardPayload, extract_card
 
 from tests import fakes, sim
 from yardsale import bureau_server, chat, commands
+from yardsale.card_schema import Card, CarouselCardPayload, extract_card
 from yardsale.sources import ExternalListing, SourceError
 from yardsale.store import Store
 
@@ -119,6 +119,24 @@ async def test_nothing_on_yardsale_shows_the_best_deals_elsewhere(
     assert ebay.calls == ["road bike"]
 
 
+async def test_a_tapped_deal_is_found_by_its_id_even_on_an_older_card(shop: sim.Market) -> None:
+    """Deal cards stay tappable, so a tap can come from a card an earlier search made. The deal
+    is found by its id, never by a number that now points at another deal."""
+    buyer = shop.user("buyer")
+    reply = await buyer.exchange(sim.chat_message("find me a road bike under $300"))
+    card = card_in(reply)
+    assert card is not None and isinstance(card.payload, CarouselCardPayload)
+    assert card.resubmittable
+    first, second, *_ = [
+        item.primary_cta.selection
+        for item in card.payload.items
+        if item.primary_cta.selection["action"] == "deal"
+    ]
+    assert "[Trek road bike 54cm](https://craigslist.example.test/" in await buyer.tap(first)
+    assert "Giant road bike" in await buyer.tap({**second, "n": first["n"]})
+    assert "out of date" in await buyer.tap({**first, "id": "craigslist:gone"})
+
+
 async def test_deals_are_scored_against_what_the_item_sells_for(
     store: Store, ebay: Site, craigslist: Site
 ) -> None:
@@ -152,9 +170,10 @@ async def test_deals_are_scored_against_what_the_item_sells_for(
     assert "$400 on Craigslist, pickup only, $100 over budget." in lines[first + 3]
     card = card_in(reply)
     assert card is not None and isinstance(card.payload, CarouselCardPayload)
-    *items, watch, menu = card.payload.items
+    *items, watch = card.payload.items
     assert watch.primary_cta.selection == {"action": "watch"}
-    assert menu.primary_cta.selection == {"action": "menu"}
+    menu = card.payload.root_cta  # Main menu is the button under the carousel
+    assert menu is not None and menu.selection == {"action": "menu"}
     assert [item.subtitle for item in items] == [
         "$180 on Craigslist, $120 under budget",
         "$240 with shipping on eBay, $60 under budget",
@@ -204,7 +223,7 @@ async def test_when_nothing_fits_the_budget_the_closest_are_shown_marked(store: 
     assert "$210 on eBay, shipping unknown, $60 over budget before shipping" in lines[header + 2]
     card = card_in(reply)
     assert card is not None and isinstance(card.payload, CarouselCardPayload)
-    deals = card.payload.items[:-2]  # then "Watch for more" and "Main menu"
+    deals = card.payload.items[:-1]  # then "Watch for more"
     assert all("Over budget" in [b.label for b in item.badges or []] for item in deals)
 
 

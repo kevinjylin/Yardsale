@@ -16,16 +16,12 @@ from uuid import uuid4
 
 import pytest
 from uagents_core.contrib.protocols.chat import ChatMessage, MetadataContent
-from uagents_core.contrib.protocols.chat.cards import (
-    Card,
-    CarouselCardPayload,
-    create_card_response_content,
-    extract_card,
-)
+from uagents_core.contrib.protocols.chat.cards import create_card_response_content
 
 from tests import fakes, sim
 from tests.test_advice import listing as shoes_listing
 from yardsale import chat, onboarding
+from yardsale.card_schema import Card, CarouselCardPayload, extract_card
 from yardsale.models import Comp
 from yardsale.store import PROPOSED, Listing, Store
 
@@ -121,7 +117,7 @@ async def test_signing_up_with_a_photo_is_one_message_per_turn(campus: None, sto
         welcome = await turn(seller, first)
         assert len(welcome) == 1
         assert welcome[0].text() == onboarding.ARE_YOU_A_STUDENT
-        assert [title(c) for c in cards_in(welcome)] == [""]  # the "Yardsale on campus" card
+        assert [title(c) for c in cards_in(welcome)] == ["Yardsale on campus"]
         assert sum(block.metadata == UPLOADS for block in metadata(welcome[0])) == 1
         assert_each_card_once(welcome)
 
@@ -204,7 +200,7 @@ async def test_a_priced_photo_is_one_message_with_its_cards_once(market: sim.Mar
     assert len(approve_buttons(found)) == 1  # the proposal card's, not the carousel's too
     carousel = found[1].payload
     assert isinstance(carousel, CarouselCardPayload)
-    assert all(item.id != "main-menu" for item in carousel.items)  # the proposal card has it
+    assert carousel.root_cta is None  # Main menu is on the proposal card, not the sales too
     assert_each_card_once(answer)
 
 
